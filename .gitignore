@@ -1,0 +1,64 @@
+# =====================================================================
+# ARGUS -- was gesichert wird und was nicht.
+#
+# Gesichert werden NUR die Quelldateien: Setup1-4.py, Setup_Dashboard.py,
+# setup_ssh.ps1, README.md/README.de.md, SECURITY.md, LICENSE und assets/.
+# Alles andere ist entweder geheim oder aus den Generatoren reproduzierbar.
+# =====================================================================
+
+# --- GEHEIM: darf das Geraet nie verlassen -------------------------------
+# API_Tokens enthaelt u.a. den PRIVATEN SSH-Key der Action-Engine, den
+# Fernet-Key (entschluesselt alle Chatverlaeufe), Gemini-/HF-/Telegram-Tokens.
+# Git vergisst nichts: einmal committet, bleibt es in der Historie.
+API_Tokens/
+# voice_ref/ enthaelt Stimmaufnahmen -- biometrische Daten des Besitzers oder
+# fremdes, geschuetztes Material. Nur die Anleitung darin ist oeffentlich.
+voice_ref/*
+!voice_ref/README.md
+# Privates Entscheidungsprotokoll und persoenliche Projektdokumentation --
+# bewusst nicht im Repo.
+ENTSCHEIDUNGEN.md
+Argus_Projektdokumentation.docx
+.env
+.env.*
+*.pem
+*.ppk
+id_ed25519
+id_rsa
+
+# --- MITZUSICHERN: nicht generierbar ------------------------------------
+# assets/fonts/ enthaelt die Schriftdateien der Oberflaeche (OFL). Binaerdateien
+# kann kein Generator erzeugen -- sie gehoeren ins Repo, sonst
+# steht die Oberflaeche nach einem frischen Klon ohne Schriften da.
+!assets/
+!assets/**
+
+# --- GENERIERT: kommt aus Setup1-4 + Setup_Dashboard ---------------------
+rag_backend/
+alembic/
+alembic.ini
+docker-compose.yml
+Dockerfile.blackwell
+Dockerfile.qdrant
+pytest.ini
+calc_sandbox/
+searxng_config/
+stt_service/
+tts_service/
+# setup_common.py entsteht aus dem SETUP_COMMON_PY-String in Setup1.py
+setup_common.py
+
+# --- Laufzeit-Ballast ----------------------------------------------------
+model_cache/
+documents_to_ingest/
+__pycache__/
+*.py[cod]
+*.log
+
+# --- Sicherungskopien ----------------------------------------------------
+*.bak
+*.bak.*
+~$*
+
+# Sicherungskopien der Projektdokumentation
+Argus_Projektdokumentation_vor_*.docx
