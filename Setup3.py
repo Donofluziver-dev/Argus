@@ -492,6 +492,8 @@ class BaseTool(ABC):
             task_id=task.get("id"),
             task_scope=task_scope,
             task_description=(task.get("text") or ""),
+            # Ein Kanal genuegt: mit offener Chat-Karte kein Telegram-Doppel.
+            notify_telegram=not has_chat,
         )
         await _dispatch_confirmation_event("pending", req)
         resolved = await confirmation_store.wait_for_resolution(req.id)
@@ -1013,6 +1015,7 @@ class ConfirmationStore:
         task_id: Optional[str] = None,
         task_scope: bool = False,
         task_description: str = "",
+        notify_telegram: bool = True,
     ) -> ConfirmationRequest:
         self._clean_expired()
         try:
@@ -1039,11 +1042,14 @@ class ConfirmationStore:
             _save_state(state)
 
         log.info(f"Confirmation erstellt: {req.id} fuer {tool_name}")
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._notify_telegram(req))
-        except RuntimeError:
-            pass
+        #--- Kommt die Anfrage aus einem Chat mit Freigabe-Karte (Dashboard, Argus
+        #--- Desktop), entscheidet der Nutzer dort -- kein zweiter Weg ueber Telegram.
+        if notify_telegram:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._notify_telegram(req))
+            except RuntimeError:
+                pass
         return req
 
     async def _notify_telegram(self, req: ConfirmationRequest):
@@ -3657,6 +3663,27 @@ async def test_webui_channel_still_needs_telegram(monkeypatch, audit_calls, task
     out = await tool.run({}, user_id=0)
     assert out.success is False and tool.executed is False
     assert audit_calls[-1]["status"] == "confirmation_no_channel"
+
+
+async def test_chat_channel_skips_telegram(monkeypatch, audit_calls, task_store):
+    # Ein Kanal genuegt: mit offener Chat-Karte (Dashboard, Argus Desktop) keine
+    # zweite Freigabe-Anfrage per Telegram -- ohne Karte (Proxy) weiterhin schon.
+    import asyncio
+    sent = []
+
+    async def _fake_notify(req):
+        sent.append(req.id)
+
+    store = task_store.ConfirmationStore()
+    monkeypatch.setattr(store, "_notify_telegram", _fake_notify)
+    common = dict(tool_name="run_powershell", tool_class="write", parameters={},
+                  impact_description="test", requested_by=0)
+    store.create(**common, notify_telegram=False)
+    await asyncio.sleep(0)
+    assert sent == []
+    req = store.create(**common)
+    await asyncio.sleep(0)
+    assert sent == [req.id]
 
 
 def test_resolution_writes_audit(monkeypatch, audit_calls, task_store):

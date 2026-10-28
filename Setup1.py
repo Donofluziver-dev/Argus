@@ -796,6 +796,10 @@ ui:
           # max_total_num_tokens im Log pruefen (Vision-Encoder kostet VRAM).
           - SGLANG_ENABLE_MULTIMODAL=${SGLANG_ENABLE_MULTIMODAL:-}
         shm_size: 16gb
+        # Argus Desktop (Modus Argus Code) spricht SGLang direkt an. Nur loopback,
+        # geschuetzt durch --api-key.
+        ports:
+          - "127.0.0.1:30000:30000"
         command: >
           bash -c '
           if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$$(python /usr/local/bin/decrypt_secret.py /run/secrets/hf_token)"; fi;

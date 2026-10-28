@@ -3706,6 +3706,26 @@ async def plan_review_node(state: State):
     }
 
 
+#--- Ankuendigung ohne Tat (siehe agent_node): kurzer Satz in Ich-/Lass-mich-Form
+#--- mit Handlungsverb, ohne Frage und ohne Vergangenheitsform. "Ich habe
+#--- nachgesehen: 120 GB frei." ist eine Antwort und faellt NICHT darunter.
+_INTENT_START_RE = re.compile(
+    r"^(ich|lass mich|lassen sie mich|moment|einen moment|ok(ay)?,? ich|gut,? ich|"
+    r"let me|i'll|i will|i am going to|i'm going to)\b", re.IGNORECASE)
+_INTENT_VERB_RE = re.compile(
+    r"\b(pr[uü]f|ruf|schau|such|ermittl|les|f[uü]hr|start|hol|check|frag|seh|guck|"
+    r"look|fetch|run|search|query|analysier|berechn|[uü]berpr[uü]f)", re.IGNORECASE)
+_INTENT_PAST_RE = re.compile(r"\b(habe|hab|hatte|wurde|ergab|ergibt|i have|i've|found)\b", re.IGNORECASE)
+
+
+def _is_intent_only(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or len(t) > 220 or "?" in t or "\n\n" in t:
+        return False
+    return bool(_INTENT_START_RE.search(t) and _INTENT_VERB_RE.search(t)
+                and not _INTENT_PAST_RE.search(t))
+
+
 def route_agent_node(state: State):
     blackboard = state.get("blackboard") or {}
     if blackboard.get("status") == "init":
@@ -4008,6 +4028,22 @@ async def agent_node(state: State):
             "answer as text. Do not just think again.]"
         ))
         response = await llm_call.ainvoke(messages + [nudge], max_tokens=dynamic_max_tokens)
+    # Ankuendigung ohne Tat: Qwen schreibt im Nicht-Denk-Modus gern nur
+    # "Ich pruefe ... direkt." und endet ohne Tool-Call -- der Turn galt damit
+    # als fertig. Kurzer Satz, der eine eigene Handlung ankuendigt, bei
+    # verfuegbaren Tools: genau EINMAL nachfassen. Echte Antworten (lang, mit
+    # Ergebnis) fallen nicht unter das Muster.
+    elif (not response.tool_calls and active_tools and isinstance(response.content, str)
+            and _is_intent_only(response.content)):
+        log.info("Agent-Node: Ankuendigung ohne Tool-Call -- fasse einmal nach.")
+        nudge = HumanMessage(content=(
+            "[System note: you announced an action but did not call a tool. "
+            "Emit the corresponding tool call NOW instead of describing it. "
+            "If no tool fits, answer the question directly.]"
+        ))
+        retry = await llm_call.ainvoke(messages + [response, nudge], max_tokens=dynamic_max_tokens)
+        if retry.tool_calls or (isinstance(retry.content, str) and retry.content.strip()):
+            response = retry
     if response.tool_calls and isinstance(response.content, str) and response.content.strip():
         response.content = ""
     elif isinstance(response.content, str):
