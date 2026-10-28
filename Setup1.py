@@ -4738,6 +4738,9 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
         #--- Laufender Werkzeugschritt: (Startzeit, Index in schritte). Seine Dauer
         #--- steht erst fest, wenn etwas anderes kommt -- dann wird er geschlossen.
         offener_schritt = None
+        #--- Text nach einem Werkzeugschritt beginnt einen neuen Absatz. Sonst klebt
+        #--- eine Ankuendigung ("Ich pruefe ...") direkt an der Antwort danach.
+        nach_werkzeug = False
 
         def _record_once():
             #--- Genau einmal je Turn. Zaehlt die ROH gestreamte Ausgabe, nicht die
@@ -4798,6 +4801,7 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                     offener_schritt = (time.monotonic(), len(schritte) - 1)
                     yield _orb_sse({"type": "tool", "emoji": status[0], "label": status.strip(),
                                     "index": len(schritte) - 1})
+                    nach_werkzeug = True
                     continue
                 #--- Quellen des Turns, durchlaufend nummeriert im Agenten. Sie tragen
                 #--- die Nummern, mit denen die Antwort sie belegt.
@@ -4809,6 +4813,11 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                 out = chunk.get("output")
                 if not out:
                     continue
+                if nach_werkzeug:
+                    nach_werkzeug = False
+                    bisher = "".join(answer_parts)
+                    if bisher.strip() and not bisher.endswith(("\n", " ")) and not out.startswith(("\n", " ")):
+                        out = "\n\n" + out
                 if _ttft_ms is None:
                     _ttft_ms = (time.monotonic() - _t0) * 1000.0
                 if first_answer:
