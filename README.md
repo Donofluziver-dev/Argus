@@ -605,7 +605,6 @@ Please do not report vulnerabilities as public issues; see [SECURITY.md](SECURIT
   read-alouds.
 - The measurements above come from a home-made suite. They show that the system solves
   its own tasks, nothing more.
-<img width="412" height="897" alt="hintergrund2" src="https://github.com/user-attachments/assets/273641fe-7a00-4312-ac2f-050b51dbf2f8" />
 
 ---
 
