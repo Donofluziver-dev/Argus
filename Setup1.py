@@ -4681,6 +4681,33 @@ def dashboard_chat_delete(chat_id: int, db: Session = Depends(get_db),
     return {"status": "deleted", "id": chat_id}
 
 
+class DashboardWebSearchIn(BaseModel):
+    query: str
+    sources: int = 3
+
+
+@app.post("/v1/dashboard/web_search", tags=["Dashboard"])
+@limiter.limit(os.getenv("DASHBOARD_WEB_SEARCH_RATE_LIMIT", "20/minute"))
+async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
+                               user: User = Depends(dashboard_user),
+                               csrf = Depends(check_dashboard_csrf)):
+    #--- Websuche fuer Argus Desktop (Argus Code): dieselbe Engine wie das Werkzeug
+    #--- web_search (SearxNG -> Ranking -> Volltext, SSRF-Schutz, Injection-Check),
+    #--- aber ohne Agenten-Turn. SearxNG ist bewusst nicht auf dem Host veroeffentlicht.
+    from rag_backend.agent import _search_and_read, quellen_liste, quellen_zuruecksetzen
+    q = (body.query or "").strip()[:300]
+    if not q:
+        raise HTTPException(status_code=400, detail="Leere Suchanfrage.")
+    quellen_zuruecksetzen()
+    text = await _search_and_read(
+        q,
+        n_sources=max(1, min(int(body.sources or 3), 5)),
+        per_source_chars=int(os.getenv("WEB_SEARCH_PER_SOURCE_CHARS", 7000)),
+        injection_guard=True,
+    )
+    return {"query": q, "text": text, "sources": quellen_liste()}
+
+
 @app.post("/v1/dashboard/chat", tags=["Dashboard"])
 @limiter.limit(os.getenv("DASHBOARD_CHAT_RATE_LIMIT", "60/minute"))
 async def dashboard_chat(body: DashboardChatIn, request: Request,
