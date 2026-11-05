@@ -449,6 +449,21 @@ Desktop-App, das Browser-Dashboard fällt dabei weg. In der Entwicklungsversion 
   deutlich mehr Kontext.
 - **MCP-Werkzeuge.** Eingerichtete MCP-Server werden zu Werkzeugen, die der Agent nutzen kann.
 
+Ein erster Blick auf die Entwicklungsversion, bei der Arbeit an einem Demo-Projekt.
+
+![Argus Code fragt vor dem Anlegen einer Datei nach Freigabe und zeigt die ganze Änderung](docs/images/app-approval.png)
+
+*Argus Code fragt, bevor er schreibt: Man sieht die ganze Änderung und entscheidet selbst.
+Rechts steht, wie der Kontext gerade belegt ist.*
+
+![Argus Code meldet die fertige Aufgabe: 13 von 13 Tests bestanden](docs/images/app-result.png)
+
+*Die fertige Aufgabe: was gebaut wurde, welche Tests liefen und was sich geändert hat.*
+
+![Einstellungen von Argus Code: Rechte-Modus, vertraute Ordner und MCP-Server](docs/images/app-settings.png)
+
+*Rechte-Modus, vertraute Ordner und MCP-Server in den Einstellungen.*
+
 Einen Termin gibt es noch nicht: Die App kommt, wenn sie zuverlässig läuft. Bis dahin läuft
 Argus so, wie es diese README beschreibt. Wer informiert bleiben will, beobachtet dieses
 Repository.

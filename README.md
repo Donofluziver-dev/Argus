@@ -443,6 +443,21 @@ development version:
   context.
 - **MCP tools.** MCP servers you set up become tools the agent can use.
 
+A first look at the development version, working on a demo project. The interface is German.
+
+![Argus Code asks for approval before creating a file and shows the full change](docs/images/app-approval.png)
+
+*Argus Code asks before it writes: you see the whole change and decide. On the right, how the
+context is being used.*
+
+![Argus Code reports the finished task: 13 of 13 tests passed](docs/images/app-result.png)
+
+*The finished task: what was built, which tests ran and what changed.*
+
+![Argus Code settings: permission modes, trusted folders and MCP servers](docs/images/app-settings.png)
+
+*Permission modes, trusted folders and MCP servers in the settings.*
+
 There is no date yet: the app ships when it is reliable. Until then, Argus runs the way this
 README describes. Watch this repository to hear when it lands.
 
