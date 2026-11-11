@@ -20,8 +20,10 @@ roles, administrator and user.
   browser interface, compose files and services are ordinary files that can be read, reviewed
   and tested. Setup is one script: `python setup/init_stack.py`.
 - **Roles are administrator and user.** The role `chat` is now `user`; existing accounts are
-  migrated at start. New accounts without an explicit role become users. Users get no file
-  tools and no code sandbox until each account has a workspace of its own.
+  migrated at start. New accounts without an explicit role become users. Users get no cloud
+  or sub-agent tools and cannot change the knowledge base.
+- **Knowledge base uploads** go through *Monitor › Hochladen*; files dropped into the chat
+  belong to the account's own area.
 - **Argus addresses the person who is logged in.** The name is derived from the account name
   ("anna.schmidt" becomes "Anna Schmidt"). The global `OWNER_NAME` setting is gone.
 - **Model.** llama.cpp with Qwen3.6-35B-A3B, experts partly in RAM, instead of SGLang with a
@@ -38,6 +40,12 @@ roles, administrator and user.
 
 ### Security
 
+- **The code sandbox no longer mounts the workspace.** It used to see the files of every
+  account read-only. Now the backend sends it only the files of the requesting account, runs
+  are executed one at a time, and before and after each run all leftover processes and
+  everything in `/tmp` are removed. PowerShell is no longer part of the sandbox image.
+- Administrators' file tools (`read_document`, `ingest_document`, `fs_*`) cannot reach
+  the areas of other accounts.
 - **Code execution through `calculate`.** The expression evaluator in the sandbox passed
   string literals on to sympy, which evaluates them as Python. A crafted expression could run
   code in the sandbox and read the mounted workspace. Inherited from the earlier edition. The evaluator now
@@ -56,6 +64,17 @@ roles, administrator and user.
 
 ### Added
 
+- **One file area per account.** Every account, not only administrators, can attach files
+  in the chat (drag and drop or paper clip), let Argus read and analyse them in the sandbox
+  and download the results (download pills above the answer, dialog *Meine Dateien*).
+  Files live under `users/<id>/Dateien` and `users/<id>/Ergebnisse`; all access goes through
+  `rag_backend/user_files.py`. Quota `USER_FILES_MAX_MB` (500), retention
+  `USER_FILES_RETENTION_HOURS` (168).
+- **Guided setup.** `install.cmd` (Windows, plain batch) and `install.sh` (Linux) start
+  `setup/install.py`: it checks or, after asking, installs Python and Docker Desktop,
+  checks GPU and RAM, asks for folders and the operating mode, creates secrets and `.env`,
+  downloads the models with resume and SHA-256 verification (`setup/models.json`, pinned
+  revisions), builds and starts the stack and waits until it answers.
 - **Network isolation.** Model, embedding, reranker, databases, speech and tracing run in a
   network without egress; `setup/check_networks.py` checks the rules in CI.
 - **Lock after company data.** Once a conversation has read documents or files, every outbound

@@ -1,0 +1,89 @@
+{
+  "_comment": "Modelle, die die Installation laedt. Jede Datei ist auf eine Revision des Hugging-Face-Repos festgelegt und wird nach dem Laden per SHA-256 geprueft. Ziel ist der Ordner ARGUS_MODELS_DIR; 'target' ist der Pfad darin.",
+  "models": [
+    {
+      "id": "llm",
+      "title": "Sprachmodell Qwen3.6-35B-A3B (Q4, mit MTP-Kopf)",
+      "license": "Apache-2.0",
+      "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+      "revision": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+      "files": [
+        {
+          "path": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+          "target": "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf",
+          "size": 22853663008,
+          "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+        }
+      ]
+    },
+    {
+      "id": "embed",
+      "title": "Einbettung bge-m3 (Dokumentensuche)",
+      "license": "MIT",
+      "repo": "gpustack/bge-m3-GGUF",
+      "revision": "2d48f1737679ad900d5c26c5aad5410e9c70fdca",
+      "files": [
+        {
+          "path": "bge-m3-Q8_0.gguf",
+          "target": "bge-m3-Q8_0.gguf",
+          "size": 634553760,
+          "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167"
+        }
+      ]
+    },
+    {
+      "id": "rerank",
+      "title": "Reranker bge-reranker-v2-m3 (Dokumentensuche)",
+      "license": "Apache-2.0",
+      "repo": "gpustack/bge-reranker-v2-m3-GGUF",
+      "revision": "3093af03b1a635e67b084b1d8c03c5f5e020fd05",
+      "files": [
+        {
+          "path": "bge-reranker-v2-m3-Q8_0.gguf",
+          "target": "bge-reranker-v2-m3-Q8_0.gguf",
+          "size": 635676416,
+          "sha256": "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3"
+        }
+      ]
+    },
+    {
+      "id": "whisper",
+      "title": "Spracherkennung faster-whisper-large-v3-turbo",
+      "license": "MIT",
+      "repo": "dropbox-dash/faster-whisper-large-v3-turbo",
+      "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+      "files": [
+        {
+          "path": "config.json",
+          "target": "faster-whisper-large-v3-turbo/config.json",
+          "size": 2263,
+          "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"
+        },
+        {
+          "path": "model.bin",
+          "target": "faster-whisper-large-v3-turbo/model.bin",
+          "size": 1617884929,
+          "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "target": "faster-whisper-large-v3-turbo/preprocessor_config.json",
+          "size": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+        },
+        {
+          "path": "tokenizer.json",
+          "target": "faster-whisper-large-v3-turbo/tokenizer.json",
+          "size": 2710337,
+          "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+        },
+        {
+          "path": "vocabulary.json",
+          "target": "faster-whisper-large-v3-turbo/vocabulary.json",
+          "size": 1068114,
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+        }
+      ]
+    }
+  ]
+}

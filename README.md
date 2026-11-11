@@ -60,11 +60,15 @@ isolation is checked on every change, and every lock is recorded in the audit lo
   were found in. That list comes from the search, not from the model's text.
 - **Web research** with sources through its own SearXNG instance, separate from conversations
   with company data.
-- **Dropping a file into the chat:** a PDF or other document is stored in the workspace, Argus
-  reads it and works with it. A conversation with an attached file counts as a conversation
-  with company data from the start. Administrators only for now.
-- **Calculation and analysis** in a sandbox without network access, administrators only for
-  now.
+- **Dropping or attaching a file in the chat:** a PDF, spreadsheet or other document is stored
+  in the account's own area, Argus reads it and works with it. A conversation with an attached
+  file counts as a conversation with company data from the start. Every account sees only its
+  own files; administrators do not see other accounts' files either.
+- **Calculation and analysis** in a sandbox without network access that receives only the
+  account's own files.
+- **Downloading results:** reports, tables and other files Argus creates are offered for
+  download above the answer and under *Meine Dateien*. Files are deleted after seven days;
+  500 MB per account.
 - **Speech:** recognition (Whisper) and synthesis, both local.
 - **Accounts and roles:** administrators manage documents and accounts and see the monitor;
   users ask, search the documents and research. Argus addresses each person by name.
@@ -73,7 +77,7 @@ isolation is checked on every change, and every lock is recorded in the audit lo
 
 ![Web research in its own conversation: searches, pages read, answer with sources](docs/images/recherche.png)
 
-![A PDF dropped into the chat: Argus reads the report and summarises it](docs/images/datei-im-chat.png)
+![A user attaches a table: Argus reads it, analyses it in the sandbox and offers the result as a CSV download](docs/images/datei-auswertung.png)
 
 ![Monitor for administrators: throughput, load, tool calls, documents, audit log](docs/images/monitor.png)
 
@@ -93,7 +97,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 23 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 267 for the backend, 25 for the expression evaluator | on every change in CI, together with the network isolation check |
+| Automated tests | 300 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why web search, and how it is secured
 
@@ -187,8 +191,14 @@ model behaving well.
   refuse internal addresses, including after redirects.
 - **No way onto a machine:** Argus cannot execute anything on a computer. There is no admin
   account, no host credential in any container and no switch that changes this.
-- **Roles** are enforced at every backend route. Users get no cloud, sub-agent, file or
-  sandbox tools and cannot change the knowledge base.
+- **Roles** are enforced at every backend route. Users get no cloud or sub-agent tools and
+  cannot change the knowledge base.
+- **One area per account:** uploads and results live under `users/<id>/Dateien` and
+  `users/<id>/Ergebnisse`. Every access goes through one module (`rag_backend/user_files.py`)
+  that cleans names, pins the path to exactly that folder and rejects links. Administrators'
+  tools cannot reach other accounts' areas either. The code sandbox no longer mounts the
+  workspace: the backend sends it only the account's files, runs execute one at a time and
+  everything, including leftover processes, is removed afterwards.
 - **Login:** HttpOnly session cookie, Argon2, no self-registration, lockout after five failed
   attempts. The first administrator account requires the installation's setup token.
 - **UI:** loads nothing from other hosts, Content-Security-Policy, host and origin checks
@@ -201,9 +211,8 @@ model behaving well.
 
 These are known and not solved yet:
 
-- **Users have no workspace of their own yet.** The workspace is one shared folder that also
-  holds uploads and every account's long-term memory. Users therefore get no file tools and
-  no code sandbox and cannot upload files; that is reserved for administrators.
+- Files in the per-account areas are separated inside Argus, not encrypted per account: whoever
+  operates the server or Docker can read them.
 - No source-level permissions in document search, no SSO (OIDC).
 - With the cloud module enabled, the router starts an administrator's background mission
   without a confirmation card.
@@ -216,37 +225,31 @@ These are known and not solved yet:
 - No TLS proxy in the stack; behind a proxy all users share one rate limit.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) are fixed parts of the
   stack; for an offer to third parties both should be optional or replaceable.
-- No lock file for Python packages; models are downloaded without checksums.
+- No lock file for Python packages. The installer verifies the models by SHA-256.
+- `install.sh` is only partly tested (syntax, ShellCheck, the Python steps on Windows).
 
 Details: [README.de.md](README.de.md#offen-für-einen-einsatz-im-unternehmen).
 
 ## Setup
 
 Tested on Windows 11 with Docker Desktop (WSL2). Linux with Docker Engine and the NVIDIA
-Container Toolkit is intended but not fully tested yet.
+Container Toolkit is intended but not yet tested on real hardware. Requirements: an NVIDIA GPU
+(measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models.
 
-1. Requirements: Docker with NVIDIA support, an NVIDIA GPU (measured with 16 GB), Python 3.10+.
-2. Create secrets and `.env`:
+**Guided setup:** run `install.cmd` on Windows (double-click) or `./install.sh` on Linux. It
+finds or installs Python (asking first), checks Docker (on Windows it offers to install Docker
+Desktop and WSL via `winget`), checks GPU and RAM, asks for the workspace and model folders and
+whether this is a single machine or a server, creates the secrets and `.env`, downloads the
+models listed in `setup/models.json` (pinned to a Hugging Face revision, verified by SHA-256,
+resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
+running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
+`--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
+there is deliberately no EXE.
 
-   ```powershell
-   python -m pip install cryptography
-   python setup/init_stack.py
-   ```
-
-   This creates `API_Tokens/` and `.env` from `.env.example`. Existing files are never
-   overwritten; only file names are printed, never values. Use `--workspace` and `--models`
-   for folders other than `C:\Argus_Workspace` and `C:\Argus_Models`.
-3. Check `.env`: the model and `LLM_N_CPU_MOE` for your GPU.
-4. Put the models into `ARGUS_MODELS_DIR`: the GGUF file named in `LLM_MODEL_FILE`,
-   `bge-m3-Q8_0.gguf`, `bge-reranker-v2-m3-Q8_0.gguf`, and Whisper as a folder
-   (see README.de.md). The services have no egress and download nothing themselves.
-5. `docker compose up -d --build`
-6. Open `http://127.0.0.1:7860`. The page asks for a user name, a password and the setup
-   token from `.env` (`DASHBOARD_SETUP_TOKEN`). This account becomes the administrator; it
-   creates further accounts under *Monitor › Konten*, as user or administrator.
-7. Documents: as administrator, drag files into the chat, then start the ingest under
-   *Monitor › Überblick*. The 30 fictional documents in `eval/retrieval/corpus` are good for
-   trying it out.
+Then open `http://127.0.0.1:7860`. The page asks for a user name, a password and the setup
+token from `.env` (`DASHBOARD_SETUP_TOKEN`). This account becomes the administrator; it creates
+further accounts under *Monitor › Konten*. Manual setup without the installer: see
+[README.de.md](README.de.md#von-hand).
 
 For a server with several users, put a TLS reverse proxy in front of port 7860 and set
 `DASHBOARD_ORIGINS`, `TRUSTED_HOSTS` and `DASHBOARD_TRACES_URL` (see README.de.md).
@@ -265,8 +268,10 @@ uv pip install -r rag_backend/pyproject.toml
 python -m pytest rag_backend/tests -q
 ```
 
-Run them in a folder without a `.env` (it would override the test values). CI runs the tests,
-validates the compose files and checks the network isolation on every push to `main`.
+Run them in a folder without a `.env` (it would override the test values). The sandbox tests
+run inside the sandbox image, the only place where it cleans up between runs (see
+README.de.md). CI runs both, validates the compose files, checks the network isolation and
+runs ShellCheck on the installer on every push to `main`.
 
 ## License
 

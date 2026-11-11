@@ -1,18 +1,14 @@
 FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget libicu-dev \
-    && wget -q https://github.com/PowerShell/PowerShell/releases/download/v7.4.18/powershell-7.4.18-linux-x64.tar.gz \
-    && echo "21962bfc832119fc8a58e5eba24bc48f0d31707ce94a4e48a90178a223eba619  powershell-7.4.18-linux-x64.tar.gz" | sha256sum -c - \
-    && mkdir -p /opt/microsoft/powershell/7 \
-    && tar zxf powershell-7.4.18-linux-x64.tar.gz -C /opt/microsoft/powershell/7 \
-    && chmod +x /opt/microsoft/powershell/7/pwsh \
-    && ln -s /opt/microsoft/powershell/7/pwsh /usr/bin/pwsh \
-    && rm powershell-7.4.18-linux-x64.tar.gz \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --upgrade pip
 COPY app.py /app/app.py
 RUN pip install --no-cache-dir fastapi uvicorn sympy pandas tabulate openpyxl
 RUN useradd -m -u 1000 sandbox && chown -R sandbox:sandbox /app
+# Schaltet das Aufraeumen zwischen zwei Laeufen ein (Prozesse beenden, /tmp leeren).
+# Ausserhalb dieses Abbilds bleibt es aus, siehe app.py _cleanup_sandbox.
+ENV ARGUS_SANDBOX_CONTAINER=1
 USER sandbox
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]

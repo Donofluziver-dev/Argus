@@ -14,6 +14,7 @@ voice_ref/*
 !voice_ref/README.md
 
 # --- Laufzeit ---
+.venv-setup/
 __pycache__/
 *.pyc
 .pytest_cache/

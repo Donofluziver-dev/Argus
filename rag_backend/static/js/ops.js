@@ -449,6 +449,13 @@ function start() {
     leeren.dataset.gebunden = "1";
     leeren.addEventListener("click", clearCollection);
   }
+  const upl = $("coll-upload");
+  if (upl && !upl.dataset.gebunden) {
+    upl.dataset.gebunden = "1";
+    upl.addEventListener("click", function () {
+      if (window.argusFiles && window.argusFiles.open) window.argusFiles.open();
+    });
+  }
   const ing = $("coll-ingest");
   if (ing && !ing.dataset.gebunden) {
     ing.dataset.gebunden = "1";

@@ -26,15 +26,23 @@ jobs:
       # keine laufenden Container.
       - name: Tests
         run: python -m pytest rag_backend/tests -q -p no:cacheprovider
+      # Im Sandbox-Abbild, nicht auf dem Runner: Dort raeumt die Sandbox zwischen zwei
+      # Laeufen auf (Prozesse beenden, /tmp leeren), und genau das wird mitgeprueft.
       - name: Calc-Sandbox Tests
         run: |
-          uv pip install --system sympy
-          python -m pytest calc_sandbox -q -p no:cacheprovider
+          docker build -q -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
+          docker run --rm --user root -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$PWD/calc_sandbox:/src" -w /src --entrypoint sh argus-sandbox-test \
+            -c "pip install -q pytest httpx && exec python -m pytest test_app.py -q -p no:cacheprovider"
       # Die Oberflaeche hat keinen Build-Schritt: ein Tippfehler in einem Skript
       # fiele sonst erst im Browser auf.
       - name: Oberflaeche (JavaScript-Syntax)
         run: |
           for f in rag_backend/static/js/*.js; do node --check "$f"; done
+      - name: Installer-Skripte (ShellCheck)
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
 
   compose:
     runs-on: ubuntu-latest

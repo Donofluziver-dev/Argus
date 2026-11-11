@@ -48,6 +48,25 @@ def _to_container(path_str: str) -> Path:
     return WORKSPACE_CONTAINER / s.lstrip("/\\")
 
 
+def _is_user_isolated_path(target: Path, workspace_real: Path) -> bool:
+    """Prueft, ob ein Pfad innerhalb von users/<id>/Dateien oder users/<id>/Ergebnisse liegt.
+    Dateien und Ergebnisse sind isolierte Benutzerbereiche und fuer fs-Tools tabu.
+    Gedaechtnis (users/<id>/MEMORY.md und users/<id>/memory/) bleibt zulaessig."""
+    try:
+        parts = target.resolve(strict=False).relative_to(workspace_real).parts
+        if len(parts) >= 3 and parts[0].lower() == "users" and parts[2].lower() in ("dateien", "ergebnisse"):
+            return True
+    except (ValueError, RuntimeError, OSError):
+        pass
+    try:
+        parts_orig = target.relative_to(workspace_real).parts
+        if len(parts_orig) >= 3 and parts_orig[0].lower() == "users" and parts_orig[2].lower() in ("dateien", "ergebnisse"):
+            return True
+    except (ValueError, RuntimeError, OSError):
+        pass
+    return False
+
+
 def _enforce_whitelist(path: Path) -> Path:
     """Resolvt Path und prueft dass er unter WORKSPACE_CONTAINER bleibt.
 
@@ -69,6 +88,10 @@ def _enforce_whitelist(path: Path) -> Path:
     except ValueError:
         raise PermissionError(
             f"Path outside workspace whitelist ({WORKSPACE_WIN}): {path}"
+        )
+    if _is_user_isolated_path(path, workspace_real) or _is_user_isolated_path(real, workspace_real):
+        raise PermissionError(
+            f"Access denied: '{path}' is inside isolated user storage (Dateien/Ergebnisse)."
         )
     return real
 
@@ -205,13 +228,18 @@ def fs_list_directory(path: str = "C:\\Argus_Workspace", recursive: bool = False
     p = _enforce_whitelist(_to_container(path))
     if not p.is_dir():
         raise NotADirectoryError(f"Not a directory: {path}")
+    workspace_real = WORKSPACE_CONTAINER.resolve(strict=False)
     items = []
     if recursive:
         for f in sorted(p.rglob("*")):
+            if _is_user_isolated_path(f, workspace_real):
+                continue
             suffix = "\\" if f.is_dir() else ""
             items.append(f"{_to_windows(f)}{suffix}")
     else:
         for f in sorted(p.iterdir()):
+            if _is_user_isolated_path(f, workspace_real):
+                continue
             suffix = "\\" if f.is_dir() else ""
             items.append(f"{_to_windows(f)}{suffix}")
     _audit("list", _to_windows(p))

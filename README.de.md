@@ -81,12 +81,16 @@ im Auditprotokoll.
   kommt aus der Suche, nicht aus dem Text des Modells, kann also nicht erfunden sein.
 - **Web-Recherche** mit Quellen über eine eigene Suchinstanz, getrennt von Gesprächen mit
   Firmendaten ([Absicherung](#warum-websuche-und-wie-sie-abgesichert-ist)).
-- **Datei in den Chat ziehen:** Eine PDF oder ein anderes Dokument landet im Arbeitsordner,
-  Argus liest es und arbeitet damit. Ein Gespräch mit beigelegter Datei gilt sofort als
-  Gespräch mit Firmendaten. Derzeit nur für Administratoren, siehe
-  [Was fehlt](#was-bis-zum-einsatz-fehlt).
-- **Rechnen und Auswerten** in einer abgeschotteten Sandbox ohne Netz (Python, Tabellen),
-  ebenfalls derzeit nur für Administratoren.
+- **Datei in den Chat ziehen oder anhängen:** Eine PDF, eine Tabelle oder ein anderes Dokument
+  landet im eigenen Bereich des Kontos, Argus liest es und arbeitet damit. Ein Gespräch mit
+  beigelegter Datei gilt sofort als Gespräch mit Firmendaten. Jedes Konto sieht nur seine
+  eigenen Dateien, auch Administratoren sehen die Dateien anderer nicht.
+- **Rechnen und Auswerten** in einer abgeschotteten Sandbox ohne Netz (Python, Tabellen). Sie
+  bekommt nur die Dateien des eigenen Kontos.
+- **Ergebnisse herunterladen:** Berichte, Tabellen und andere Dateien, die Argus erzeugt,
+  stehen über der Antwort zum Herunterladen bereit und unter *Meine Dateien*. Dateien und
+  Ergebnisse werden nach sieben Tagen gelöscht (`USER_FILES_RETENTION_HOURS`), je Konto stehen
+  500 MB zur Verfügung (`USER_FILES_MAX_MB`).
 - **Sprache:** Spracherkennung (Whisper) und Sprachausgabe, beides lokal.
 - **Konten und Rollen:** Administratoren verwalten Dokumente und Konten und sehen den Monitor.
   Benutzer fragen, suchen in den Dokumenten und recherchieren. Argus spricht jede Person mit
@@ -97,7 +101,7 @@ im Auditprotokoll.
 
 ![Web-Recherche in einem eigenen Gespräch: Suchen, gelesene Seiten, Antwort mit Quellen](docs/images/recherche.png)
 
-![Eine PDF in den Chat gezogen: Argus liest den Bericht und fasst ihn zusammen](docs/images/datei-im-chat.png)
+![Ein Benutzer hängt eine Tabelle an: Argus liest sie, wertet sie in der Sandbox aus und legt das Ergebnis als CSV zum Herunterladen ab](docs/images/datei-auswertung.png)
 
 ![Monitor für Administratoren: Durchsatz, Auslastung, Werkzeugaufrufe, Dokumente, Auditprotokoll](docs/images/monitor.png)
 
@@ -117,7 +121,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 23 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 267 für das Backend, 25 für den Rechen-Auswerter | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 300 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -187,11 +191,9 @@ Argus läuft und ist gemessen, aber bisher auf einem einzelnen Rechner. Für ein
 vielen Personen fehlen vor allem:
 
 - **Anmeldung über das Firmenverzeichnis (SSO)** statt eigener Konten.
-- **Ein eigener Bereich je Konto**, damit auch Benutzer Dateien in den Chat geben und
-  Ergebnisse herunterladen können.
 - **Rechte der Quellen:** Die Wissensbasis ist für alle Konten dieselbe.
-- **Betrieb:** TLS-Proxy, eine geführte Installation, ein Modell-Dienst für viele gleichzeitige
-  Nutzer.
+- **Betrieb:** ein TLS-Proxy und ein Modell-Dienst für viele gleichzeitige Nutzer. Eine
+  geführte Installation gibt es (siehe [Einrichten](#einrichten)).
 
 Die vollständige Liste steht unter
 [Offen für einen Einsatz im Unternehmen](#offen-für-einen-einsatz-im-unternehmen).
@@ -266,7 +268,8 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
 | Fragen, Dokumente durchsuchen, im Web recherchieren, rechnen, Sprache | ja | ja |
 | Eigene Chats | nur die eigenen | nur die eigenen |
 | Dokumente hochladen, in die Wissensbasis aufnehmen, löschen | nein | ja |
-| Dateien im Arbeitsordner lesen, Code in der Sandbox ausführen | nein | ja |
+| Eigene Dateien in den Chat geben, auswerten, Ergebnisse herunterladen | ja | ja |
+| Dateien anderer Konten | nein | nein |
 | Konten anlegen, Monitor, Audit, Ablaufverfolgung | nein | ja |
 | Cloud-Modelle (nur mit Cloud-Modul) | nein | ja |
 
@@ -284,9 +287,9 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   dazu bringen, Daten über eine Suchanfrage abfließen zu lassen. Liest ein Gespräch
   Firmendaten, ist darin jeder Weg nach außen gesperrt (`EGRESS_AFTER_SENSITIVE=block`):
   Websuche, Seitenabruf, Wetter, Routen, Cloud-Modelle, Missionen und fremde MCP-Werkzeuge.
-  Als Firmendaten zählen Dokumentensuche und -abruf, Dateien und die Code-Sandbox (sie kann
-  den Arbeitsordner lesen). Eine beigelegte Datei zählt schon, bevor sie gelesen ist: Nennt
-  eine Nachricht eine Datei aus dem Ordner `Uploads`, gilt das Gespräch von da an als
+  Als Firmendaten zählen Dokumentensuche und -abruf, Dateien und die Code-Sandbox (sie bekommt
+  die Dateien des Kontos). Eine beigelegte Datei zählt schon, bevor sie gelesen ist: Nennt
+  eine Nachricht eine Datei aus dem eigenen Bereich, gilt das Gespräch von da an als
   Gespräch mit Firmendaten. Abgewiesene Schritte stehen mit einem Schloss im Chat. Die
   Sperre gilt auch für Unteragenten und bleibt nach einem
   Neustart bestehen. Jede Sperre landet im Audit, ohne Inhalte. Für eine
@@ -294,8 +297,16 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
 - **Fremde Inhalte:** Websuche und Seitenabruf laufen durch eine Injection-Prüfung
   (`WEB_INJECTION_GUARD`). Der Seitenabruf sperrt interne Adressen, auch nach Weiterleitungen.
 - **Rollen:** Geprüft wird an jeder Route im Backend, nicht in der Oberfläche. Benutzer
-  bekommen die Werkzeuge für Cloud, Unteragenten, Dateien und Sandbox gar nicht erst
+  bekommen die Werkzeuge für Cloud, Unteragenten und die Wissensbasis gar nicht erst
   angeboten, und der Prompt beschreibt sie ihnen nicht.
+- **Bereich je Konto:** Hochgeladene Dateien und Ergebnisse liegen unter
+  `users/<Konto>/Dateien` und `users/<Konto>/Ergebnisse` im Arbeitsordner. Jeder Zugriff
+  (Oberfläche, Download, Werkzeuge) läuft über eine Stelle (`rag_backend/user_files.py`), die
+  Namen bereinigt, den Pfad auf genau diesen Ordner festlegt und Verknüpfungen ablehnt. Auch
+  Administratoren erreichen über ihre Werkzeuge keine fremden Bereiche. Die Code-Sandbox
+  bindet den Arbeitsordner nicht mehr ein: Das Backend schickt ihr nur die Dateien des Kontos,
+  sie führt die Läufe nacheinander aus und löscht danach alles, auch zurückgebliebene
+  Prozesse.
 - **Freigaben:** Mit dem Cloud-Modul fragt eine Mission vor dem Versand per Karte im Chat
   nach. Freigeben kann nur das Konto, das sie ausgelöst hat.
 - **Anmeldung:** Sitzung als HttpOnly-Cookie, Passwörter mit Argon2, keine
@@ -316,7 +327,7 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   `CLOUD_MISSION_AUTO_APPROVE=true` fragt jeder Versand nach.
 - **Container:** Ports nur auf `127.0.0.1`, `cap_drop: ALL`, `no-new-privileges`, Speicher- und
   Prozessgrenzen (das Modell bewusst ohne Speichergrenze, siehe Compose). Die Code-Ausführung
-  läuft nur lesend und ohne Geheimnisse. Basis-Images sind per Digest festgelegt, Migrationen
+  hat keine Einbindung des Arbeitsordners und keine Geheimnisse. Basis-Images sind per Digest festgelegt, Migrationen
   schreibgeschützt eingebunden.
 - **Geheimnisse** liegen nie im Repo, sondern in `API_Tokens/` mit Rechten nur für den Besitzer.
 
@@ -325,12 +336,9 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
 Diese Punkte sind bekannt und noch nicht gelöst. Wer Argus mit mehreren Personen betreibt,
 sollte sie kennen.
 
-- **Benutzer haben noch keinen eigenen Arbeitsbereich.** Der Arbeitsordner ist ein
-  gemeinsamer Ordner, in dem auch Uploads und das Langzeitgedächtnis aller Konten liegen.
-  Deshalb bekommen Benutzer keine Datei-Werkzeuge und keine Code-Sandbox und können keine
-  eigenen Dateien hochladen; das ist Administratoren vorbehalten. Unter Administratoren ist
-  der Ordner gemeinsam. Geplant: ein Bereich je Konto oder je Gespräch, mit Hochladen und
-  Herunterladen.
+- **Dateien bleiben lesbar für den Server:** Die Bereiche je Konto trennen die Konten in
+  Argus. Wer den Server oder Docker bedienen darf, liest sie trotzdem. Eine Verschlüsselung je
+  Konto gibt es nicht.
 - **Rechte der Quellen:** Die Dokumentensuche kennt eine gemeinsame Wissensbasis. Für Firmen
   müsste sie die Rechte der Quelle mitprüfen (etwa SharePoint). Die Anmeldung läuft über
   eigene Konten, nicht über SSO (OIDC).
@@ -354,7 +362,10 @@ sollte sie kennen.
   License) gehören fest zum Stapel. Für ein Angebot an Dritte sollten beide abschaltbar oder
   austauschbar sein.
 - **Lieferkette:** Python-Pakete haben keine Lock-Datei, drei Images installieren Pakete ohne
-  feste Version, die Modelle werden ohne Prüfsumme geladen.
+  feste Version. Die Modelle prüft die Installation per SHA-256, wer sie von Hand ablegt,
+  prüft selbst.
+- **Installation unter Linux:** `install.sh` ist nur in Teilen getestet (Syntax,
+  ShellCheck, die Schritte in Python unter Windows), noch nicht auf einem Linux-Server.
 - **Bilder im Chat:** Oberfläche und Backend können Bilder an das Modell weitergeben
   (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj)
   noch nicht; Bildeingabe ist aus und nicht getestet.
@@ -367,46 +378,59 @@ sollte sie kennen.
 ## Einrichten
 
 Getestet unter Windows 11 mit Docker Desktop (WSL2). Linux mit Docker Engine und dem NVIDIA
-Container Toolkit ist vorgesehen, aber noch nicht durchgetestet.
+Container Toolkit ist vorgesehen, aber noch nicht auf echter Hardware durchgetestet.
 
-1. **Voraussetzungen:** Docker mit NVIDIA-Unterstützung, eine NVIDIA-Karte (gemessen mit
-   16 GB, siehe Stellschrauben), Python ab 3.10.
-2. **Geheimnisse und `.env` anlegen:**
+**Voraussetzungen:** eine NVIDIA-Karte (gemessen mit 16 GB), 32 GB Arbeitsspeicher, rund
+30 GB Platz für die Modelle.
 
-   ```powershell
-   python -m pip install cryptography
-   python setup/init_stack.py
-   ```
+### Geführte Installation
 
-   Das legt `API_Tokens/` an (Fernet-Schlüssel, Modell-Schlüssel, JWT, Audit-HMAC,
-   Postgres-Passwort, leere Platzhalter für optionale Schlüssel) und die `.env` aus
-   `.env.example`, mit `SEARXNG_SECRET`, `CANARY_TOKENS` samt Köder-Datei im Arbeitsordner und
-   dem Einrichtungs-Schlüssel für das erste Konto. Vorhandenes bleibt unverändert, ein zweiter
-   Lauf ist harmlos. Ausgegeben werden nur Dateinamen, keine Werte. Mit `--workspace` und
-   `--models` lassen sich andere Ordner als `C:\Argus_Workspace` und `C:\Argus_Models` setzen.
-3. **`.env` prüfen:** Modell und `LLM_N_CPU_MOE` passend zur Grafikkarte.
-4. **Modelle** von Hugging Face nach `ARGUS_MODELS_DIR` legen. Die Dienste hängen in einem
-   Netz ohne Ausgang und laden selbst nichts nach. Nötig sind die Datei aus `LLM_MODEL_FILE`,
-   `bge-m3-Q8_0.gguf` und `bge-reranker-v2-m3-Q8_0.gguf` für die Dokumentensuche, dazu Whisper
-   für die Spracherkennung als Ordner:
+Unter Windows `install.cmd` per Doppelklick starten, unter Linux `./install.sh`. Die
+Installation führt durch diese Schritte:
 
-   ```powershell
-   hf download mobiuslabsgmbh/faster-whisper-large-v3-turbo --revision 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf --local-dir C:\Argus_Models\faster-whisper-large-v3-turbo
-   ```
-5. **Starten:**
+1. **Python** ab 3.10 suchen. Fehlt es, fragt sie und installiert Python 3.13 über `winget`
+   (Windows) oder `apt-get` (Debian, Ubuntu).
+2. **Docker** prüfen. Unter Windows bietet sie an, Docker Desktop und WSL über `winget` zu
+   installieren, und startet Docker Desktop, wenn es nicht läuft. Unter Linux nennt sie die
+   Anleitung und prüft das NVIDIA Container Toolkit, installiert aber nichts selbst.
+3. **Grafikkarte und Arbeitsspeicher** prüfen und vor zu wenig davon warnen.
+4. **Fragen:** Arbeitsordner, Modellordner, Betrieb nur auf diesem Rechner oder als Server
+   (dann mit Adresse, siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
+5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
+   `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte.
+6. **Modelle laden** (rund 25 GB): jede Datei aus `setup/models.json`, festgelegt auf eine
+   Revision bei Hugging Face und nach dem Laden per SHA-256 geprüft. Abgebrochene Downloads
+   setzen beim nächsten Lauf fort. Vorhandene Dateien werden nur geprüft.
+7. **Stapel bauen und starten** und warten, bis Argus antwortet. Am Ende kopiert sie unter
+   Windows auf Wunsch den Einrichtungs-Schlüssel in die Zwischenablage und öffnet den Browser.
 
-   ```powershell
-   docker compose up -d --build
-   ```
+Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
+Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
+`--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen und laden).
 
-   Der erste Bau dauert, weil der Sprachdienst seine Modelle (4,4 GB) lädt und übersetzt.
-6. **Erstes Konto:** `http://127.0.0.1:7860` im Browser öffnen. Die Seite fragt nach
-   Benutzername, Passwort und dem Einrichtungs-Schlüssel; er steht in der `.env` unter
-   `DASHBOARD_SETUP_TOKEN`. Dieses Konto wird Administrator. Weitere Konten legt es unter
-   *Monitor › Konten* an, als Benutzer oder als Administrator.
-7. **Dokumente:** Als Administrator Dateien in den Chat ziehen (sie landen im Ordner
-   `Uploads` des Arbeitsordners), dann unter *Monitor › Überblick* „Ingest starten“. Zum
-   Ausprobieren eignen sich die 30 erfundenen Dokumente in `eval/retrieval/corpus`.
+`install.cmd` ist ein reines Batch-Skript ohne PowerShell und startet `setup/install.py`. Eine
+EXE gibt es bewusst nicht: Ein lesbares Skript lässt sich prüfen, und unsignierte EXE-Dateien
+fallen bei Endpoint-Schutz wie CrowdStrike eher auf.
+
+**Erstes Konto:** `http://127.0.0.1:7860` öffnen. Die Seite fragt nach Benutzername,
+Passwort und dem Einrichtungs-Schlüssel (in der `.env` unter `DASHBOARD_SETUP_TOKEN`). Dieses
+Konto wird Administrator und legt weitere Konten unter *Monitor › Konten* an.
+
+**Dokumente:** Als Administrator Dateien im Monitor hochladen, dann unter *Monitor ›
+Überblick* „Ingest starten“. Zum Ausprobieren eignen sich die 30 erfundenen Dokumente in
+`eval/retrieval/corpus`.
+
+### Von Hand
+
+1. `python -m pip install cryptography`, dann `python setup/init_stack.py` (mit
+   `--workspace` und `--models` für andere Ordner als `C:\Argus_Workspace` und
+   `C:\Argus_Models`). Legt `API_Tokens/` und die `.env` an.
+2. `.env` prüfen: Modell und `LLM_N_CPU_MOE` passend zur Grafikkarte.
+3. Die Modelle aus `setup/models.json` nach `ARGUS_MODELS_DIR` legen (Repo, Revision, Datei
+   und Prüfsumme stehen dort). Die Dienste hängen in einem Netz ohne Ausgang und laden selbst
+   nichts nach.
+4. `docker compose up -d --build`. Der erste Bau dauert, weil der Sprachdienst seine Modelle
+   (4,4 GB) lädt und übersetzt.
 
 ## Betrieb auf einem Server
 
@@ -562,8 +586,18 @@ python -m pytest rag_backend/tests -q
 
 Die Tests brauchen keine laufenden Container (SQLite, Test-Schlüssel). Sie laufen in einem
 Ordner ohne `.env`, etwa in einem frischen Klon: Eine vorhandene `.env` überschreibt die
-Testwerte. Im CI laufen sie bei jedem Push auf `main`, dazu die Prüfung der Compose-Dateien
-und der Netz-Abschottung. Die Messungen in `eval/` laufen gegen den echten Stapel und das
+Testwerte. Lokal überspringen sie vier Tests, die nur im CI laufen.
+
+Die Tests der Sandbox laufen in ihrem eigenen Abbild, denn nur dort räumt sie zwischen zwei
+Läufen auf (Prozesse beenden, `/tmp` leeren):
+
+```powershell
+docker build -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
+docker run --rm --user root -v "${PWD}/calc_sandbox:/src" -w /src --entrypoint sh argus-sandbox-test -c "pip install -q pytest httpx && exec python -m pytest test_app.py -q"
+```
+
+Im CI laufen beide bei jedem Push auf `main`, dazu die Prüfung der Compose-Dateien, der
+Netz-Abschottung und des Installers (ShellCheck). Die Messungen in `eval/` laufen gegen den echten Stapel und das
 echte Modell.
 
 ## Lizenz

@@ -65,6 +65,7 @@ window.argusChatStream = async function (message, cb) {
         else if (ev.type === 'sources') { if (cb.onSources) cb.onSources(ev.items || []); }
         else if (ev.type === 'tool_blocked') { if (cb.onToolBlocked) cb.onToolBlocked(ev.index); }
         else if (ev.type === 'doc_sources') { if (cb.onDocSources) cb.onDocSources(ev.items || []); }
+        else if (ev.type === 'files') { if (cb.onFiles) cb.onFiles(ev.items || []); }
         else if (ev.type === 'tool_done') { if (cb.onToolDone) cb.onToolDone(ev.index, ev.dauer_ms); }
         else if (ev.type === 'token') { if (cb.onToken) cb.onToken(ev.text); }
         else if (ev.type === 'done') { gotDone = true; window.setOrbState('idle'); if (cb.onDone) cb.onDone(); }

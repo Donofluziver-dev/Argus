@@ -827,6 +827,37 @@ function chatAddDocSources(msg, items) {
   });
 }
 
+// Neu erzeugte Dateien (Ergebnisse / Artefakte) als Download-Pillen ueber der Antwort.
+// Dateinamen ausschliesslich ueber textContent -- niemals innerHTML.
+function chatAddResultFiles(msg, items) {
+  if (!msg || !items || !items.length) return;
+  let box = msg.ergebnisse;
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'chat-sources chat-ergebnisse';
+    msg.wrap.insertBefore(box, msg.bubble);
+    msg.ergebnisse = box;
+  }
+  box.textContent = '';
+  const kopf = document.createElement('span');
+  kopf.className = 'dok-kopf';
+  kopf.textContent = 'Ergebnisse';
+  box.appendChild(kopf);
+  items.forEach(function (f) {
+    if (!f || !f.name) return;
+    const a = document.createElement('a');
+    a.className = 'src-pille is-ergebnis-dl';
+    const bereich = encodeURIComponent(f.bereich || 'ergebnisse');
+    a.href = '/v1/dashboard/files/' + bereich + '/' + encodeURIComponent(f.name);
+    a.setAttribute('download', f.name);
+    if (f.size !== undefined && f.size !== null) {
+      a.title = f.size + ' Bytes';
+    }
+    a.textContent = String(f.name);
+    box.appendChild(a);
+  });
+}
+
 // Eine Pille ohne passende Quelle ist ein toter Verweis -- schlimmer als kein
 // Beleg, weil sie Sicherheit vortaeuscht. Solche Nummern werden stillgelegt:
 // erfunden vom Modell, oder die Quelle wurde als unsicheres Schema verworfen.
@@ -853,6 +884,7 @@ function chatApplySteps(msg, steps) {
   });
   chatAddSources(msg, steps.quellen || []);
   chatAddDocSources(msg, steps.dokumente || []);
+  chatAddResultFiles(msg, steps.dateien || []);
 }
 
 // Klick auf eine Verweis-Pille oeffnet die zugehoerige Quelle.
@@ -977,6 +1009,7 @@ function chatRunTurn(text, images) {
     },
     onSources: function (items) { chatAddSources(ai, items); chatScroll(); },
     onDocSources: function (items) { chatAddDocSources(ai, items); chatScroll(); },
+    onFiles: function (items) { chatAddResultFiles(ai, items); chatScroll(); },
     onToken: function (tk) {
       // Das erste Token beendet Denken und Recherche: ab hier wird geschrieben.
       if (!acc) chatSetZustand(ai, 'antwort');
@@ -1088,6 +1121,34 @@ function chatInit() {
       file.value = '';   // gleiche Datei zweimal waehlbar
     });
   }
+  // Datei-Upload per Bueroklammer (fuer alle Konten/Rollen)
+  const attachDoc = $('chat-attach-doc'), docFile = $('chat-doc-file');
+  if (attachDoc && docFile) {
+    attachDoc.addEventListener('click', function () { docFile.click(); });
+    docFile.addEventListener('change', function () {
+      if (docFile.files && docFile.files.length) {
+        chatDropDateien(docFile.files);
+      }
+      docFile.value = '';
+    });
+  }
+  // Dialog "Meine Dateien"
+  const userFilesBtn = $('chat-user-files-btn');
+  const userFilesModal = $('user-files-modal');
+  const userFilesClose = $('user-files-modal-close');
+  const userFilesBackdrop = $('user-files-modal-backdrop');
+  if (userFilesBtn && userFilesModal) {
+    userFilesBtn.addEventListener('click', function () {
+      userFilesModal.hidden = false;
+      chatLoadUserFiles();
+    });
+  }
+  if (userFilesClose && userFilesModal) {
+    userFilesClose.addEventListener('click', function () { userFilesModal.hidden = true; });
+  }
+  if (userFilesBackdrop && userFilesModal) {
+    userFilesBackdrop.addEventListener('click', function () { userFilesModal.hidden = true; });
+  }
   // Screenshot per Strg+V direkt ins Eingabefeld.
   inp.addEventListener('paste', function (e) {
     if (!chatMultimodal) return;
@@ -1117,9 +1178,28 @@ window.argusChat = {
   noteUpload: function (namen) { chatNotizEinsetzen(namen); }
 };
 
+// Upload einer Benutzerdatei in den persoenlichen Bereich (/v1/dashboard/files)
+async function chatUploadUserFile(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const resp = await fetch('/v1/dashboard/files', {
+    method: 'POST',
+    body: fd,
+    credentials: 'same-origin',
+  });
+  if (!resp.ok) {
+    let msg = 'Upload fehlgeschlagen (' + resp.status + ')';
+    try {
+      const data = await resp.json();
+      if (data && data.detail) msg = data.detail;
+    } catch (_) {}
+    throw new Error(msg);
+  }
+  return await resp.json();
+}
+
 // Gezogene Dateien. Bilder gehen den Multimodal-Weg (data-URI an der Nachricht, nichts
-// auf der Platte), alles andere wird hochgeladen. Bewusst NACHEINANDER: der Fortschritt
-// steht im Platzhalter, und bei mehreren grossen Dateien bleibt die Reihenfolge sichtbar.
+// auf der Platte), alles andere wird in den persoenlichen Bereich des Benutzers hochgeladen.
 async function chatDropDateien(liste) {
   const alle = Array.prototype.slice.call(liste || []);
   if (!alle.length || chatBusy) return;
@@ -1130,7 +1210,6 @@ async function chatDropDateien(liste) {
 
   if (bilder.length) chatAddFiles(bilder);
   if (!dateien.length) return;
-  if (!window.argusFiles || !window.argusFiles.uploadOne) return;
 
   const inp = $('chat-input');
   const platzhalter = inp ? inp.placeholder : '';
@@ -1143,7 +1222,7 @@ async function chatDropDateien(liste) {
       inp.placeholder = 'lade ' + f.name + ' hoch \u2026 (' + (i + 1) + '/' + dateien.length + ')';
     }
     try {
-      const res = await window.argusFiles.uploadOne(f, function () {});
+      const res = await chatUploadUserFile(f);
       namen.push((res && res.name) || f.name);
     } catch (e) {
       fehler.push(f.name + ': ' + ((e && e.message) || 'fehlgeschlagen'));
@@ -1160,16 +1239,123 @@ async function chatDropDateien(liste) {
 // Die Notiz kommt ins EINGABEFELD, nicht in den Verlauf. Der Nutzer schreibt dahinter,
 // was mit der Datei geschehen soll, und schickt beides zusammen ab -- damit steht der
 // Dateiname in seiner Nachricht und bleibt im Verlauf, den das Backend spaeter liest.
-// Frueher wurde hier eine fertige Nachricht VERSCHICKT, die 'Tu noch nichts davon
-// ungefragt' enthielt -- die hat Argus rundenlang am Handeln gehindert.
 function chatNotizEinsetzen(namen) {
   const inp = $('chat-input');
   if (!inp || !namen || !namen.length) return;
   const notiz = 'Beigelegte Datei(en): '
-    + namen.map(function (n) { return 'Uploads/' + n; }).join(', ') + '. ';
+    + namen.map(function (n) { return 'Dateien/' + n; }).join(', ') + '. ';
   const rest = (inp.value || '').trim();
   inp.value = notiz + rest;
   inp.focus();
   inp.setSelectionRange(inp.value.length, inp.value.length);
   inp.dispatchEvent(new Event('input'));
+}
+
+async function chatLoadUserFiles() {
+  const qBox = $('user-files-quota');
+  const dBox = $('user-files-list-dateien');
+  const eBox = $('user-files-list-ergebnisse');
+  if (!dBox || !eBox) return;
+  try {
+    const resp = await fetch('/v1/dashboard/files', { credentials: 'same-origin' });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (qBox) {
+      const usedMb = ((data.used_bytes || 0) / (1024 * 1024)).toFixed(1);
+      const maxMb = ((data.max_bytes || 0) / (1024 * 1024)).toFixed(0);
+      qBox.textContent = 'Speicherplatz: ' + usedMb + ' MB von ' + maxMb + ' MB belegt';
+    }
+    renderUserFilesSection(dBox, data.dateien || [], 'dateien');
+    renderUserFilesSection(eBox, data.ergebnisse || [], 'ergebnisse');
+  } catch (err) {
+    if (qBox) qBox.textContent = 'Fehler beim Laden der Dateiliste.';
+  }
+}
+
+function renderUserFilesSection(container, items, bereich) {
+  container.textContent = '';
+  if (!items || !items.length) {
+    const leer = document.createElement('div');
+    leer.style.color = '#6f8196';
+    leer.style.fontSize = '12px';
+    leer.textContent = 'Keine Dateien in diesem Bereich.';
+    container.appendChild(leer);
+    return;
+  }
+  items.forEach(function (f) {
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.justifyContent = 'space-between';
+    row.style.padding = '6px 10px';
+    row.style.borderRadius = '6px';
+    row.style.background = 'rgba(255, 255, 255, 0.03)';
+    row.style.border = '1px solid rgba(163, 198, 255, 0.08)';
+
+    const info = document.createElement('div');
+    info.style.display = 'flex';
+    info.style.flexDirection = 'column';
+    info.style.gap = '2px';
+    info.style.minWidth = '0';
+    info.style.flex = '1 1 auto';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.style.fontFamily = 'var(--font-mono)';
+    nameSpan.style.fontSize = '12px';
+    nameSpan.style.overflow = 'hidden';
+    nameSpan.style.textOverflow = 'ellipsis';
+    nameSpan.style.whiteSpace = 'nowrap';
+    nameSpan.textContent = String(f.name);
+    info.appendChild(nameSpan);
+
+    const metaSpan = document.createElement('span');
+    metaSpan.style.fontSize = '10px';
+    metaSpan.style.color = '#8b9db2';
+    const szText = f.size == null ? '' : f.size >= 1048576 ? (f.size / 1048576).toFixed(1).replace('.', ',') + ' MB'
+      : f.size >= 1024 ? Math.round(f.size / 1024) + ' KB' : f.size + ' Byte';
+    const dateText = f.modified ? new Date(f.modified).toLocaleString() : '';
+    metaSpan.textContent = [szText, dateText].filter(Boolean).join(' \u00b7 ');
+    info.appendChild(metaSpan);
+
+    row.appendChild(info);
+
+    const actions = document.createElement('div');
+    actions.style.display = 'flex';
+    actions.style.alignItems = 'center';
+    actions.style.gap = '6px';
+    actions.style.flex = '0 0 auto';
+    actions.style.marginLeft = '12px';
+
+    const dlLink = document.createElement('a');
+    dlLink.className = 'chat-action';
+    dlLink.href = '/v1/dashboard/files/' + encodeURIComponent(bereich) + '/' + encodeURIComponent(f.name);
+    dlLink.setAttribute('download', f.name);
+    dlLink.textContent = 'Laden';
+    actions.appendChild(dlLink);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'chat-action';
+    delBtn.textContent = 'L\u00f6schen';
+    delBtn.addEventListener('click', async function () {
+      if (!confirm('Datei "' + f.name + '" wirklich l\u00f6schen?')) return;
+      try {
+        const resp = await fetch('/v1/dashboard/files/' + encodeURIComponent(bereich) + '/' + encodeURIComponent(f.name), {
+          method: 'DELETE',
+          credentials: 'same-origin',
+        });
+        if (!resp.ok) {
+          alert('L\u00f6schen fehlgeschlagen.');
+          return;
+        }
+        await chatLoadUserFiles();
+      } catch (e) {
+        alert('L\u00f6schen fehlgeschlagen: ' + e);
+      }
+    });
+    actions.appendChild(delBtn);
+
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
 }

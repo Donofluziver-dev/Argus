@@ -1559,6 +1559,8 @@
     font-size: calc(9px * var(--chat-scale)); text-transform: uppercase; color: #6f8196;
   }
   .src-pille.is-dok { padding-left: 10px; cursor: default; }
+  .src-pille.is-ergebnis-dl { padding-left: 10px; cursor: pointer; color: #7fe4ff; }
+  .src-pille.is-ergebnis-dl:hover { border-color: rgba(127, 228, 255, 0.4); text-decoration: underline; }
   .dok-wert { color: #7fe4ff; }
 
   /* Aktionen tragen jetzt Text neben dem Symbol. */

@@ -132,13 +132,13 @@ def test_accounts_from_before_roles_stay_admin():
 
 def test_user_gets_no_tool_that_reads_or_writes_the_workspace():
     offered = _names(agent._tools_for_role(list(agent.tools), "user"))
-    #--- Die Sandbox bindet den ganzen Arbeitsordner ein, read_document liest jeden
-    #--- Pfad darin: Uploads und Gedaechtnis anderer Konten.
-    assert not offered & {"read_document", "execute_code", "save_artifact", "ingest_document",
-                          "index_document", "delete_indexed_document"}
+    #--- Shared Knowledgebase/Ingest, Cloud, Agents und Host-FS bleiben Admin-only.
+    assert not offered & {"ingest_document", "index_document", "delete_indexed_document"}
     assert not any(n.startswith("fs_") for n in offered)
     assert not offered & agent._TOOL_GROUP_NAMES["cloud"]
     assert not offered & agent._TOOL_GROUP_NAMES["agents"]
+    #--- Eigener Dateibereich und isolierte Sandbox stehen jedem Benutzer zur Verfuegung.
+    assert {"read_document", "execute_code", "save_artifact"} <= offered
     #--- Was bleibt: fragen, suchen, recherchieren, rechnen.
     assert {"document_search", "list_indexed_documents", "web_search", "read_webpage",
             "calculate", "datetime_now"} <= offered
@@ -258,11 +258,11 @@ def test_prompt_describes_only_tools_of_the_role(monkeypatch, tmp_path, _clean_o
     as_user = agent.get_prompt_from_env("SYSTEM_PROMPT", "")
     agent.request_origin_var.set({"user_role": "admin"})
     as_admin = agent.get_prompt_from_env("SYSTEM_PROMPT", "")
-    #--- Ein Benutzer liest sonst von Datei-Werkzeugen, die es fuer ihn nicht gibt,
-    #--- und verspricht dann, hochgeladene Dateien zu lesen.
-    for name in ("read_document", "ingest_document"):
-        assert f"**{name}**" in as_admin, name
-        assert f"**{name}**" not in as_user, name
+    #--- Ein Benutzer hat jetzt read_document (fuer den eigenen Bereich), aber nicht ingest_document
+    assert "**ingest_document**" in as_admin
+    assert "**ingest_document**" not in as_user
+    assert "**read_document**" in as_admin
+    assert "**read_document**" in as_user
     assert "**document_search**" in as_user and "{{" not in as_user
     #--- Ohne Konto (Hintergrundlauf) gilt der volle Satz, wie bei _tools_for_role.
     agent.request_origin_var.set({})
@@ -329,14 +329,14 @@ async def test_subagent_filters_tools_by_role_and_keeps_empty_list(monkeypatch, 
     # 1. allowed_tools=None unter Rolle 'user': keine Admin-Werkzeuge.
     agent.request_origin_var.set({"user_role": "user"})
     await agent.run_subagent_loop("Tester", "Aufgabe", think=False, allowed_tools=None)
-    assert "read_document" not in bound_sets[-1]
-    assert "execute_code" not in bound_sets[-1]
+    assert "ingest_document" not in bound_sets[-1]
+    assert "index_document" not in bound_sets[-1]
     assert "calculate" in bound_sets[-1]
 
     # 2. Explizite Liste mit Admin-Werkzeug unter Rolle 'user': Admin-Werkzeug fliegt raus.
     await agent.run_subagent_loop(
         "Tester", "Aufgabe", think=False,
-        allowed_tools=[agent.read_document, agent.calculate],
+        allowed_tools=[agent.ingest_document, agent.calculate],
     )
     assert bound_sets[-1] == ["calculate"]
 

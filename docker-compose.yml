@@ -228,11 +228,7 @@ services:
       - sandbox
     read_only: true
     tmpfs:
-      - /tmp:size=64m,noexec
-    volumes:
-      # Nur-Lese-Sicht auf den Workspace: execute_code darf lesen, nicht
-      # schreiben. Keine Secrets in diesen Container gemountet.
-      - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/app/data:ro
+      - /tmp:size=256m,noexec
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -243,7 +239,8 @@ services:
     # .NET-Threadpool von pwsh Luft.
     pids_limit: 256
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/healthz || exit 1"]
+      # Python statt wget: das schlanke Abbild hat seit dem Wegfall von PowerShell kein wget mehr.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 3

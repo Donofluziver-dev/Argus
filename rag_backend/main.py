@@ -18,7 +18,7 @@ from jwt import InvalidTokenError
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 from fastapi import FastAPI, Depends, HTTPException, status, Request, UploadFile, File
-from fastapi.responses import JSONResponse, StreamingResponse, Response, RedirectResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -1675,23 +1675,44 @@ def dashboard_chat_delete(chat_id: int, db: Session = Depends(get_db),
     return {"status": "deleted", "id": chat_id}
 
 
-def _genannte_uploads(text: str) -> list:
-    '''Namen von Dateien im Uploads-Ordner, die in der Nachricht vorkommen. Die
-    Oberflaeche setzt beim Hineinziehen den Dateinamen in die Nachricht; wer ihn von
-    Hand tippt, wird genauso erfasst. Geprueft wird hier und nicht im Browser, damit
-    die Sperre nicht vom Client abhaengt.'''
-    if not text or not _UPLOAD_DIR.is_dir():
+def _genannte_uploads(text: str, user_id: int | None = None, role: str | None = None) -> list:
+    '''Namen von Dateien aus dem eigenen Bereich Dateien (fuer alle Konten) sowie
+    fuer Administratoren zusaetzlich aus dem gemeinsamen Uploads-Ordner, die in der
+    Nachricht vorkommen. Die Oberflaeche setzt beim Hineinziehen den Dateinamen in die
+    Nachricht; wer ihn von Hand tippt, wird genauso erfasst.'''
+    if not text:
         return []
     klein = text.lower()
     treffer = []
-    try:
-        for i, p in enumerate(_UPLOAD_DIR.iterdir()):
-            if i >= 5000 or len(treffer) >= 50:
-                break
-            if len(p.name) >= 5 and p.name.lower() in klein:
-                treffer.append(p.name)
-    except OSError:
-        return []
+
+    # 1. Eigener Ordner 'Dateien' des Kontos (fuer alle Rollen)
+    if user_id and isinstance(user_id, int) and user_id > 0:
+        try:
+            from rag_backend import user_files
+            u_dateien = user_files.get_user_dir(user_id, "dateien", create=False)
+            if u_dateien.is_dir():
+                for i, p in enumerate(u_dateien.iterdir()):
+                    if i >= 5000 or len(treffer) >= 50:
+                        break
+                    if len(p.name) >= 5 and p.name.lower() in klein:
+                        if p.name not in treffer:
+                            treffer.append(p.name)
+        except OSError:
+            pass
+
+    # 2. Fuer Administratoren (oder wenn role None / admin): gemeinsamer Uploads-Ordner
+    if role is None or role == "admin":
+        if _UPLOAD_DIR.is_dir():
+            try:
+                for i, p in enumerate(_UPLOAD_DIR.iterdir()):
+                    if i >= 5000 or len(treffer) >= 50:
+                        break
+                    if len(p.name) >= 5 and p.name.lower() in klein:
+                        if p.name not in treffer:
+                            treffer.append(p.name)
+            except OSError:
+                pass
+
     return treffer
 
 
@@ -1762,10 +1783,8 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
         "user_role": getattr(user, "role", None) or "user",
         "images": images,
         #--- Beigelegte Dateien: das Gespraech gilt damit sofort als Gespraech mit
-        #--- Firmendaten (agent.beigelegte_dateien_vermerken). Nur fuer Konten, die
-        #--- Dateien lesen koennen.
-        "attached_files": (_genannte_uploads(body.message)
-                           if getattr(user, "role", None) == "admin" else []),
+        #--- Firmendaten (agent.beigelegte_dateien_vermerken). Gilt fuer alle Konten.
+        "attached_files": _genannte_uploads(body.message, user_id=uid, role=getattr(user, "role", None)),
         #--- Herkunft fuer die Missions-Zustellung: das Ergebnis kommt in diese Session.
         "channel": "dashboard",
         "dashboard_session_id": sid,
@@ -1785,6 +1804,7 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
         schritte = []
         quellen = []
         dokumente = []
+        dateien = []
         #--- Lauf-ID eines Werkzeugs -> Index seines Schritts, fuer die Zuordnung
         #--- einer Abweisung durch die Sperre.
         lauf_zu_schritt = {}
@@ -1884,6 +1904,12 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                 if dsrcs:
                     dokumente[:] = dsrcs
                     yield _orb_sse({"type": "doc_sources", "items": dsrcs})
+                    continue
+                #--- Neu erzeugte Dateien (Ergebnisse): als Pille zum Download anbieten
+                fitems = chunk.get("files")
+                if fitems:
+                    dateien.extend(fitems)
+                    yield _orb_sse({"type": "files", "items": fitems})
                     continue
                 out = chunk.get("output")
                 if not out:
@@ -2025,8 +2051,8 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                             gefaltet.append({"art": "denken", "text": "".join(denk)})
                         mitschrift = encrypt_msg(json.dumps(
                             {"schritte": gefaltet, "quellen": quellen,
-                             "dokumente": dokumente},
-                            ensure_ascii=False)) if (gefaltet or quellen or dokumente) else None
+                             "dokumente": dokumente, "dateien": dateien},
+                            ensure_ascii=False)) if (gefaltet or quellen or dokumente or dateien) else None
                         db2.add(Message(session_id=sid, sender="assistant",
                                         content_encrypted=encrypt_msg(answer),
                                         steps_encrypted=mitschrift,
@@ -2129,27 +2155,31 @@ _UPLOAD_SWEEP_SECONDS = int(os.getenv("UPLOAD_SWEEP_SECONDS", "3600"))
 
 
 def _sweep_uploads_once() -> int:
-    '''Entfernt Dateien im Uploads-Ordner, die aelter als die Frist sind.
-    Liefert die Anzahl. Unterordner bleiben unangetastet.'''
-    if _UPLOAD_RETENTION_HOURS <= 0:
-        return 0
-    try:
-        if not _UPLOAD_DIR.is_dir():
-            return 0
-        eintraege = list(_UPLOAD_DIR.iterdir())
-    except Exception:
-        return 0
-    grenze = time.time() - _UPLOAD_RETENTION_HOURS * 3600
+    '''Entfernt Dateien im Uploads-Ordner, die aelter als die Frist sind,
+    sowie veraltete Benutzerdateien (users/*/Dateien und users/*/Ergebnisse).
+    Liefert die Gesamtzahl entfernter Dateien.'''
     weg = 0
-    for p in eintraege:
+    if _UPLOAD_RETENTION_HOURS > 0 and _UPLOAD_DIR.is_dir():
         try:
-            if not p.is_file() or p.stat().st_mtime >= grenze:
-                continue
-            p.unlink()
-            weg += 1
-            log.info(f"Upload aufgeraeumt (aelter als {_UPLOAD_RETENTION_HOURS}h): {p.name}")
-        except Exception as e:
-            log.warning(f"Upload {p.name} liess sich nicht entfernen: {e}")
+            grenze = time.time() - _UPLOAD_RETENTION_HOURS * 3600
+            for p in _UPLOAD_DIR.iterdir():
+                try:
+                    if not p.is_file() or p.stat().st_mtime >= grenze:
+                        continue
+                    p.unlink()
+                    weg += 1
+                    log.info(f"Upload aufgeraeumt (aelter als {_UPLOAD_RETENTION_HOURS}h): {p.name}")
+                except Exception as e:
+                    log.warning(f"Upload {p.name} liess sich nicht entfernen: {e}")
+        except Exception:
+            pass
+
+    try:
+        from rag_backend import user_files
+        weg += user_files.sweep_user_files_once()
+    except Exception as e:
+        log.warning(f"Benutzerdateien-Aufraeumen fehlgeschlagen: {e}")
+
     return weg
 
 
@@ -2368,4 +2398,155 @@ async def dashboard_upload_delete(name: str, admin: User = Depends(dashboard_adm
     else:
         target.unlink()
     return {"status": "deleted", "name": target.name}
+
+
+# ---- Benutzer-Dateibereich (fuer alle Rollen, strikt isoliert) ----
+
+@app.get("/v1/dashboard/files", tags=["Dashboard"])
+async def dashboard_user_files(user: User = Depends(dashboard_user)):
+    from rag_backend import user_files
+    dateien = user_files.list_user_files(user.id, "dateien")
+    ergebnisse = user_files.list_user_files(user.id, "ergebnisse")
+    used_bytes = user_files.get_user_used_bytes(user.id)
+    max_bytes = user_files.get_user_files_max_bytes()
+    return {
+        "dateien": dateien,
+        "ergebnisse": ergebnisse,
+        "used_bytes": used_bytes,
+        "max_bytes": max_bytes,
+    }
+
+
+@app.post("/v1/dashboard/files", tags=["Dashboard"])
+@limiter.limit(os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
+async def dashboard_user_file_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(dashboard_user),
+    csrf = Depends(check_dashboard_csrf),
+):
+    from rag_backend import user_files
+
+    raw_filename = file.filename or ""
+    base_name = os.path.basename(raw_filename.replace("\\", "/")).strip()
+    try:
+        name = user_files.safe_filename(base_name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unbrauchbarer Dateiname.")
+
+    suffix = Path(name).suffix.lower()
+    if suffix not in _UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Dateityp '{suffix or '?'}' ist nicht zugelassen.",
+        )
+
+    dateien_dir = user_files.get_user_dir(user.id, "dateien", create=True)
+    target = dateien_dir / name
+    if target.exists():
+        stem, ext = Path(name).stem, Path(name).suffix
+        for i in range(2, 100):
+            cand = dateien_dir / f"{stem}_{i}{ext}"
+            if not cand.exists():
+                target = cand
+                name = target.name
+                break
+        else:
+            target = dateien_dir / f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
+            name = target.name
+
+    written = 0
+    max_upload = _MAX_UPLOAD_BYTES
+    try:
+        with open(target, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_upload:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Datei groesser als {max_upload // (1024 * 1024)} MB.",
+                    )
+                try:
+                    user_files.check_user_quota(user.id, len(chunk))
+                except ValueError:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except OSError as e:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
+
+    st = target.stat()
+    log.info(f"Benutzerdatei hochgeladen von '{user.email}' (ID {user.id}): {target.name} ({written} Bytes)")
+    return {
+        "status": "ok",
+        "bereich": "dateien",
+        "name": target.name,
+        "size": st.st_size,
+        "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
+@app.get("/v1/dashboard/files/{bereich}/{name}", tags=["Dashboard"])
+async def dashboard_user_file_download(
+    bereich: str,
+    name: str,
+    user: User = Depends(dashboard_user),
+):
+    from rag_backend import user_files
+
+    b_key = (bereich or "").strip().lower()
+    if b_key not in ("dateien", "ergebnisse"):
+        raise HTTPException(status_code=400, detail="Unbekannter Bereich.")
+
+    try:
+        target = user_files.resolve_user_file(user.id, b_key, name, must_exist=True)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungueltiger Dateiname.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Datei nicht gefunden.")
+
+    return FileResponse(
+        path=target,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{target.name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.delete("/v1/dashboard/files/{bereich}/{name}", tags=["Dashboard"])
+async def dashboard_user_file_delete(
+    bereich: str,
+    name: str,
+    user: User = Depends(dashboard_user),
+    csrf = Depends(check_dashboard_csrf),
+):
+    from rag_backend import user_files
+
+    b_key = (bereich or "").strip().lower()
+    if b_key not in ("dateien", "ergebnisse"):
+        raise HTTPException(status_code=400, detail="Unbekannter Bereich.")
+
+    try:
+        user_files.delete_user_file(user.id, b_key, name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungueltiger Dateiname.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Datei nicht gefunden.")
+
+    return {"status": "deleted", "bereich": b_key, "name": name}
+
 

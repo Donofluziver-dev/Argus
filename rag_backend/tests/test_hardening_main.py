@@ -126,7 +126,8 @@ def test_tools_for_role_hides_cloud_agents_files_and_sandbox():
              "save_artifact", "calculate", "list_indexed_documents"]
     tools = [_Tool(n) for n in names]
     user = {t.name for t in _tools_for_role(tools, "user")}
-    assert user == {"web_search", "document_search", "calculate", "list_indexed_documents"}
+    assert user == {"web_search", "document_search", "calculate", "list_indexed_documents",
+                    "read_document", "execute_code", "save_artifact"}
     #--- Alles ausser 'admin' bekommt die kleine Auswahl, auch eine unbekannte Rolle.
     assert {t.name for t in _tools_for_role(tools, "chat")} == user
     assert {t.name for t in _tools_for_role(tools, "")} == user

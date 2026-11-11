@@ -1157,6 +1157,30 @@ def dokumente_liste() -> list:
             for n, s in sorted(d.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
+# ---- Register fuer erzeugte Dateien/Ergebnisse des Turns ----
+_turn_files: contextvars.ContextVar = contextvars.ContextVar("argus_turn_files", default=None)
+
+
+def dateien_zuruecksetzen() -> None:
+    """Am Anfang jedes Turns aufrufen."""
+    _turn_files.set([])
+
+
+def dateien_merken(items: list[dict]) -> None:
+    """Merkt erzeugte Dateien (Ergebnisse) fuer das SSE-Reporting des Turns."""
+    f = _turn_files.get()
+    if f is None:
+        return
+    for item in items:
+        if item and item not in f:
+            f.append(item)
+
+
+def dateien_liste() -> list[dict]:
+    """Liefert die im laufenden Turn erzeugten Dateien."""
+    return list(_turn_files.get() or [])
+
+
 async def _search_and_read(query: str, *, n_sources: int, per_source_chars: int,
                            grounding_note: bool = False, injection_guard: bool = False,
                            list_extra: bool = False) -> str:
@@ -1389,17 +1413,56 @@ async def execute_code(code: str) -> str:
     """Runs Python code in an isolated, hardened sandbox and returns stdout.
     Available modules: pandas (as pd), json, csv, re, math, statistics,
     collections, itertools, datetime, tabulate.
-    File access: files under /app/data/ (= C:\\Argus_Workspace on the host) are READABLE.
-    Use it for data analysis (CSV/JSON/Excel), log parsing, transformations and
-    statistics on datasets. IMPORTANT: ALWAYS output results via print() -- the
-    entire print() output is the result; tables via tabulate() or df.to_markdown().
+    Files of the user are available under ./data/ for reading.
+    Write result files into ./out/ to offer them to the user for download.
+    IMPORTANT: ALWAYS output results via print() -- tables via tabulate() or df.to_markdown().
     For simple math use 'calculate' instead.
     """
     try:
         await _ensure_models_loaded()
+        import base64
+        from rag_backend import user_files
+
+        orig = request_origin_var.get() or {}
+        user_id = orig.get("user_id")
+
+        files_payload = []
+        if user_id:
+            try:
+                max_files = int(os.getenv("EXECUTE_CODE_MAX_FILES", "20"))
+                max_bytes = int(os.getenv("EXECUTE_CODE_MAX_BYTES", str(int(os.getenv("EXECUTE_CODE_MAX_MB", "50")) * 1024 * 1024)))
+                d_folder = user_files.get_user_dir(user_id, "dateien", create=False)
+                if d_folder.is_dir():
+                    candidates = []
+                    for p in d_folder.iterdir():
+                        try:
+                            if p.is_file() and not p.is_symlink() and not os.path.islink(str(p)):
+                                candidates.append(p)
+                        except OSError:
+                            continue
+                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    total_b = 0
+                    for p in candidates:
+                        if len(files_payload) >= max_files:
+                            break
+                        sz = p.stat().st_size
+                        if total_b + sz > max_bytes:
+                            continue
+                        try:
+                            b = p.read_bytes()
+                            files_payload.append({
+                                "name": p.name,
+                                "content": base64.b64encode(b).decode("ascii"),
+                            })
+                            total_b += len(b)
+                        except Exception:
+                            continue
+            except Exception as e:
+                log.warning(f"execute_code: Fehler beim Lesen der Benutzerdateien: {e}")
+
         resp = await _http_client_internal.post(
             "http://calc-sandbox:8001/execute",
-            json={"code": code, "timeout": 15.0},
+            json={"code": code, "language": "python", "timeout": 15.0, "files": files_payload},
             timeout=20.0,
         )
         resp.raise_for_status()
@@ -1408,6 +1471,30 @@ async def execute_code(code: str) -> str:
         if data.get("error"):
             return f"ERROR: Execution failed: {data['error']}"
         result = data.get("result", "")
+
+        returned_files = data.get("files") or []
+        created_names = []
+        if returned_files and user_id:
+            erg_dir = user_files.get_user_dir(user_id, "ergebnisse", create=True)
+            for rf in returned_files:
+                try:
+                    rf_name = user_files.safe_filename(rf.get("name") or "")
+                    rf_bytes = base64.b64decode(rf.get("content") or "")
+                    user_files.check_user_quota(user_id, len(rf_bytes))
+                    rf_path = erg_dir / rf_name
+                    rf_path.write_bytes(rf_bytes)
+                    created_names.append(f"Ergebnisse/{rf_name}")
+                    dateien_merken([{"bereich": "ergebnisse", "name": rf_name, "size": len(rf_bytes)}])
+                except Exception as e:
+                    log.warning(f"execute_code: Datei {rf.get('name')} konnte nicht gespeichert werden: {e}")
+
+        if created_names:
+            extra_line = "Files created: " + ", ".join(created_names)
+            if result and result.strip():
+                result = result.rstrip() + "\n" + extra_line
+            else:
+                result = extra_line
+
         if not result or not result.strip():
             return "(No output — use print() to emit results.)"
         return result
@@ -1473,10 +1560,23 @@ def _win_to_container(path_str: str):
     #--- Whitelist-Haertung (Paritaet mit _enforce_whitelist): resolve() +
     #    relative_to() faengt ..-Traversal und Symlink-Escape ab.
     try:
+        workspace_resolved = _WORKSPACE_CONTAINER.resolve(strict=False)
         real = candidate.resolve(strict=False)
-        real.relative_to(_WORKSPACE_CONTAINER.resolve(strict=False))
+        rel = real.relative_to(workspace_resolved)
     except (ValueError, OSError, RuntimeError):
         return None
+
+    # Pfade unter <arbeitsordner>/users/ (der ganze Unterbaum, auch Gedaechtnis)
+    # duerfen niemals ueber _win_to_container aufgeloest werden.
+    if rel.parts and rel.parts[0].lower() == "users":
+        return None
+    try:
+        cand_rel = candidate.relative_to(_WORKSPACE_CONTAINER)
+        if cand_rel.parts and cand_rel.parts[0].lower() == "users":
+            return None
+    except ValueError:
+        pass
+
     return real
 
 
@@ -1617,17 +1717,49 @@ async def ingest_document(path: str) -> str:
 
 @tool
 async def read_document(path: str) -> str:
-    """Reads ONE document from the Argus workspace INTO THIS CONVERSATION without storing it
-    anywhere. Supports PDF, DOCX, EPUB, HTML, TXT/MD/code. This is the normal case when
-    The user points at a file and wants it read, checked, summarized or judged -- use it
-    instead of ingest_document unless the content is meant to stay findable in LATER
-    conversations. 'path' must lie inside the Argus workspace."""
+    """Reads ONE document INTO THIS CONVERSATION without storing it anywhere.
+    Supports PDF, DOCX, EPUB, HTML, TXT/MD/code. Files in 'Dateien/' or 'Ergebnisse/'
+    can be read. This is the normal case when the user points at a file and wants it
+    read, checked, summarized or judged."""
     try:
+        from rag_backend import user_files
         from rag_backend.ingest import load_file
-        cpath = _win_to_container(path)
-        if cpath is None:
-            return (f"ERROR: '{path}' is outside {_WORKSPACE_WIN}. Reading stays inside the "
-                    f"workspace -- upload the file first.")
+
+        orig = request_origin_var.get() or {}
+        user_id = orig.get("user_id")
+        user_role = orig.get("user_role")
+
+        p_str = (path or "").strip().strip('"')
+        p_norm = p_str.replace("\\", "/")
+        low = p_norm.lower()
+
+        cpath = None
+        if low.startswith("dateien/") or low.startswith("ergebnisse/"):
+            bereich = "dateien" if low.startswith("dateien/") else "ergebnisse"
+            sub_name = p_norm[len(bereich) + 1:]
+            if not user_id:
+                return "ERROR: Access denied: No user account associated with this request."
+            try:
+                cpath = user_files.resolve_user_file(user_id, bereich, sub_name, must_exist=True)
+            except Exception:
+                return "ERROR: Document not found or access denied."
+        elif user_role in (None, "admin"):
+            # Administrator oder Hintergrund/Test ohne Kontext: zusaetzlich Zugriff auf den Arbeitsordner
+            cpath = _win_to_container(path)
+            if cpath is None:
+                return (f"ERROR: '{path}' is outside {_WORKSPACE_WIN}. Reading stays inside the "
+                        f"workspace -- upload the file first.")
+        else:
+            # Fuer die Rolle 'user' ist NUR der eigene Bereich erlaubt (ein blosser Dateiname heisst Dateien/...)
+            if not user_id:
+                return "ERROR: Access denied: No user account associated with this request."
+            if "/" in p_str or "\\" in p_str or ":" in p_str:
+                return "ERROR: Access denied: Invalid document path. Only files in 'Dateien/' or 'Ergebnisse/' can be read."
+            try:
+                cpath = user_files.resolve_user_file(user_id, "dateien", p_str, must_exist=True)
+            except Exception:
+                return "ERROR: Document not found or access denied."
+
         if cpath.is_dir():
             names = sorted(p.name for p in cpath.iterdir() if p.is_file())
             if not names:
@@ -1638,7 +1770,7 @@ async def read_document(path: str) -> str:
             return (f"'{path}' is a directory with {len(names)} file(s) -- call read_document "
                     f"again for each one you need:\n{listing}")
         if not cpath.is_file():
-            return f"ERROR: Path does not exist or is invalid: {path}"
+            return "ERROR: Document not found or access denied." if user_role not in (None, "admin") else f"ERROR: Path does not exist or is invalid: {path}"
 
         text = await asyncio.to_thread(load_file, cpath)
         if not text or not text.strip():
@@ -1660,6 +1792,9 @@ async def read_document(path: str) -> str:
         mark_sensitive_source("read_document", [cpath.name, text])
         return head + "\n" + _wrap_untrusted_document(text)
     except Exception as e:
+        log.warning("Fehler beim Lesen des Dokuments: %s", e, exc_info=True)
+        if (request_origin_var.get() or {}).get("user_role") != "admin":
+            return "ERROR: Failed to read document."
         return f"ERROR: Failed to read '{path}': {str(e)}"
 
 
@@ -2372,24 +2507,31 @@ async def research(subtopics: list[str]) -> str:
 
 @tool
 async def save_artifact(filename: str, content: str) -> str:
-    """Saves a complex result, report, code draft or plan as an artifact (Markdown file)
-    in the folder 'C:\\Argus_Workspace\\Outbound\\'.
+    """Saves a complex result, report, code draft or plan as an artifact in the
+    'Ergebnisse/' folder for the user to download from the chat.
     Use this tool when the result is too long for the chat or should be stored
     permanently for the user to review.
     """
-    if not filename.endswith((".md", ".txt", ".json", ".py", ".ps1")):
+    if not filename.endswith((".md", ".txt", ".json", ".py", ".ps1", ".csv")):
         filename += ".md"
 
-    clean_name = os.path.basename(filename)
-    outbound_dir = Path("/host/argus_workspace/Outbound")
-    outbound_dir.mkdir(parents=True, exist_ok=True)
+    from rag_backend import user_files
 
-    file_path = outbound_dir / clean_name
+    orig = request_origin_var.get() or {}
+    user_id = orig.get("user_id")
+    if not isinstance(user_id, int) or user_id <= 0:
+        return "ERROR: No user account for this request; nothing was saved."
+
     try:
-        file_path.write_text(content, encoding="utf-8")
-        win_path = f"C:\\Argus_Workspace\\Outbound\\{clean_name}"
-        log.info(f"Artefakt gespeichert: {win_path}")
-        return f"Successfully saved as artifact at: {win_path}"
+        clean_name = user_files.safe_filename(filename)
+        content_bytes = content.encode("utf-8")
+        user_files.check_user_quota(user_id, len(content_bytes))
+        target_dir = user_files.get_user_dir(user_id, "ergebnisse", create=True)
+        target_path = target_dir / clean_name
+        target_path.write_bytes(content_bytes)
+        dateien_merken([{"bereich": "ergebnisse", "name": clean_name, "size": len(content_bytes)}])
+        log.info(f"Artefakt gespeichert: Ergebnisse/{clean_name} (User {user_id})")
+        return f"Saved as Ergebnisse/{clean_name}; the user can download it from the chat."
     except Exception as e:
         return f"Error saving the artifact: {str(e)}"
 
@@ -3173,12 +3315,12 @@ async def _classify_routing_decision(text: str) -> dict:
         }
 
 
-async def _run_code_in_sandbox(code: str, language: str) -> tuple:
+async def _run_code_in_sandbox(code: str, language: str = "python") -> tuple:
     """(output, error?) -- gemeinsamer calc-sandbox-Call des solver_node."""
     try:
         r = await _http_client_internal.post(
             "http://calc-sandbox:8001/execute",
-            json={"code": code, "language": language.lower(), "timeout": 15.0},
+            json={"code": code, "language": "python", "timeout": 15.0, "files": []},
             timeout=20.0,
         )
         res_json = r.json()
@@ -3626,7 +3768,7 @@ async def agent_node(state: State):
         if (routing_res.get("use_blackboard_loop") and routing_res.get("task_type") != "research"
                 and _admin_turn):
             log.info(f"Reasoning Router: Trigger Blackboard Loop for: '{last_text[:60]}' | Reasoning: {routing_res.get('reasoning')}")
-            language = "powershell" if "powershell" in last_text.lower() or "pwsh" in last_text.lower() else "python"
+            language = "python"
             return {
                 "blackboard": {
                     "status": "init",
@@ -4044,16 +4186,13 @@ def _tools_for_groups(groups, needs_web: bool = False) -> list:
 
 
 #--- Werkzeuge, die nur Administratoren angeboten werden: Cloud, Sub-Agenten (die
-#--- sonst denselben Werkzeugsatz erreichen) und Schreiben in die gemeinsame
-#--- Wissensbasis.
-#--- Ebenso alles, was den Arbeitsordner liest oder beschreibt: read_document,
-#--- save_artifact und die Code-Sandbox (sie bindet den Ordner ein). Dort liegen
-#--- Uploads und Gedaechtnis ALLER Konten; solange es keinen Bereich je Konto
-#--- gibt, kaeme ein Benutzer darueber an fremde Daten.
+#--- sonst denselben Werkzeugsatz erreichen), Schreiben in die gemeinsame
+#--- Wissensbasis und die fs_-Werkzeuge.
+#--- read_document, save_artifact und execute_code sind fuer alle Rollen freigegeben,
+#--- da jedes Konto einen eigenen Dateibereich hat und die Sandbox isoliert laeuft.
 _ADMIN_ONLY_TOOLS = (
     _TOOL_GROUP_NAMES["cloud"] | _TOOL_GROUP_NAMES["agents"]
     | {"index_document", "ingest_document", "delete_indexed_document"}
-    | {"read_document", "save_artifact", "execute_code"}
 )
 
 
@@ -4338,6 +4477,7 @@ class AgentExecutorWrapper:
 
     async def ainvoke(self, payload):
         subagent_depth_var.set(0)
+        dateien_zuruecksetzen()
         origin = {
             "channel": payload.get("channel") or "dashboard",
             # Argus-Chat: an der Session-ID haengt, wohin ein Missions-Ergebnis
@@ -4412,6 +4552,8 @@ class AgentExecutorWrapper:
             _quellen_gemeldet = 0
             dokumente_zuruecksetzen()
             _dok_gemeldet = []
+            dateien_zuruecksetzen()
+            _files_gemeldet = 0
             async for event in self.graph.astream_events(
                 {"messages": messages, "user_id": payload.get("user_id"),
                  "history_summary": _history_summary},
@@ -4486,6 +4628,11 @@ class AgentExecutorWrapper:
                     if _d and _d != _dok_gemeldet:
                         yield {"doc_sources": _d}
                         _dok_gemeldet = _d
+                    #--- Neu erzeugte Dateien/Ergebnisse des Turns melden
+                    _f = dateien_liste()
+                    if len(_f) > _files_gemeldet:
+                        yield {"files": _f[_files_gemeldet:]}
+                        _files_gemeldet = len(_f)
                     # Bei verschachtelten Tools feuert das Top-Level-Tool zuletzt.
                     _raw = event_data.get("output") if isinstance(event_data, dict) else None
                     _out = _raw if isinstance(_raw, str) else _get_content(_raw)

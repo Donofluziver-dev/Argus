@@ -194,15 +194,17 @@
           <span class="chat-head-meta" id="chat-meta"></span>
           <span class="chat-head-fill"></span>
           <span class="chat-head-kv" id="chat-head-kv"></span>
+          <button class="chat-export" id="chat-user-files-btn" type="button"
+                  title="Eigene Dateien und Ergebnisse verwalten">MEINE DATEIEN</button>
           <button class="chat-export" id="chat-export" type="button"
                   title="Verlauf als Markdown herunterladen">EXPORT</button>
         </div>
         <div id="chat-messages" class="chat-messages"></div>
         <div class="chat-attachments" id="chat-attachments" style="display: none;"></div>
         <div class="chat-composer">
-          <!-- Ordner- und Klammer-Knopf sind bewusst weg: Dateien werden in den
-               Chat GEZOGEN (siehe chat.js, Drop auf #view-chat), der Ordner war
-               nur ein Sprung in den Monitor. -->
+          <!-- Datei-Knopf (Bueroklammer) fuer alle Rollen -->
+          <button id="chat-attach-doc" class="chat-attach-btn" type="button" title="Datei anhängen" aria-label="Datei anhängen"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+          <input type="file" id="chat-doc-file" accept=".pdf,.docx,.doc,.odt,.rtf,.epub,.txt,.md,.html,.htm,.json,.yaml,.yml,.csv,.xlsx,.pptx" multiple hidden>
           <!-- Bild-Knopf nur, wenn die Engine multimodal laeuft (siehe chat.js).
                Eigenes Zeichen, damit er nicht mit der Klammer verwechselt wird. -->
           <button id="chat-attach" class="chat-attach-btn" title="Bild anhängen" aria-label="Bild anhängen" style="display: none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.4" y="5.4" width="17.2" height="13.2" rx="2.2"/><circle cx="8.6" cy="10" r="1.6"/><path d="M4.2 16.4 9 12l3.2 3 2.8-2.4 4.6 3.8"/></svg></button>
@@ -220,9 +222,32 @@
   </section>
 
 
+  <!-- ===================== DIALOG: MEINE DATEIEN ===================== -->
+  <div class="modal" id="user-files-modal" hidden>
+    <div class="modal-backdrop" id="user-files-modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="user-files-modal-title" style="width:min(640px, 100%);">
+      <div class="modal-head">
+        <span id="user-files-modal-title">MEINE DATEIEN</span>
+        <span class="chat-head-fill"></span>
+        <button class="modal-close" id="user-files-modal-close" type="button" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body" style="display:flex; flex-direction:column; gap:16px;">
+        <div class="modal-path" id="user-files-quota" style="font-size:12px;"></div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <div style="font-family:var(--font-mono); font-size:12px; font-weight:600; text-transform:uppercase; color:var(--text-primary); letter-spacing:0.08em;">Hochgeladene Dateien</div>
+          <div id="user-files-list-dateien" style="display:flex; flex-direction:column; gap:6px;"></div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <div style="font-family:var(--font-mono); font-size:12px; font-weight:600; text-transform:uppercase; color:var(--text-primary); letter-spacing:0.08em;">Ergebnisse (Artefakte)</div>
+          <div id="user-files-list-ergebnisse" style="display:flex; flex-direction:column; gap:6px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
   <!-- ===================== DIALOG: DATEIEN =====================
-       Kein eigener Menuepunkt mehr: der Upload gehoert dorthin, wo man ueber die
-       Datei spricht. Geoeffnet aus der Chat-Ansicht, nur fuer Administratoren. -->
+       Geoeffnet aus dem Monitor, nur fuer Administratoren. -->
   <div class="modal" id="files-modal" hidden>
     <div class="modal-backdrop" id="files-modal-backdrop"></div>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="files-modal-title">
@@ -374,6 +399,8 @@
             <span>COLLECTION DOCS</span>
             <span class="coll-zahl" id="coll-zahl"></span>
             <span class="chat-head-fill"></span>
+            <button class="coll-btn" id="coll-upload" type="button"
+                    title="Dateien fuer die Wissensbasis hochladen">HOCHLADEN</button>
             <button class="coll-btn" id="coll-ingest" type="button"
                     title="Alle Dateien aus dem Uploads-Ordner indexieren">INGEST STARTEN</button>
             <button class="coll-clear" id="coll-clear" type="button">COLLECTION LEEREN</button>

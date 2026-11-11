@@ -67,15 +67,17 @@ talks to them over the network.
 
 ## 4. Models
 
-The operator downloads the models; they are not part of this repository.
+The models are not part of this repository. The guided setup downloads them from Hugging Face,
+each pinned to a revision and checked by SHA-256 (`setup/models.json`).
 
-| Model | Used for | License per model card |
-|---|---|---|
-| BAAI/bge-m3 | embeddings | MIT |
-| BAAI/bge-reranker-v2-m3 | reranking | Apache-2.0 |
-| Whisper large-v3-turbo (OpenAI), CTranslate2 conversion by mobiuslabsgmbh | speech recognition | MIT (OpenAI model); check the conversion's model card |
-| Serveurperso/Qwen3-TTS-GGUF | speech synthesis | Apache-2.0 |
-| language model (GGUF, chosen by the operator) | chat | depends on the model; check its model card before company use |
+| Model | Source used by the setup | Used for | License per model card |
+|---|---|---|---|
+| Qwen3.6-35B-A3B (Alibaba), GGUF | unsloth/Qwen3.6-35B-A3B-MTP-GGUF | chat (default) | Apache-2.0 |
+| BAAI/bge-m3, GGUF | gpustack/bge-m3-GGUF | embeddings | MIT |
+| BAAI/bge-reranker-v2-m3, GGUF | gpustack/bge-reranker-v2-m3-GGUF | reranking | Apache-2.0 |
+| Whisper large-v3-turbo (OpenAI), CTranslate2 conversion | dropbox-dash/faster-whisper-large-v3-turbo (formerly mobiuslabsgmbh) | speech recognition | MIT |
+| Qwen3-TTS, GGUF | Serveurperso/Qwen3-TTS-GGUF (loaded when the image is built) | speech synthesis | Apache-2.0 |
+| another language model chosen by the operator | — | chat | depends on the model; check its model card before company use |
 
 ## 5. What the copyleft and source-available licenses mean here
 

@@ -93,4 +93,4 @@ def test_oberflaeche_kennzeichnet_gesperrte_schritte_und_nennt_keinen_windows_pf
     anfang = chat.index("function chatNotizEinsetzen")
     funktion = chat[anfang:chat.index("\n}\n", anfang)]
     assert "Argus_Workspace" not in funktion
-    assert "'Uploads/' + n" in funktion
+    assert "'Dateien/' + n" in funktion

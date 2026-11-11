@@ -259,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Ordner der Installation (Standard: dieses Repo)")
     ap.add_argument("--workspace", help="Arbeitsordner (ARGUS_WORKSPACE_DIR)")
     ap.add_argument("--models", help="Ordner der Modelle (ARGUS_MODELS_DIR)")
+    # Die gefuehrte Installation (setup/install.py) erledigt die naechsten Schritte selbst.
+    ap.add_argument("--ohne-naechste-schritte", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     stack = Path(args.stack).resolve()
@@ -312,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
             print("Hinweis: Koeder-Datei nicht angelegt, weil der Arbeitsordner noch nicht feststeht.\n"
                   "  Danach von Hand: zugangsdaten.txt im Arbeitsordner mit dem Wert von CANARY_TOKENS.")
 
+    if args.ohne_naechste_schritte:
+        return 0
     print(f"""
 Naechste Schritte:
   1. .env pruefen (Modell passend zur Grafikkarte).
