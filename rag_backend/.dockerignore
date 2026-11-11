@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+test.db
+test_documents_to_ingest/
+.env
+.env.bak.*
+API_Tokens/
+tests/

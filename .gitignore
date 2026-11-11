@@ -1,0 +1,23 @@
+# Argus: Backend, Browser-Oberflaeche und Container-Stapel. Der Code hier ist die Quelle.
+
+# --- GEHEIM: darf das Geraet nie verlassen ---
+API_Tokens/
+.env
+.env.*
+!.env.example
+*.pem
+*.ppk
+id_ed25519
+id_rsa
+# Stimmaufnahmen (biometrisch), nur die Anleitung ist oeffentlich.
+voice_ref/*
+!voice_ref/README.md
+
+# --- Laufzeit ---
+__pycache__/
+*.pyc
+.pytest_cache/
+documents_to_ingest/*
+!documents_to_ingest/.gitkeep
+*.log
+

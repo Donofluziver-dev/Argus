@@ -1,0 +1,5 @@
+# Container-Skripte laufen unter Linux: immer LF, auch bei Windows-Checkout.
+* text=auto eol=lf
+*.wav binary
+*.png binary
+*.gguf binary

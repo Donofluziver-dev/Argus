@@ -1,0 +1,51 @@
+name: Backend
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**.md']
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      # Gleiche Installation wie rag_backend/Dockerfile.api.
+      - name: Abhängigkeiten
+        run: uv pip install --system -r rag_backend/pyproject.toml
+      # Die Tests setzen ihre Umgebung selbst (SQLite, Test-Secrets) und brauchen
+      # keine laufenden Container.
+      - name: Tests
+        run: python -m pytest rag_backend/tests -q -p no:cacheprovider
+      - name: Calc-Sandbox Tests
+        run: |
+          uv pip install --system sympy
+          python -m pytest calc_sandbox -q -p no:cacheprovider
+      # Die Oberflaeche hat keinen Build-Schritt: ein Tippfehler in einem Skript
+      # fiele sonst erst im Browser auf.
+      - name: Oberflaeche (JavaScript-Syntax)
+        run: |
+          for f in rag_backend/static/js/*.js; do node --check "$f"; done
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Nur Syntax: ohne -q gaebe 'config' die aufgeloeste Umgebung aus.
+      - name: docker compose config
+        run: |
+          touch .env
+          docker compose config -q
+      # Wer ins Internet darf, wer Ports veroeffentlicht. Das Skript gibt nur Namen aus.
+      - name: Netz-Abschottung
+        run: |
+          docker compose config --format json | python3 setup/check_networks.py

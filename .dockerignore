@@ -1,0 +1,6 @@
+# Build-Kontext der Wurzel (llm, embed, rerank, qdrant): nur die Startskripte.
+# Ohne diese Datei schickte Docker auch .env, API_Tokens, Stimmaufnahmen und
+# alles andere im Repo an den Builder.
+*
+!llm_start.sh
+!embed_start.sh

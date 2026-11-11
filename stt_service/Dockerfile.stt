@@ -1,0 +1,17 @@
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# av ab 19 kennt metadata_errors nicht mehr, das faster-whisper 1.2.1 beim Dekodieren uebergibt.
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart "faster-whisper==1.2.1" "av==18.1.0" requests
+COPY app.py /app/app.py
+RUN useradd -m -u 1000 sttuser && mkdir -p /home/sttuser/.cache/huggingface && chown -R sttuser:sttuser /app /home/sttuser
+# Eigener Schritt vor USER, damit die grossen Schichten darueber im Build-Cache bleiben.
+RUN pip install --no-cache-dir cryptography
+USER sttuser
+ENV WHISPER_MODEL=large-v3-turbo \
+    WHISPER_COMPUTE_TYPE=int8 \
+    WHISPER_LANGUAGE=de \
+    HF_HOME=/home/sttuser/.cache/huggingface
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8003", "--workers", "1"]

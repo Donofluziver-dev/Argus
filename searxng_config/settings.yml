@@ -1,0 +1,16 @@
+use_default_settings: true
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "CHANGE_ME_VIA_ENV_SEARXNG_SECRET"
+
+search:
+  formats:
+    - html
+    - json
+
+limiter: false
+
+ui:
+  static_use_hash: true

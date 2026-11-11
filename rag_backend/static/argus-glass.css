@@ -1,0 +1,142 @@
+/* argus-glass.css -- Glas-Thema fuer ARGUS.
+   NACH argus.css laden; die Datei ueberschreibt nur Tokens und Oberflaechen,
+   keine Struktur. Rueckbau = <link> in index.html entfernen. */
+
+:root {
+  /* kuehle Neutrals statt Lila-Dominanz */
+  --bg-color: #070a12;
+  --card-bg: rgba(146, 178, 224, 0.055);
+  --card-border: rgba(163, 198, 255, 0.11);
+  --card-border-hover: rgba(79, 216, 245, 0.45);
+  --color-blue: #4fd8f5;
+  --color-cyan: #4fd8f5;
+  --color-magenta: #ff6e8c;   /* Warn/Destruktiv jetzt Rose, nicht Neon-Magenta */
+  --color-purple: #6f7bff;
+  --color-green: #35e3a4;
+  --text-primary: #e9f0f7;
+  --text-secondary: #7e91a8;
+
+  /* eigene Tokens dieses Themas */
+  --glass: linear-gradient(180deg, rgba(146,178,224,.075), rgba(146,178,224,.028));
+  --glass-strong: linear-gradient(180deg, rgba(146,178,224,.10), rgba(146,178,224,.035));
+  --glass-line: 0 1px 0 rgba(255,255,255,.05) inset;
+  --glass-shadow: 0 16px 36px rgba(0,0,0,.35);
+  --text-dim: #5f7085;
+  --text-faint: #4d5c70;
+  --amber: #f5c56b;
+}
+
+/* Grundflaeche: ein ruhiger Verlauf, kein Raster ueber die ganze Seite */
+body {
+  background-color: var(--bg-color);
+  background-image: radial-gradient(ellipse 90% 70% at 50% -10%, #101a2b 0%, #070a12 55%, #05070d 100%);
+  background-size: auto;
+  font-weight: 400;
+}
+/* Scanlines und die drei farbigen Glows raus -- die Glasflaechen tragen die Tiefe */
+body::after { display: none; }
+.bg-glow { display: none; }
+
+/* ---- Glasflaechen ---- */
+.argus-nav,
+.panel,
+.chat-sidebar,
+.chat-main,
+.metric-block {
+  background: var(--glass);
+  border: 1px solid var(--card-border);
+  border-radius: 16px;
+  backdrop-filter: blur(20px) saturate(110%);
+  -webkit-backdrop-filter: blur(20px) saturate(110%);
+  box-shadow: var(--glass-line), var(--glass-shadow);
+}
+/* der magenta Farbbalken links an der Kopfzeile entfaellt */
+.argus-nav::before { display: none; }
+.panel::before, .panel::after { display: none; }
+.panel:hover { border-color: var(--card-border); box-shadow: var(--glass-line), var(--glass-shadow); }
+
+/* ---- Navigation ---- */
+.nav-link { color: var(--text-secondary); border-radius: 10px; letter-spacing: 2.2px; }
+.nav-link:hover { color: var(--text-primary); background: rgba(79,216,245,.07); }
+.nav-link.active {
+  color: #d6f4ff;
+  border: 1px solid rgba(79,216,245,.40);
+  background: linear-gradient(180deg, rgba(79,216,245,.20), rgba(79,216,245,.07));
+  box-shadow: 0 6px 18px rgba(15,120,150,.18);
+}
+.nav-account-btn { border-radius: 999px; background: rgba(10,15,25,.55); border: 1px solid rgba(163,198,255,.13); }
+.nav-account-btn:hover { border-color: rgba(79,216,245,.5); background: rgba(79,216,245,.08); }
+
+/* Logo: Conic-Regenbogen und Flicker weg, ruhiger Ring */
+.logo-icon { color: #7fe4ff; filter: drop-shadow(0 0 7px rgba(79,216,245,.35)); animation: none; }
+.logo-text h2 { animation: none; background: none; -webkit-text-fill-color: #eaf2fa; filter: none; letter-spacing: 3px; }
+.auth-brand { animation: none; background: none; -webkit-text-fill-color: #eaf2fa; filter: none; }
+
+/* ---- Monitor: dichter, kleinere Schrift ---- */
+.panel { padding: 14px 16px; }
+.panel-header h2 { font-size: 11px; letter-spacing: 2.2px; color: #c3d2e2; }
+/* Groesse und Sperrung der Panel-Kopfzeile stehen im Grund-CSS auf Entwurfsstand;
+   das erste Feld ist der Name, alle weiteren sind Beiwerk. Hier nur die Farbe. */
+.panel-header-desc { color: #c3d2e2; }
+.panel-header-desc > span:not(:first-child) { color: var(--text-faint); }
+.metric-block { padding: 13px 15px; border-radius: 14px; }
+.metric-block:hover { border-color: var(--card-border); }
+.metric-block-title { font-size: 8.5px; letter-spacing: 1.8px; color: var(--text-dim); }
+.metric-label { font-size: 9px; letter-spacing: 1.4px; color: var(--text-dim); }
+.metric-value { font-size: 12.5px; }
+.kv-compact-line { font-size: 9px; color: var(--text-faint); }
+
+/* ---- Chat ---- */
+.chat-item.active { background: rgba(79,216,245,.08); border-color: rgba(79,216,245,.28); }
+.chat-item:hover { background: rgba(146,178,224,.05); }
+.chat-msg.user .chat-bubble {
+  border: 1px solid rgba(79,216,245,.24);
+  background: linear-gradient(180deg, rgba(79,216,245,.11), rgba(79,216,245,.05));
+  border-radius: 14px 14px 4px 14px;
+  color: #e4f4fd;
+}
+.chat-msg.ai .chat-bubble { background: none; border: none; color: #dfe9f3; }
+.chat-bubble code { color: #a9b4ff; }
+.chat-think-head { color: #a9b4ff; border: 1px solid rgba(111,123,255,.24); background: rgba(111,123,255,.08); border-radius: 9px; }
+.chat-think-head:hover { background: rgba(111,123,255,.14); color: #d3d9ff; }
+.tool-text { color: #b0c1d4; }
+.tool-zeile:hover .tool-text { color: var(--text-primary); }
+/* Radien und Farben der Eingabezeile stehen im Grund-CSS auf Entwurfsstand --
+   hier bleibt nur der etwas kraeftigere Hover des Senden-Knopfs. */
+.chat-send-btn:hover { background: linear-gradient(180deg, rgba(79,216,245,.28), rgba(79,216,245,.12)); }
+.chat-action:last-child:hover { color: #ff98b0; background: rgba(255,110,140,.10); }
+
+/* ---- Traces: Phoenix darf die Flaeche haben ---- */
+.traces-panel-live { min-height: 640px; }
+.traces-panel-live #traces-frame { min-height: 560px; border: 1px solid var(--card-border); background: #05080f; border-radius: 12px; }
+
+/* Der Entwurf kennt kein seitenfuellendes Canvas. Die Tiefe kommt aus dem
+   Seitenverlauf und zwei Auflagen je Abschnitt -- der Nebel aus bg.js faerbte
+   alles lila und liegt deshalb still. In der Live-Ansicht bringt der Orb Sterne
+   und Warp ohnehin selbst mit. */
+#bg-canvas { display: none; }
+body.live-aktiv .live-stage { background: #04060c; border-color: rgba(163,198,255,.09); }
+
+/* Radialer Kern und feines Raster, beides nach innen ausgeblendet. Liegt hinter
+   dem Inhalt, deshalb pointer-events aus. */
+.live-stage::before,
+.live-stage::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+}
+.live-stage::before {
+  background: radial-gradient(ellipse 62% 55% at 50% 48%, rgba(16,38,66,.5), rgba(4,6,12,0) 72%);
+}
+.live-stage::after {
+  opacity: .45;
+  background-image:
+    linear-gradient(rgba(70,140,210,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(70,140,210,.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at 50% 50%, #000 12%, transparent 70%);
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 12%, transparent 70%);
+}
+
+/* Live-Ansicht: der Orb liegt auf schwarzem Grund, kein Kartenrand drumherum */
+#view-live .panel { box-shadow: var(--glass-line), var(--glass-shadow); }
+
+::placeholder { color: #55647a; }

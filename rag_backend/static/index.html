@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Argus</title>
+<link rel="stylesheet" href="argus.css">
+<link rel="stylesheet" href="argus-glass.css">
+</head>
+<body>
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
+<div class="bg-glow bg-glow-1"></div>
+<div class="bg-glow bg-glow-2"></div>
+<div class="bg-glow bg-glow-3"></div>
+
+<!-- Anmeldung. Liegt ueber allem und wird erst entfernt, wenn eine Sitzung steht. -->
+<div class="auth-gate" id="auth-gate">
+  <canvas id="auth-orb-canvas"></canvas>
+  <div class="auth-card">
+    <div class="auth-logo" id="auth-logo"></div>
+    <div class="auth-brand">ARGUS</div>
+    <div class="auth-sub" id="auth-sub">LOKALER AGENT &middot; ZUGANG ERFORDERLICH</div>
+    <form class="auth-form" id="auth-form" autocomplete="on">
+      <label class="auth-label" for="auth-user">BENUTZER</label>
+      <span class="auth-feld"><i class="auth-feld-icon" data-icon="person"></i>
+        <input class="auth-input" id="auth-user" name="username" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required></span>
+      <label class="auth-label" for="auth-pass">PASSWORT</label>
+      <span class="auth-feld"><i class="auth-feld-icon" data-icon="schloss"></i>
+        <input class="auth-input" id="auth-pass" name="password" type="password"
+               autocomplete="current-password" required></span>
+      <div class="auth-row" id="auth-confirm-row" style="display:none;">
+        <label class="auth-label" for="auth-pass2">PASSWORT WIEDERHOLEN</label>
+        <span class="auth-feld"><i class="auth-feld-icon" data-icon="schloss"></i>
+          <input class="auth-input" id="auth-pass2" type="password" autocomplete="new-password"></span>
+      </div>
+      <!-- Nur beim Anlegen des ersten Kontos und nur, wenn die Installation einen
+           Einrichtungs-Schluessel verlangt (DASHBOARD_SETUP_TOKEN). -->
+      <div class="auth-row" id="auth-token-row" style="display:none;">
+        <label class="auth-label" for="auth-token">EINRICHTUNGS-SCHL&Uuml;SSEL</label>
+        <span class="auth-feld"><i class="auth-feld-icon" data-icon="schloss"></i>
+          <input class="auth-input" id="auth-token" type="password" autocomplete="off"
+                 spellcheck="false"></span>
+      </div>
+      <label class="auth-remember" id="auth-remember-row">
+        <input type="checkbox" id="auth-remember">
+        <span>Angemeldet bleiben <span class="auth-remember-hint">(7 Tage)</span></span>
+      </label>
+      <button class="auth-btn" id="auth-submit" type="submit">
+        <span id="auth-submit-text">Anmelden</span><i data-icon="pfeil"></i>
+      </button>
+      <div class="auth-msg" id="auth-msg"></div>
+      <button type="button" class="auth-switch" id="auth-switch" hidden></button>
+    </form>
+    <!-- Der Punkt meldet, ob das Backend geantwortet hat. Rechts steht, was
+         hinter der Tuer laeuft -- eine Aufzaehlung, keine Statusaussage. -->
+    <div class="auth-fuss">
+      <span class="auth-dienst" id="auth-dienst"><i></i>PR&Uuml;FE DIENST</span>
+      <span class="auth-stack">LOKAL &middot; DOKUMENTE &middot; SUCHE</span>
+    </div>
+  </div>
+</div>
+
+<div class="dashboard-container" id="app-shell" hidden>
+
+  <nav class="argus-nav">
+    <span class="logo-area">
+      <span class="logo-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="4.6" opacity=".45"/><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M12 1.6v2.6M12 19.8v2.6M1.6 12h2.6M19.8 12h2.6"/></svg></span>
+      <span class="logo-text"><h2>ARGUS</h2></span>
+    </span>
+    <!-- Eigener Kasten: die Kopfzeile setzt 20 px zwischen ihre Gruppen, die drei
+         Reiter stehen untereinander aber mit 4 px eng zusammen. -->
+    <div class="nav-links">
+      <a class="nav-link" href="#/live"    data-view="live">Live</a>
+      <a class="nav-link" href="#/chat"    data-view="chat">Chat</a>
+      <a class="nav-link" href="#/monitor" data-view="monitor" data-role="admin">Monitor</a>
+    </div>
+    <!-- Dehnt sich, statt margin-left:auto an KV und Status zu haengen: die KV-Anzeige
+         faellt bei einem Benutzer-Konto weg, und zwei auto-Raender teilten den Rest. -->
+    <span class="nav-fill"></span>
+    <!-- KV-Auslastung: Prozent, Balken und wie oft/wann verdichtet wurde. Nur fuer
+         Administratoren -- die Zahl kommt aus /summary, das ein Benutzer-Konto nicht darf. -->
+    <span class="nav-kv" id="nav-kv" data-role="admin" title="KV-Cache-Auslastung">
+      <span class="nav-kv-label">KV</span>
+      <span class="nav-kv-pct" id="nav-kv-pct">&mdash;</span>
+      <span class="nav-kv-bar"><i id="nav-kv-fill"></i></span>
+      <span class="nav-kv-comp" id="nav-kv-comp"></span>
+    </span>
+    <span class="nav-status" id="nav-status">
+      <span class="pulse-dot"></span>
+      <span class="status-text" id="nav-status-text">ONLINE</span>
+    </span>
+
+    <div class="nav-account">
+      <button class="nav-account-btn" id="account-btn" aria-haspopup="true" aria-expanded="false">
+        <span class="account-dot" id="account-dot"></span>
+        <span class="account-ident">
+          <span class="account-ident-name" id="account-name">&mdash;</span>
+          <span class="account-ident-rolle" id="account-role">&mdash;</span>
+        </span>
+      </button>
+      <div class="account-menu" id="account-menu" hidden>
+        <button class="account-menu-item" id="account-password">Passwort &auml;ndern</button>
+      </div>
+    </div>
+    <button class="nav-logout" id="account-logout" type="button"
+            title="Abmelden" aria-label="Abmelden"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.6H6.4a1.8 1.8 0 0 0-1.8 1.8v11.2a1.8 1.8 0 0 0 1.8 1.8H14"/><path d="M17.4 8.6 20.8 12l-3.4 3.4"/><path d="M20.8 12H10.2"/></svg></button>
+  </nav>
+
+  <!-- Eigenes Passwort aendern. Das Backend verlangt dafuer das aktuelle Passwort:
+       ein offenes Fenster oder ein gestohlenes Cookie allein reicht dann nicht. -->
+  <div class="modal" id="pw-modal" hidden>
+    <div class="modal-backdrop" id="pw-modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pw-modal-title"
+         style="width:min(420px, 100%);">
+      <div class="modal-head">
+        <span id="pw-modal-title">PASSWORT &Auml;NDERN</span>
+        <span class="chat-head-fill"></span>
+        <button class="modal-close" id="pw-modal-close" type="button" aria-label="Schlie&szlig;en">&times;</button>
+      </div>
+      <form class="modal-body" id="pw-form" style="display:flex; flex-direction:column; gap:8px;">
+        <label class="auth-label" for="pw-current">AKTUELLES PASSWORT</label>
+        <span class="auth-feld">
+          <input class="auth-input" id="pw-current" type="password" autocomplete="current-password" required></span>
+        <label class="auth-label" for="pw-new">NEUES PASSWORT (MIND. 8 ZEICHEN)</label>
+        <span class="auth-feld">
+          <input class="auth-input" id="pw-new" type="password" autocomplete="new-password" minlength="8" required></span>
+        <label class="auth-label" for="pw-new2">NEUES PASSWORT WIEDERHOLEN</label>
+        <span class="auth-feld">
+          <input class="auth-input" id="pw-new2" type="password" autocomplete="new-password" minlength="8" required></span>
+        <button class="auth-btn" id="pw-submit" type="submit" style="margin-top:8px;"><span>Passwort &auml;ndern</span></button>
+        <div class="auth-msg" id="pw-msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===================== VIEW: LIVE (Sprachmodus) =====================
+       Vollbild, dunkel, nur Orb und Sprache. Der Verlauf gehoert in die
+       Chat-Ansicht -- hier soll nichts vom Zuhoeren ablenken. -->
+  <section class="view" id="view-live">
+    <div class="live-stage">
+      <canvas id="galaxy-canvas" width="360" height="360"></canvas>
+
+      <div class="live-state" id="vc-statelabel">
+        <span class="live-state-wort"><span class="live-state-punkt"></span><span id="vc-statewort">Bereit</span></span>
+        <span class="live-state-sub" id="vc-substate">Warte auf Eingabe</span>
+      </div>
+
+      <!-- Untertitel: nur der laufende Wortwechsel. Ohne ihn sieht man nicht,
+           ob die Spracherkennung richtig verstanden hat. -->
+      <div class="live-caption" id="vc-caption">
+        <div class="live-caption-user" id="vc-caption-user"></div>
+        <div class="live-caption-ai" id="vc-caption-ai"></div>
+      </div>
+
+      <div class="live-controls">
+        <button class="live-btn" id="vc-tts" aria-label="Sprachausgabe an/aus"
+                title="Sprachausgabe an/aus"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6.5a8 8 0 0 1 0 11"/></svg></button>
+        <button class="live-mic" id="vc-mic" aria-label="Sprechen"
+                title="Sprechen (Leertaste)">
+          <span class="live-mic-ring"></span>
+          <span class="live-mic-glyph"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 19v3"/></svg></span>
+        </button>
+        <button class="live-btn" id="vc-keyboard" aria-label="Stattdessen tippen"
+                title="Stattdessen tippen"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12"/></svg></button>
+      </div>
+
+      <div class="live-typebar" id="vc-typebar" hidden>
+        <input id="vc-text" placeholder="Nachricht eingeben&hellip;" autocomplete="off">
+        <button class="live-btn" id="vc-send" aria-label="Senden" title="Senden"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15"/><path d="M13 6l6 6-6 6"/></svg></button>
+      </div>
+
+      <div class="live-hint" id="vc-hint">Leertaste zum Sprechen &middot; Esc bricht ab</div>
+    </div>
+  </section>
+
+  <!-- ===================== VIEW: CHAT ===================== -->
+  <section class="view" id="view-chat">
+    <!-- Ohne 'panel': Verlauf und Unterhaltung sind im Entwurf zwei eigene Karten,
+         die Huelle ist nur das Raster dazwischen. -->
+    <div class="chat-shell">
+      <aside class="chat-sidebar">
+        <button id="chat-new" class="chat-new-btn">Neuer Chat</button>
+        <div class="chat-suche">
+          <span class="chat-suche-icon" id="chat-suche-icon"></span>
+          <input id="chat-suche" type="search" placeholder="Verlauf durchsuchen"
+                 autocomplete="off" aria-label="Verlauf durchsuchen">
+        </div>
+        <div id="chat-list" class="chat-list"><div class="muted">Lade&hellip;</div></div>
+      </aside>
+      <main class="chat-main">
+        <div class="chat-head">
+          <span id="chat-title">Neuer Chat</span>
+          <span class="chat-head-meta" id="chat-meta"></span>
+          <span class="chat-head-fill"></span>
+          <span class="chat-head-kv" id="chat-head-kv"></span>
+          <button class="chat-export" id="chat-export" type="button"
+                  title="Verlauf als Markdown herunterladen">EXPORT</button>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-attachments" id="chat-attachments" style="display: none;"></div>
+        <div class="chat-composer">
+          <!-- Ordner- und Klammer-Knopf sind bewusst weg: Dateien werden in den
+               Chat GEZOGEN (siehe chat.js, Drop auf #view-chat), der Ordner war
+               nur ein Sprung in den Monitor. -->
+          <!-- Bild-Knopf nur, wenn die Engine multimodal laeuft (siehe chat.js).
+               Eigenes Zeichen, damit er nicht mit der Klammer verwechselt wird. -->
+          <button id="chat-attach" class="chat-attach-btn" title="Bild anhängen" aria-label="Bild anhängen" style="display: none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.4" y="5.4" width="17.2" height="13.2" rx="2.2"/><circle cx="8.6" cy="10" r="1.6"/><path d="M4.2 16.4 9 12l3.2 3 2.8-2.4 4.6 3.8"/></svg></button>
+          <input type="file" id="chat-file" accept="image/*" multiple hidden>
+          <textarea id="chat-input" rows="1" placeholder="Nachricht an ARGUS&hellip;"></textarea>
+          <button id="chat-send" class="chat-send-btn" title="Senden (Enter)" aria-label="Senden"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.4 12h13.2M12.4 6.2l5.8 5.8-5.8 5.8"/></svg></button>
+        </div>
+        <div class="chat-fuss">
+          <span>ENTER SENDET &middot; SHIFT+ENTER NEUE ZEILE</span>
+          <span class="chat-head-fill"></span>
+          <span id="chat-fuss-kontext"></span>
+        </div>
+      </main>
+    </div>
+  </section>
+
+
+  <!-- ===================== DIALOG: DATEIEN =====================
+       Kein eigener Menuepunkt mehr: der Upload gehoert dorthin, wo man ueber die
+       Datei spricht. Geoeffnet aus der Chat-Ansicht, nur fuer Administratoren. -->
+  <div class="modal" id="files-modal" hidden>
+    <div class="modal-backdrop" id="files-modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="files-modal-title">
+      <div class="modal-head">
+        <span id="files-modal-title">ANHANG</span>
+        <span class="modal-path">IN DEN CHAT LADEN ODER INGESTIEREN</span>
+        <span class="chat-head-fill"></span>
+        <button class="modal-close" id="files-modal-close" aria-label="Schließen">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="dropzone" id="dropzone" tabindex="0" role="button"
+             aria-label="Dateien auswählen oder hierher ziehen">
+          <div class="dropzone-icon" id="dropzone-icon"></div>
+          <div class="dropzone-title">Dateien hierher ziehen</div>
+          <div class="dropzone-hint" id="dropzone-hint">PDF &middot; DOCX &middot; MD &middot; TXT &middot; JSON</div>
+          <button class="dropzone-btn" id="dropzone-btn" type="button">Durchsuchen</button>
+          <input type="file" id="files-input" multiple hidden>
+        </div>
+
+        <div class="upload-queue" id="upload-queue"></div>
+
+        <!-- Was bereits im Arbeitsverzeichnis liegt und auf ein Ziel wartet. -->
+        <div class="upload-liste" id="upload-liste"></div>
+
+        <!-- Zwei Ziele statt einer Dateiliste: der Dialog ist der Weg HINEIN.
+             Verwalten und Loeschen liegt im Monitor unter Collection. -->
+        <div class="upload-ziele" id="upload-ziele" hidden>
+          <span class="upload-ziele-text" id="upload-ziele-text"></span>
+          <span class="chat-head-fill"></span>
+          <button class="ziel-btn" id="ziel-chat" type="button"><i data-icon="pfeil" data-icon-groesse="13"></i>In den Chat senden</button>
+          <button class="ziel-btn is-primary" id="ziel-ingest" type="button"><i data-icon="hoch" data-icon-groesse="13"></i>Ingestieren</button>
+        </div>
+
+        <div class="files-log" id="files-log" hidden>
+          <div class="files-log-head">
+            <span>Ergebnis</span>
+            <span class="files-log-close" id="files-log-close">&times;</span>
+          </div>
+          <pre id="files-log-body"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- ===================== VIEW: MONITOR =====================
+       Vier Unterreiter statt einer langen Seite: jeder passt auf eine
+       Bildschirmhoehe. Umgeschaltet wird nach demselben .active-Muster wie die
+       Hauptansichten -- der Hash bleibt einsegmentig (#/monitor). -->
+  <section class="view" id="view-monitor">
+
+    <div class="subtabs" role="tablist">
+      <button class="subtab active" data-tab="overview" role="tab">Überblick</button>
+      <button class="subtab" data-tab="traces" role="tab">Traces</button>
+      <button class="subtab" data-tab="accounts" role="tab">Konten</button>
+    </div>
+
+    <!-- ---------- Überblick ---------- -->
+    <div class="subview active" id="tab-overview">
+
+      <!-- Fuenf Kennzahlen auf einen Blick. Die Werte stammen aus /summary und
+           stehen weiter unten ausfuehrlicher; hier zaehlt der schnelle Blick. -->
+      <div class="kacheln">
+        <div class="kachel">
+          <div class="kachel-kopf">DURCHSATZ</div>
+          <div class="kachel-zahl"><span id="k-durchsatz">&ndash;</span><i>token/s</i></div>
+          <svg class="kachel-spark" id="k-spark" viewBox="0 0 120 26" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="kachel">
+          <div class="kachel-kopf">TTFT</div>
+          <div class="kachel-zahl"><span id="k-ttft">&ndash;</span><i>s</i></div>
+          <div class="kachel-sub" id="k-lauf"></div>
+        </div>
+        <div class="kachel">
+          <div class="kachel-kopf">KV-CACHE</div>
+          <div class="kachel-zahl"><span id="k-kv">&ndash;</span><i>%</i></div>
+          <div class="kachel-balken"><i id="k-kv-bar"></i></div>
+          <div class="kachel-sub" id="k-kv-sub"></div>
+        </div>
+        <div class="kachel">
+          <div class="kachel-kopf">ANFRAGEN</div>
+          <div class="kachel-zahl"><span id="k-req">&ndash;</span><i>gesamt</i></div>
+          <div class="kachel-sub" id="k-req-sub"></div>
+        </div>
+        <div class="kachel">
+          <div class="kachel-kopf">PREFIX-CACHE</div>
+          <div class="kachel-zahl"><span id="k-cache">&ndash;</span><i>% treffer</i></div>
+          <div class="kachel-balken"><i id="k-cache-bar"></i></div>
+          <div class="kachel-sub" id="k-tts-sub"></div>
+        </div>
+      </div>
+
+      <!-- Reihen statt Spalten: der Entwurf stellt SYSTEM, Auslastung und
+           Werkzeuge nebeneinander, darunter Collection und Auditprotokoll ueber
+           die volle Breite. Die frueheren Panels LLM SPEED, KV-CACHE METRIC und
+           RAG & WEB-SEARCH sind entfallen -- ihre Zahlen stehen in den Kacheln. -->
+      <div class="monitor-reihe">
+        <div class="panel">
+          <div class="panel-header-desc">
+            <span>SYSTEM</span>
+            <span>LOKAL</span>
+          </div>
+          <!-- Vier Zeilen statt der frueheren Liste: Anfragen und Dokumentzahl
+               stehen jetzt in den Kacheln bzw. im Collection-Kopf. -->
+          <div class="sys-grid">
+            <span class="sys-key">MODELL</span>
+            <span class="sys-wert" id="model-name">&ndash;</span>
+            <span class="sys-key">EMBEDDING</span>
+            <span class="sys-wert sys-cyan" id="sys-embed">&ndash;</span>
+            <span class="sys-key">SUCHE</span>
+            <span class="sys-wert" id="sys-suche">&ndash;</span>
+            <span class="sys-key">TTS</span>
+            <span class="sys-wert" id="sys-tts">&ndash;</span>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-header-desc">
+            <span>AGENTEN-LAST</span>
+            <span>LOAD FACTOR</span>
+          </div>
+          <div class="stats-list">
+            <div class="stats-item">
+              <div class="stats-label last-label">RAG-Node <span id="rag-load">&ndash;</span></div>
+              <div class="progress-container"><div class="progress-fill" id="rag-load-bar"></div></div>
+            </div>
+            <div class="stats-item">
+              <div class="stats-label last-label">Search-Node <span id="search-load">&ndash;</span></div>
+              <div class="progress-container"><div class="progress-fill" id="search-load-bar"></div></div>
+            </div>
+            <div class="stats-item">
+              <div class="stats-label last-label">Action-Node <span id="action-load">&ndash;</span></div>
+              <div class="progress-container"><div class="progress-fill" id="action-load-bar"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-header-desc">
+            <span>WERKZEUG-AUFRUFE</span>
+            <span>SEIT START</span>
+          </div>
+          <div class="tool-usage" id="tool-usage"></div>
+          <div class="muted" id="toolUsageEmpty" style="font-size: 0.78rem;">Noch kein Werkzeug aufgerufen.</div>
+        </div>
+      </div>
+
+        <!-- Collection: jede Datei mit Chunks, Groesse und Zeitpunkt. Geloescht wird
+             der INDEX, nicht das Original im Arbeitsverzeichnis. -->
+        <div class="panel">
+          <div class="panel-header-desc">
+            <span>COLLECTION DOCS</span>
+            <span class="coll-zahl" id="coll-zahl"></span>
+            <span class="chat-head-fill"></span>
+            <button class="coll-btn" id="coll-ingest" type="button"
+                    title="Alle Dateien aus dem Uploads-Ordner indexieren">INGEST STARTEN</button>
+            <button class="coll-clear" id="coll-clear" type="button">COLLECTION LEEREN</button>
+          </div>
+          <div class="coll-list" id="docs-list-container">
+            <div class="muted">Lade Dokumente&hellip;</div>
+          </div>
+        </div>
+
+    <!-- Reihenfolge wie im Entwurf: das Auditprotokoll ueber die volle Breite,
+         Evals und Missionen darunter nebeneinander. -->
+    <div class="collapsible-panel">
+      <div class="panel-header" id="audit-panel-header">
+        <h2>Auditprotokoll <span class="panel-head-sub" id="audit-sub">ACTION-ENGINE</span></h2>
+        <span class="toggle-icon is-zu" id="audit-panel-icon" data-icon="chevron" data-icon-groesse="11"></span>
+      </div>
+      <div class="panel-content collapsed" id="audit-panel">
+        <div class="panel-toolbar">
+          <button id="btnCopyAuditPath" class="eval-btn eval-btn-blue" data-path="C:\Argus_Workspace\Evals\Action_Audit"
+                  title="Pfad in die Zwischenablage -- im Explorer mit Strg+V in die Adresszeile"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
+          <button id="btnClearAudit" class="eval-btn eval-btn-magenta"><i data-icon="trash" data-icon-groesse="13"></i>Audit-DB leeren</button>
+          <span class="muted" style="font-size: 0.78rem;">JSONL-Dateien bleiben in C:\Argus_Workspace\Evals\Action_Audit\ erhalten</span>
+        </div>
+        <table class="audit-tabelle"><thead><tr><th>ZEIT</th><th>WERKZEUG</th><th>KLASSE</th><th>STATUS</th><th>LATENZ</th></tr></thead><tbody id="audit"></tbody></table>
+        <div class="muted" id="auditEmpty" style="margin-top:10px;">Auditprotokoll leer.</div>
+      </div>
+    </div>
+
+    <div class="monitor-reihe">
+    <div class="collapsible-panel">
+      <div class="panel-header" id="evals-panel-header">
+        <h2>Qualit&auml;tssicherungs-Eval-L&auml;ufe</h2>
+        <span class="toggle-icon is-zu" id="evals-panel-icon" data-icon="chevron" data-icon-groesse="11"></span>
+      </div>
+      <div class="panel-content collapsed" id="evals-panel">
+        <div class="panel-toolbar">
+          <button id="btnOpenFolder" class="eval-btn eval-btn-blue"><i data-icon="folder" data-icon-groesse="13"></i>Run-Logs anzeigen</button>
+          <button id="btnCopyEvalPath" class="eval-btn eval-btn-blue" data-path="C:\Argus_Workspace\Evals\Run_Logs"
+                  title="Pfad in die Zwischenablage -- im Explorer mit Strg+V in die Adresszeile"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
+          <button id="btnClearEvals" class="eval-btn eval-btn-magenta"><i data-icon="trash" data-icon-groesse="13"></i>Verlauf l&ouml;schen</button>
+          <span class="muted" style="font-size: 0.78rem; margin-left: 8px;">C:\Argus_Workspace\Evals\Run_Logs\</span>
+        </div>
+        <table><thead><tr><th>Zeitstempel</th><th>Suite</th><th>Konfiguration</th><th>Metrik</th><th>Wert</th></tr></thead><tbody id="evals"></tbody></table>
+        <div class="muted" id="evalsEmpty" style="margin-top:10px;">Keine Eval-Datens&auml;tze gefunden.</div>
+        <div id="evalLogsBox" style="display:none; margin-top:14px;">
+          <div class="muted" style="font-size:0.78rem; margin-bottom:6px;"><span id="evalLogsDir">/app/evals/Run_Logs</span></div>
+          <div id="evalLogsList"></div>
+          <pre id="evalLogContent" style="display:none; margin-top:10px; max-height:340px; overflow:auto; background:rgba(0,0,0,0.35); border:1px solid rgba(0,229,255,0.25); border-radius:8px; padding:12px; font-size:0.74rem; white-space:pre-wrap; word-break:break-word;"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="collapsible-panel">
+      <div class="panel-header" id="missions-panel-header">
+        <h2>Cloud-Missionen (Gemini)</h2>
+        <span class="toggle-icon is-zu" id="missions-panel-icon" data-icon="chevron" data-icon-groesse="11"></span>
+      </div>
+      <div class="panel-content collapsed" id="missions-panel">
+        <div class="panel-toolbar">
+          <button id="btnClearMissions" class="eval-btn eval-btn-magenta"><i data-icon="trash" data-icon-groesse="13"></i>Beendete l&ouml;schen</button>
+          <span class="muted" style="font-size: 0.78rem;">Laufende Missionen bleiben stehen &mdash; erst abbrechen, dann l&ouml;schen. Zeile anklicken zeigt das Ergebnis.</span>
+        </div>
+        <table><thead><tr><th>ID</th><th>Status</th><th>Provider</th><th>Calls</th><th>Tokens ein/aus</th><th>Schritt</th><th>Ziel</th><th></th></tr></thead><tbody id="missions"></tbody></table>
+        <div class="muted" id="missionsEmpty" style="margin-top:10px;">Keine Missionen vorhanden.</div>
+      </div>
+    </div>
+    </div>
+
+    <!-- ---------- Ablaufverfolgung ---------- -->
+    </div>
+
+    <div class="subview" id="tab-traces">
+        <div class="panel traces-panel-live">
+          <!-- Eine Zeile wie im Entwurf: Name, Quelle, Zahl, dann die beiden Knoepfe. -->
+          <div class="traces-kopf">
+            <span class="traces-titel">TRACES</span>
+            <span class="traces-quelle" id="traces-quelle"><i></i><span id="traces-adresse">PHOENIX</span></span>
+            <span class="chat-head-fill"></span>
+            <span class="traces-zahl" id="traces-zahl"></span>
+            <button id="btnTracesReload" class="traces-btn" type="button" title="Trace-Ansicht neu laden"><i data-icon="reload" data-icon-groesse="12"></i>Neu laden</button>
+            <a href="#" id="traces-extern" target="_blank" rel="noopener"
+               class="traces-btn is-primary"><i data-icon="extern" data-icon-groesse="12"></i>Eigener Tab</a>
+          </div>
+          <!-- Die Adresse kommt aus /v1/dashboard/config (DASHBOARD_TRACES_URL) und
+               wird erst beim Betreten der Ansicht gesetzt (ops.js): ein iframe mit
+               src im DOM zieht die Phoenix-Oberflaeche sofort mit. -->
+          <iframe id="traces-frame" title="Phoenix Tracing"></iframe>
+          <div class="muted" id="traces-hint" style="font-size:0.72rem; margin-top:8px;">
+            L&auml;dt beim Betreten dieser Ansicht. Bleibt die Fl&auml;che leer, ist die
+            Ablaufverfolgung von diesem Rechner aus nicht erreichbar
+            (<code>DASHBOARD_TRACES_URL</code>) oder der Container <code>phoenix</code>
+            l&auml;uft nicht.
+          </div>
+        </div>
+    </div>
+
+    <!-- ---------- Konten ---------- -->
+    <div class="subview" id="tab-accounts">
+        <div class="panel">
+          <div class="panel-header-desc">
+            <span>BENUTZERKONTEN</span>
+            <span>ZUGANG &amp; ROLLEN</span>
+          </div>
+          <div class="users-list" id="users-list"><div class="muted">Lade&hellip;</div></div>
+          <form class="users-add" id="users-add">
+            <input class="users-input" id="user-new-name" placeholder="Benutzername"
+                   autocapitalize="none" spellcheck="false" autocomplete="off">
+            <input class="users-input" id="user-new-pass" type="password"
+                   placeholder="Passwort (min. 8)" autocomplete="new-password">
+            <select class="users-input users-role" id="user-new-role">
+              <option value="user">Benutzer</option>
+              <option value="admin">Administrator</option>
+            </select>
+            <button class="eval-btn eval-btn-blue" type="submit">Konto anlegen</button>
+          </form>
+          <div class="muted" id="users-msg" style="font-size:0.74rem;"></div>
+        </div>
+    </div>
+
+  </section>
+</div>
+<script src="js/common.js"></script>
+<script src="js/bg.js"></script>
+<script src="js/orb.js"></script>
+<script src="js/auth.js"></script>
+<script src="js/voice.js"></script>
+<script src="js/ops.js"></script>
+<script src="js/files.js"></script>
+<script src="js/chat.js"></script>
+<script src="js/argus-orb.js"></script>
+<script src="js/router.js"></script>
+</body>
+</html>

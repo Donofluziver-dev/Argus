@@ -1,0 +1,21 @@
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential gcc curl wget locales \
+    && sed -i '/^# *en_US.UTF-8 UTF-8/s/^# //' /etc/locale.gen \
+    && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --upgrade pip uv
+COPY pyproject.toml .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r pyproject.toml
+COPY . /app/rag_backend
+#--- /app/data vorab anlegen: ein neues benanntes Volume uebernimmt Besitzer und
+#--- Rechte dieses Ordners. Fehlt er, legt Docker den Mountpunkt root-eigen an.
+RUN useradd -m -u 1000 ragbackend && mkdir -p /app/data && chown -R ragbackend:ragbackend /app
+USER ragbackend
+ENV PYTHONPATH=/app \
+    PYTHONIOENCODING=utf-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+CMD ["uvicorn", "rag_backend.main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]

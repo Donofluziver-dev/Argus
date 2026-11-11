@@ -1,0 +1,23 @@
+# Embedding (bge-m3) und Reranking (bge-reranker-v2-m3) fuer die Dokumentensuche der
+# Desktop-App. Dasselbe llama.cpp-Build wie Dockerfile.llm, aber die CPU-Variante:
+# der Grafikspeicher bleibt fuer Qwen und seinen Kontext.
+FROM ghcr.io/ggml-org/llama.cpp:server-b11977@sha256:01c2bc28d51291536df2ccebe5c6af1cdec9ea9b2bd98ac59556408caf96d3f8
+USER 0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-cryptography \
+    && rm -rf /var/lib/apt/lists/*
+# Gleicher Entschluesseler wie in Dockerfile.llm: beide Dienste nutzen denselben API-Key.
+RUN cat >/usr/local/bin/decrypt_secret.py <<'PY'
+import sys
+from pathlib import Path
+from cryptography.fernet import Fernet
+
+value = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+if value.startswith("ENC:"):
+    key = Path("/run/secrets/fernet_key").read_bytes().strip()
+    value = Fernet(key).decrypt(value[4:].encode()).decode()
+print(value)
+PY
+COPY embed_start.sh /usr/local/bin/embed_start.sh
+RUN chmod +x /usr/local/bin/embed_start.sh
+ENTRYPOINT ["/usr/local/bin/embed_start.sh"]

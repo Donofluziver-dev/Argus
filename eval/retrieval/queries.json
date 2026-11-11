@@ -1,0 +1,422 @@
+[
+  {
+    "id": "q01",
+    "query": "Welche Summe erstattet das Unternehmen für Geschäftsreisen mit dem Privatwagen im Jahr 2024 pro Strecke?",
+    "relevant": ["reisekostenrichtlinie_2024.md"],
+    "type": "semantic",
+    "answer_hint": "0,30 Euro je gefahrenem Kilometer"
+  },
+  {
+    "id": "q02",
+    "query": "Innerhalb welcher Frist muss eine IT-Sicherheitswarnung oder Cyber-Attacke gemeldet sein?",
+    "relevant": ["it_sicherheitsrichtlinie.md"],
+    "type": "semantic",
+    "answer_hint": "Binnen maximal 45 Minuten"
+  },
+  {
+    "id": "q03",
+    "query": "Mit wie viel Vorlaufzeit muss eine längere unbezahlte berufliche Auszeit beantragt werden?",
+    "relevant": ["urlaubs_und_homeoffice_regelung.md"],
+    "type": "semantic",
+    "answer_hint": "Mindestens 6 Monate vor dem geplanten Freistellungsbeginn"
+  },
+  {
+    "id": "q04",
+    "query": "Nach welcher Betriebsdauer ist das allererste Mal frisches Getriebeöl einzufüllen?",
+    "relevant": ["wartungsanleitung_planetengetriebe_pg3.md"],
+    "type": "semantic",
+    "answer_hint": "Nach exakt 250 Betriebsstunden"
+  },
+  {
+    "id": "q05",
+    "query": "Welchen prozentualen Aufschlag spendiert der Betrieb zur freiwilligen Rente aus dem Bruttogehalt?",
+    "relevant": ["internes_faq_betriebliche_altersvorsorge.md"],
+    "type": "semantic",
+    "answer_hint": "20 Prozent"
+  },
+  {
+    "id": "q06",
+    "query": "Wohin laufen die Beschäftigten bei Feueralarm im Bielefelder Werk?",
+    "relevant": ["brandschutz_und_evakuierungsordnung_2025.md"],
+    "type": "semantic",
+    "answer_hint": "Parkplatz P3 gegenüber Werkstor Süd"
+  },
+  {
+    "id": "q07",
+    "query": "Welche fixe Grundgebühr fällt laut Stromabkommen monatlich für die Stromversorgung in Bielefeld an?",
+    "relevant": ["rahmenvertrag_energieversorgung_stadtwerke_2025.md"],
+    "type": "semantic",
+    "answer_hint": "1.200,00 Euro rein netto pro Monat"
+  },
+  {
+    "id": "q08",
+    "query": "Wie lange muss die Spülflüssigkeit ohne Belastung im Gehäuse zirkulieren?",
+    "relevant": ["wartungsanleitung_schmierstoffwechsel_allgemein.md"],
+    "type": "semantic",
+    "answer_hint": "Mindestens 15 Minuten"
+  },
+  {
+    "id": "q09",
+    "query": "Zu welchem Zeitpunkt ist das erste Feedbackgespräch während der Einarbeitungsphase angesetzt?",
+    "relevant": ["onboarding_checkliste_technischer_vertrieb.md"],
+    "type": "semantic",
+    "answer_hint": "Nach 3 Monaten"
+  },
+  {
+    "id": "q10",
+    "query": "Welche Pauschale stellt der Antriebsbauer für die Transportsicherung je Holzpalette in Rechnung?",
+    "relevant": ["preisliste_standardantriebe_2025.md"],
+    "type": "semantic",
+    "answer_hint": "85,00 Euro je Europalette"
+  },
+  {
+    "id": "q11",
+    "query": "Aus welcher Gusseisen-Güte wird der äußere Getriebekörper des Modells KG-200 gegossen?",
+    "relevant": ["produktdatenblatt_kegelradgetriebe_kg200.md"],
+    "type": "semantic",
+    "answer_hint": "Sphäroguss EN-GJS-400-15"
+  },
+  {
+    "id": "q12",
+    "query": "Wie viele fehlerhafte Bauteile wurden wegen Rissgefahr von dem Paderborner Landmaschinenhersteller zurückgeholt?",
+    "relevant": ["reklamation_charge_rk_2025_0041.md"],
+    "type": "semantic",
+    "answer_hint": "14 gefertigte Einheiten"
+  },
+  {
+    "id": "q13",
+    "query": "Auf wie viele Minuten muss die Begasung der flüssigen Legierung zur Vermeidung von Gaseinschlüssen ausgedehnt werden?",
+    "relevant": ["lieferantenbewertung_metallguss_saxonia_2024.md"],
+    "type": "semantic",
+    "answer_hint": "Auf 14 Minuten"
+  },
+  {
+    "id": "q14",
+    "query": "Über welche Zeitspanne wird die Hochvoltfestigkeit der Motorwicklung beim Durchschlagstest aufrechterhalten?",
+    "relevant": ["pruefprotokoll_endabnahme_chargenpruefung_cp25.md"],
+    "type": "semantic",
+    "answer_hint": "2,0 Sekunden"
+  },
+  {
+    "id": "q15",
+    "query": "Welche Wuchtgütestufe ist für die rotierende Welle des Aggregats FM-45 verbindlich vorgeschrieben?",
+    "relevant": ["stueckliste_flanschmotor_ha_22091_k.md"],
+    "type": "semantic",
+    "answer_hint": "G 2.5 nach DIN ISO 1940"
+  },
+  {
+    "id": "q16",
+    "query": "Montagezeit HA-40817-K",
+    "relevant": ["stueckliste_planetenstufe_ha_40817_k.md"],
+    "type": "exact_id",
+    "answer_hint": "Montagezeit 42 Minuten (Richtwert)"
+  },
+  {
+    "id": "q17",
+    "query": "Montagezeit HA-40871-K",
+    "relevant": ["stueckliste_planetenstufe_ha_40871_k.md"],
+    "type": "exact_id",
+    "answer_hint": "58 Minuten"
+  },
+  {
+    "id": "q18",
+    "query": "Zahlungsziel HAT-V-2025-0104",
+    "relevant": ["rahmenvertrag_kessler_logistik_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "30 Tage rein netto ab Rechnungserhalt, 2 % Skonto bei Zahlung innerhalb von 10 Kalendertagen"
+  },
+  {
+    "id": "q19",
+    "query": "Skonto HAT-V-2025-0109",
+    "relevant": ["rahmenvertrag_vogel_transporte_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "3 % Skonto bei Ausgleich innerhalb von 14 Kalendertagen"
+  },
+  {
+    "id": "q20",
+    "query": "Ursache RK-2025-0041",
+    "relevant": ["reklamation_charge_rk_2025_0041.md"],
+    "type": "exact_id",
+    "answer_hint": "Überhitzung beim Härten und mangelhafte Entspannung durch Temperaturregelfehler in Härteofen 2"
+  },
+  {
+    "id": "q21",
+    "query": "Fehlerbild RK-2025-0042",
+    "relevant": ["reklamation_charge_rk_2025_0042.md"],
+    "type": "exact_id",
+    "answer_hint": "Zahnflankenspiel am Kegelradsatz überschreitet maximal zulässige Toleranz um 0,08 mm"
+  },
+  {
+    "id": "q22",
+    "query": "Nenndrehmoment XD-500",
+    "relevant": ["produktdatenblatt_torqdrive_xd500.md"],
+    "type": "exact_id",
+    "answer_hint": "500 Nm"
+  },
+  {
+    "id": "q23",
+    "query": "Schutzart XD-700",
+    "relevant": ["produktdatenblatt_torqdrive_xd700.md"],
+    "type": "exact_id",
+    "answer_hint": "IP67 nach EN 60529"
+  },
+  {
+    "id": "q24",
+    "query": "Betrag RE-2025-0812",
+    "relevant": ["rechnungsuebersicht_fertigungsmaterial_q1_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "48.750,00 EUR netto"
+  },
+  {
+    "id": "q25",
+    "query": "Freigabe RE-2025-0899",
+    "relevant": ["rechnungsuebersicht_fertigungsmaterial_q1_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "Tanja Behrens"
+  },
+  {
+    "id": "q26",
+    "query": "Skontoabzug RE-2025-0944",
+    "relevant": ["rechnungsuebersicht_fertigungsmaterial_q1_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "152,40 EUR (2 % Skonto)"
+  },
+  {
+    "id": "q27",
+    "query": "Arbeitspreis HAT-V-2025-0210",
+    "relevant": ["rahmenvertrag_energieversorgung_stadtwerke_2025.md"],
+    "type": "exact_id",
+    "answer_hint": "19,85 Cent/kWh rein netto"
+  },
+  {
+    "id": "q28",
+    "query": "Was hat Frau Okonkwo im Juni-Meeting zugesagt?",
+    "relevant": ["besprechungsprotokoll_entwicklungsmeeting_juni_2025.md"],
+    "type": "name",
+    "answer_hint": "Abschluss der FEM-Belastungssimulation für das neue Hohlrad bis zum 15. Juli 2025"
+  },
+  {
+    "id": "q29",
+    "query": "Welche Anschaffung hat Walter Hofer in Aussicht gestellt?",
+    "relevant": ["besprechungsprotokoll_werksleitung_linz_maerz_2025.md"],
+    "type": "name",
+    "answer_hint": "Beschaffung von zwei Hebekranen mit je 2,5 Tonnen Tragkraft bis Mitte April 2025"
+  },
+  {
+    "id": "q30",
+    "query": "Welche Rolle übernimmt Herr Jörg Wendler bei der Einarbeitung?",
+    "relevant": ["onboarding_checkliste_technischer_vertrieb.md"],
+    "type": "name",
+    "answer_hint": "Übergabe und Ersteinrichtung von IT-Equipment und Arbeitsmitteln am ersten Tag"
+  },
+  {
+    "id": "q31",
+    "query": "Welche Mängel stellte Auditor Bernd Krawinkel bei der Überprüfung fest?",
+    "relevant": ["lieferantenbewertung_metallguss_saxonia_2024.md"],
+    "type": "name",
+    "answer_hint": "Lunkerbildung und Mikro-Porosität im Bereich der bearbeiteten Lagersitze des Aluminium-Druckgussgehäuses HA-990-G"
+  },
+  {
+    "id": "q32",
+    "query": "Who is the primary contact person at Global Bearings Ltd.?",
+    "relevant": ["supplier_evaluation_global_bearings_2025.md"],
+    "type": "name",
+    "answer_hint": "Alistair Vance (Lead Technical Account Manager)"
+  },
+  {
+    "id": "q33",
+    "query": "Welche Telefonnummer hat Kerstin Vormbrock für Fragen zur Altersvorsorge?",
+    "relevant": ["internes_faq_betriebliche_altersvorsorge.md"],
+    "type": "name",
+    "answer_hint": "0521 555-0321"
+  },
+  {
+    "id": "q34",
+    "query": "Welches Prüfergebnis hat Dirk Niemann im Endabnahmeprotokoll dokumentiert?",
+    "relevant": ["pruefprotokoll_endabnahme_chargenpruefung_cp25.md"],
+    "type": "name",
+    "answer_hint": "Freigabe ohne Mängel bei maximalem Körperschall von 58 dB(A) und Isolationswiderstand > 100 MOhm"
+  },
+  {
+    "id": "q35",
+    "query": "Welche Vereinbarung traf die Kessler Speditions- & Logistik GmbH bezüglich der Haftung?",
+    "relevant": ["rahmenvertrag_kessler_logistik_2025.md"],
+    "type": "name",
+    "answer_hint": "Erhöhte Haftungsobergrenze von 500.000 Euro je Schadensfall"
+  },
+  {
+    "id": "q36",
+    "query": "Wie viele Planetenräder sitzen im Getriebesatz HA-40817-K?",
+    "relevant": ["stueckliste_planetenstufe_ha_40817_k.md"],
+    "type": "mixed",
+    "answer_hint": "3 Stück (HA-11043-K)"
+  },
+  {
+    "id": "q37",
+    "query": "Welcher Schmierstoff ist für die Baugruppe HA-40871-K vorgeschrieben?",
+    "relevant": ["stueckliste_planetenstufe_ha_40871_k.md"],
+    "type": "mixed",
+    "answer_hint": "Synthec Extreme 320"
+  },
+  {
+    "id": "q38",
+    "query": "Bis wann muss Stefan Lindemann laut Protokoll die Dichtungen für den Prototyp beschaffen?",
+    "relevant": ["besprechungsprotokoll_entwicklungsmeeting_juni_2025.md"],
+    "type": "mixed",
+    "answer_hint": "Bis spätestens 25. Juni 2025"
+  },
+  {
+    "id": "q39",
+    "query": "Welche Haftungshöhe gilt im Speditionsvertrag HAT-V-2025-0104 maximal?",
+    "relevant": ["rahmenvertrag_kessler_logistik_2025.md"],
+    "type": "mixed",
+    "answer_hint": "500.000 Euro je Schadensfall"
+  },
+  {
+    "id": "q40",
+    "query": "Wie viel Wirkungsgrad erreicht das Aggregat laut Philipp Sunder im Teillastbereich?",
+    "relevant": ["projektstatus_elektromobilitaet_ecodrive_2025.md"],
+    "type": "mixed",
+    "answer_hint": "97,4 %"
+  },
+  {
+    "id": "q41",
+    "query": "Welcher Sensor ist im Elektromotor HA-22091-K zur Temperaturerfassung verbaut?",
+    "relevant": ["stueckliste_flanschmotor_ha_22091_k.md"],
+    "type": "mixed",
+    "answer_hint": "PT100-Temperatursensor (HA-77402-K)"
+  },
+  {
+    "id": "q42",
+    "query": "Welche Mängelursache fand Markus Brinkmann bei der Reklamation RK-2025-0041 heraus?",
+    "relevant": ["reklamation_charge_rk_2025_0041.md"],
+    "type": "mixed",
+    "answer_hint": "Überhitzung beim Härten und mangelhafte Entspannung durch Temperaturregelfehler in Härteofen 2"
+  },
+  {
+    "id": "q43",
+    "query": "Wie hoch ist die Netto-Rechnungssumme auf Beleg RE-2025-0812?",
+    "relevant": ["rechnungsuebersicht_fertigungsmaterial_q1_2025.md"],
+    "type": "mixed",
+    "answer_hint": "48.750,00 EUR"
+  },
+  {
+    "id": "q44",
+    "query": "What is the mileage reimbursement rate for business travel with a private vehicle in 2025?",
+    "relevant": ["reisekostenrichtlinie_2025.md"],
+    "type": "english",
+    "answer_hint": "0,38 Euro je gefahrenem Kilometer"
+  },
+  {
+    "id": "q45",
+    "query": "How frequently is the password for the guest Wi-Fi network rotated?",
+    "relevant": ["it_sicherheitsrichtlinie.md"],
+    "type": "english",
+    "answer_hint": "Jeweils am ersten Werktag eines Monats"
+  },
+  {
+    "id": "q46",
+    "query": "What is the maximum output torque for the KG-200 bevel gearbox?",
+    "relevant": ["produktdatenblatt_kegelradgetriebe_kg200.md"],
+    "type": "english",
+    "answer_hint": "210 Nm"
+  },
+  {
+    "id": "q47",
+    "query": "Where is the designated assembly point at the Bielefeld plant during an evacuation alarm?",
+    "relevant": ["brandschutz_und_evakuierungsordnung_2025.md"],
+    "type": "english",
+    "answer_hint": "Parkplatz P3 gegenüber Werkstor Süd"
+  },
+  {
+    "id": "q48",
+    "query": "What is the standard net list price for the TorqDrive XD-500 servomotor?",
+    "relevant": ["preisliste_standardantriebe_2025.md"],
+    "type": "english",
+    "answer_hint": "4.850,00 EUR"
+  },
+  {
+    "id": "q49",
+    "query": "Was steht in der Reisekostenrichtlinie 2025 zu Bahnfahrten?",
+    "relevant": ["reisekostenrichtlinie_2025.md"],
+    "type": "filename",
+    "answer_hint": "2. Wagenklasse verbindlich bis 4 Stunden Reisezeit; ab mehr als 4 Stunden ist 1. Klasse gestattet"
+  },
+  {
+    "id": "q50",
+    "query": "Welche Schulungen nennt die Onboarding-Checkliste Technischer Vertrieb für die Einarbeitungsphase?",
+    "relevant": ["onboarding_checkliste_technischer_vertrieb.md"],
+    "type": "filename",
+    "answer_hint": "Unterweisung Arbeitssicherheit, CRM-Schulung (SalesForce-Modul HAT) und Produktschulung Getriebetechnik"
+  },
+  {
+    "id": "q51",
+    "query": "Welche Mindestbestellsumme verlangt die Preisliste Standardantriebe 2025 für Skontovergünstigungen?",
+    "relevant": ["preisliste_standardantriebe_2025.md"],
+    "type": "filename",
+    "answer_hint": "Mindestbestellsumme von 10.000,00 EUR netto"
+  },
+  {
+    "id": "q52",
+    "query": "Welche Intervalle sieht die Brandschutz- und Evakuierungsordnung 2025 für Probealarme vor?",
+    "relevant": ["brandschutz_und_evakuierungsordnung_2025.md"],
+    "type": "filename",
+    "answer_hint": "Jährlich unangekündigt im 2. Quartal"
+  },
+  {
+    "id": "q53",
+    "query": "Wie hoch ist das maximale Drehmoment der Planetenstufe HA-40819-K?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q54",
+    "query": "Welche Tagegelder galten gemäß Reisekostenrichtlinie 2023 für Dienstreisen nach Frankreich?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q55",
+    "query": "Welche Projektziele hat Herr Dr. Bergmann für den Ausbau der Fertigungslinie festgelegt?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q56",
+    "query": "Welches Tagesgericht wird am kommenden Donnerstag in der Betriebskantine serviert?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q57",
+    "query": "Welche Vorschriften gelten für das dauerhafte Abstellen von Wohnmobilen auf dem Mitarbeiterparkplatz?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q58",
+    "query": "Gibt es einen Arbeitgeberzuschuss für das Dienstrad-Leasing über JobRad?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q59",
+    "query": "Welche monatlichen Zuschüsse gewährt Halvorsen bei der Betreuung von Kleinkindern in einer Kindertagesstätte?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  },
+  {
+    "id": "q60",
+    "query": "Erhalten Mitarbeiter der Halvorsen GmbH eine vergünstigte Firmenmitgliedschaft bei einer überregionalen Fitnessstudiokette?",
+    "relevant": [],
+    "type": "no_answer",
+    "answer_hint": ""
+  }
+]

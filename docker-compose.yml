@@ -1,0 +1,493 @@
+# Argus: Modell, Backend, Browser-Oberflaeche, Dokumentensuche, Websuche, Sprache, Tracing.
+# Kein Container bekommt Admin-Rechte oder einen Weg auf den Host. Bestehende
+# Installationen behalten ihren Projektnamen (und damit ihre Volumes) per
+# COMPOSE_PROJECT_NAME in der .env.
+name: argus
+
+#--- Netze: Ins Internet kommen nur Backend (Web-Werkzeuge, Cloud) und SearXNG.
+#--- Modell, Einbettung, Datenbanken, Sprache und Tracing haengen nur im Netz
+#--- "intern" ohne Ausgang; Clients auf dem Host erreichen sie ueber intern-proxy.
+#--- Pruefung: setup/check_networks.py (laeuft auch im CI).
+networks:
+  # Mit Ausgang: rag-backend, searxng, local-proxy.
+  backend:
+  # Ohne Ausgang. Wer hier haengt, erreicht weder das Internet noch SearXNG.
+  intern:
+    internal: true
+  # Nur intern-proxy. Ein Netz mit Ausgang braucht er, weil Docker Ports aus einem
+  # internen Netz nicht veroeffentlicht. Kein anderer Dienst haengt hier, damit
+  # der Proxy keine Bruecke zwischen "intern" und "backend" wird.
+  publish:
+  sandbox:
+    internal: true
+
+services:
+  llm:
+    build:
+      context: .
+      dockerfile: Dockerfile.llm
+    restart: unless-stopped
+    networks:
+      - intern
+    environment:
+      - OAI_MODEL=${OAI_MODEL}
+      - LLM_MODEL_FILE=${LLM_MODEL_FILE}
+      - LLM_N_CPU_MOE=${LLM_N_CPU_MOE}
+      - LLM_CTX_SIZE=${LLM_CTX_SIZE}
+      - LLM_PARALLEL=${LLM_PARALLEL}
+      - LLM_CTX_PER_SLOT=${LLM_CTX_PER_SLOT}
+      - LLM_CACHE_TYPE=${LLM_CACHE_TYPE}
+      - LLM_BATCH=${LLM_BATCH}
+      - LLM_UBATCH=${LLM_UBATCH}
+      - LLM_THREADS=${LLM_THREADS}
+      - LLM_MTP=${LLM_MTP}
+      - LLM_MTP_DRAFT=${LLM_MTP_DRAFT}
+    # Argus Desktop erreicht das Modell ueber intern-proxy auf 127.0.0.1:30000,
+    # mit API-Key. Port wie bisher, damit die App-Einstellung gleich bleibt.
+    volumes:
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    #--- Bewusst KEIN mem_limit: die gemappte Modelldatei (~23 GB) zaehlt als
+    #--- Page-Cache zum Container. Ein Limit darunter laesst den Kernel Modell-
+    #--- seiten verdraengen und neu lesen -- das LLM wuerde einbrechen.
+    pids_limit: 256
+
+  # Dokumentensuche von Backend und Desktop-App: bge-m3 (Vektoren) und
+  # bge-reranker-v2-m3 (Bewertung der Treffer), beide auf der CPU, mit dem
+  # LLM-API-Key. Die App erreicht sie ueber intern-proxy (127.0.0.1:30001/30002).
+  embed:
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+    restart: unless-stopped
+    networks:
+      - intern
+    environment:
+      - EMBED_MODE=embedding
+      - EMBED_MODEL_FILE=bge-m3-Q8_0.gguf
+      - EMBED_ALIAS=bge-m3
+      - EMBED_THREADS=6
+    volumes:
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 3g
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  rerank:
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+    restart: unless-stopped
+    networks:
+      - intern
+    environment:
+      - EMBED_MODE=reranking
+      - EMBED_MODEL_FILE=bge-reranker-v2-m3-Q8_0.gguf
+      - EMBED_ALIAS=bge-reranker-v2-m3
+      # Der Reranker bestimmt die Dauer einer Dokumentensuche (12 Kandidaten);
+      # er laeuft, waehrend das LLM auf das Werkzeug wartet.
+      - EMBED_THREADS=8
+    volumes:
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 3g
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  postgres:
+    image: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+    restart: unless-stopped
+    networks:
+      - intern
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql
+      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    mem_limit: 2g
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 40s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    build:
+      context: .
+      dockerfile: Dockerfile.qdrant
+    restart: unless-stopped
+    networks:
+      - intern
+    environment:
+      # Ohne Ausgang liefe die Nutzungsstatistik nur in Fehler.
+      - QDRANT__TELEMETRY_DISABLED=true
+    #--- Laeuft weiter als root: das bestehende qdrant_data-Volume gehoert root,
+    #--- ein Wechsel auf 1000:1000 braeuchte vorher ein chown. Ohne Capabilities
+    #--- kann root dort nur noch auf eigene Dateien zugreifen.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 4g
+    pids_limit: 256
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      interval: 25s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  searxng:
+    image: searxng/searxng:2026.10.29-c15647b5a@sha256:c4e8448495ef3b0175eb6c97a19c1ac7cc0a5c907d581ab3877f3cb430e81b86
+    networks:
+      - backend
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    mem_limit: 1g
+    pids_limit: 128
+    volumes:
+      - ./searxng_config:/etc/searxng
+    # Argus Desktop sucht direkt ueber 127.0.0.1:8888. Den Port veroeffentlicht
+    # local-proxy, der den Host-Header prueft (Schutz gegen DNS-Rebinding).
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  calc-sandbox:
+    build:
+      context: ./calc_sandbox
+      dockerfile: Dockerfile.sandbox
+    restart: unless-stopped
+    networks:
+      - sandbox
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec
+    volumes:
+      # Nur-Lese-Sicht auf den Workspace: execute_code darf lesen, nicht
+      # schreiben. Keine Secrets in diesen Container gemountet.
+      - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/app/data:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    # Prozess-/Thread-Obergrenze gegen Fork-Bomben. 256 laesst dem
+    # .NET-Threadpool von pwsh Luft.
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  tts-service:
+    build:
+      context: ./tts_service
+      dockerfile: Dockerfile.tts
+    restart: unless-stopped
+    networks:
+      - intern
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      - QWEN_LANG=${QWEN_LANG:-auto}
+      - QWEN_VOICE=${QWEN_VOICE:-}
+      - QWEN_CLONE_REF_WAV=${QWEN_CLONE_REF_WAV:-}
+      - QWEN_CLONE_REF_TEXT=${QWEN_CLONE_REF_TEXT:-}
+      - QWEN_CLONE_REF_SPK=${QWEN_CLONE_REF_SPK:-}
+      - QWEN_CLONE_REF_RVQ=${QWEN_CLONE_REF_RVQ:-}
+      - QWEN_SEED=${QWEN_SEED:-}
+      - QWEN_TEMP=${QWEN_TEMP:-0.7}
+      - QWEN_BASE_TALKER=${QWEN_BASE_TALKER:-/app/models/qwen-talker-1.7b-base-Q8_0.gguf}
+      # Audio-Cache: gleicher Text = gleiche Bytes, zweites Vorlesen ist gratis.
+      - TTS_CACHE_MAX_ENTRIES=${TTS_CACHE_MAX_ENTRIES:-64}
+      - TTS_CACHE_MAX_MB=${TTS_CACHE_MAX_MB:-256}
+      # OMP/OPENBLAS auf 1 gegen Oversubscription neben den GGML-Threads.
+      # GGML_NUM_THREADS=6 = gemessener Sweet Spot (SMT im BIOS aus).
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+      - GGML_NUM_THREADS=${GGML_NUM_THREADS:-6}
+      - OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+    # Argus Desktop erreicht TTS ueber intern-proxy (127.0.0.1:8002), mit dem LLM-API-Key.
+    volumes:
+      # Referenzstimme aus dem Repo (read-only) -> mit den Setup-Dateien versionier-/sicherbar.
+      - ./voice_ref:/app/voice_ref:ro
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 12g
+    ulimits:
+      memlock: -1
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8002/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  stt-service:
+    build:
+      context: ./stt_service
+      dockerfile: Dockerfile.stt
+    restart: unless-stopped
+    networks:
+      - intern
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,noexec
+    environment:
+      # Whisper liegt wie die anderen Modelle in ARGUS_MODELS_DIR (siehe README,
+      # "Neu einrichten"). Ohne Ausgang laedt der Dienst nichts nach.
+      - WHISPER_MODEL=/models/${WHISPER_MODEL_DIR:-faster-whisper-large-v3-turbo}
+      - HF_HUB_OFFLINE=1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 3g
+    cpus: "4.0"
+    # Argus Desktop erreicht STT ueber intern-proxy (127.0.0.1:8003), mit dem LLM-API-Key.
+    volumes:
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8003/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  rag-backend:
+    build:
+      context: ./rag_backend
+      dockerfile: Dockerfile.api
+    env_file: .env
+    restart: unless-stopped
+    # Einziger Dienst in allen drei Netzen: Er braucht das Internet (Websuche,
+    # Seitenabruf, Cloud) und spricht Modell, Datenbanken und Sandbox an.
+    networks:
+      - backend
+      - intern
+      - sandbox
+    ports:
+      - "127.0.0.1:7860:7860"
+    mem_limit: 8g
+    cpus: "6.0"
+    volumes:
+      - rag_data:/app/data
+      - ./documents_to_ingest:/app/documents_to_ingest
+      # Migrationen laufen beim Start als Code. Schreibgeschuetzt, damit ein
+      # kompromittierter Prozess im Container sie nicht fuer den naechsten Start
+      # umschreiben kann.
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./API_Tokens/fernet_key.txt:/app/fernet_key.txt:ro
+      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro
+      - ./API_Tokens/jwt_secret.txt:/run/secrets/jwt_secret:ro
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ./API_Tokens/audit_hmac_key.txt:/run/secrets/audit_hmac_key:ro
+      - ./API_Tokens/LANGSMITH_API_KEY.txt:/run/secrets/langchain_api_key:ro
+      - ./API_Tokens/Gemini.txt:/run/secrets/gemini_api_key:ro
+      - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/host/argus_workspace:rw
+      # Eval-Laeufe und Action-Audit-Dateien. Host-Pfad per ARGUS_EVALS_DIR (.env).
+      - ${ARGUS_EVALS_DIR:-C:/Argus_Workspace/Evals}:/app/evals:rw
+    environment:
+      - PYTHONPATH=/app
+    # Haertung wie bei tts/stt/calc-sandbox. Kein read_only: uvicorn und
+    # alembic schreiben nach /app.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      calc-sandbox:
+        condition: service_healthy
+      llm:
+        condition: service_healthy
+      # Dokumentensuche: Einbetten und Reranker laufen dort, nicht mehr im Backend.
+      embed:
+        condition: service_healthy
+      rerank:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7860/healthz || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Lokales LLM-Tracing. Nimmt OTLP entgegen und zeigt den Aufruf-Baum je
+  # Anfrage. Version UND Digest gepinnt.
+  phoenix:
+    image: arizephoenix/phoenix:version-21.0.0@sha256:1f9a144a5357b4973e93a15718f050247cb7a4ee7b7c6c06ecb91b5eed3fbaad
+    restart: unless-stopped
+    networks:
+      - intern
+    # 6006 ist UI UND OTLP-HTTP-Endpoint. Veroeffentlicht wird er ueber
+    # intern-proxy (127.0.0.1:6006), der den Host-Header prueft.
+    environment:
+      - PHOENIX_WORKING_DIR=/mnt/data
+      # Ab 19.15 ist die Nutzungstelemetrie an. Aus: das Tracing liegt
+      # bewusst lokal, sonst waere LangSmith die einfachere Wahl gewesen.
+      - PHOENIX_TELEMETRY_ENABLED=false
+      # Ab v21 ist die Anmeldung standardmaessig an. Phoenix ist nur ueber
+      # intern-proxy auf 127.0.0.1 und im Netz "intern" erreichbar; ohne Anmeldung
+      # braucht weder die App-Ansicht noch der Trace-Export einen Schluessel.
+      - PHOENIX_ENABLE_AUTH=false
+    volumes:
+      - phoenix_data:/mnt/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 256
+
+  # Veroeffentlicht SearXNG auf 127.0.0.1 und laesst nur Anfragen an
+  # localhost/127.0.0.1 durch (Schutz gegen DNS-Rebinding, siehe local_proxy/nginx.conf).
+  # Bewusst nicht im Netz "intern": Sonst kaeme ein Dienst von dort ueber
+  # local-proxy:8888 an SearXNG und damit ins Internet.
+  local-proxy:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    restart: unless-stopped
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:8888:8888"
+    # Ohne die Start-Skripte des Images: Sie wollen /etc/nginx umschreiben.
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec
+    volumes:
+      - ./local_proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 32
+    depends_on:
+      searxng:
+        condition: service_healthy
+
+  # Veroeffentlicht die Dienste aus dem Netz "intern" auf 127.0.0.1: Phoenix mit
+  # Host-Pruefung, Modell, Einbettung, Reranker und Sprache als TCP-Durchreichung
+  # (siehe local_proxy/intern.conf). Er leitet nur an Ziele in "intern" weiter.
+  intern-proxy:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    restart: unless-stopped
+    networks:
+      - intern
+      - publish
+    ports:
+      - "127.0.0.1:6006:6006"
+      - "127.0.0.1:30000:30000"
+      - "127.0.0.1:30001:30001"
+      - "127.0.0.1:30002:30002"
+      - "127.0.0.1:8002:8002"
+      - "127.0.0.1:8003:8003"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec
+    volumes:
+      - ./local_proxy/intern.conf:/etc/nginx/nginx.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    # Reicht die Antworten des Modells und Audio durch; das kostet kaum Rechenzeit.
+    cpus: "1.0"
+    pids_limit: 32
+
+volumes:
+  pg_data:
+  qdrant_data:
+  phoenix_data:
+  rag_data:

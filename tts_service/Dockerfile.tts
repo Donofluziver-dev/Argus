@@ -1,0 +1,52 @@
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git cmake build-essential libopenblas-dev pkg-config \
+        ffmpeg wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir fastapi uvicorn httpx
+
+# GGUF-Modelle ZUERST (grosse, stabile Layer). Gepinnt auf einen Repo-Commit.
+ARG GGUF_COMMIT=e0f336a048a3de02b29b8ad92969217d9ecffe3e
+ARG GGUF_URL=https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/${GGUF_COMMIT}
+RUN mkdir -p /app/models \
+    && wget -qO /app/models/qwen-tokenizer-12hz-Q8_0.gguf          "${GGUF_URL}/qwen-tokenizer-12hz-Q8_0.gguf" \
+    && wget -qO /app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf "${GGUF_URL}/qwen-talker-1.7b-customvoice-Q8_0.gguf" \
+    && wget -qO /app/models/qwen-talker-1.7b-base-Q8_0.gguf        "${GGUF_URL}/qwen-talker-1.7b-base-Q8_0.gguf"
+
+# qwentts.cpp CPU-only + BLAS, statisch gelinkt, auf Commit gepinnt.
+# Vor dem Build wird tools/tts-server.cpp durch den Argus-Patch ersetzt
+COPY tts-server.patched.cpp /tmp/tts-server.patched.cpp
+COPY patch_backend.py /tmp/patch_backend.py
+ARG QWENTTS_COMMIT=0bf4a18b22e8bb8718d95294e9f7f45c0d4270a4
+RUN git clone https://github.com/ServeurpersoCom/qwentts.cpp.git /build/qwentts \
+    && cd /build/qwentts \
+    && git checkout ${QWENTTS_COMMIT} \
+    && git submodule update --init --recursive \
+    && cp /tmp/tts-server.patched.cpp tools/tts-server.cpp \
+    && python3 /tmp/patch_backend.py \
+    && cmake -S . -B build -DGGML_BLAS=ON -DGGML_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release -j"$(nproc)" \
+    && find build -maxdepth 3 -type f '(' -name tts-server -o -name qwen-tts -o -name qwen-codec ')' -exec cp {} /usr/local/bin/ ';' \
+    && ( find build -maxdepth 3 -name 'lib*.so*' -exec cp -P {} /usr/local/lib/ ';' || true ) \
+    && ldconfig \
+    && rm -rf /build
+
+COPY app.py /app/app.py
+# KEIN 'chown -R /app': das kopiert die 4,4 GB GGUF-Modelle in einen
+# zweiten Layer. ttsuser braucht /app nur lesend.
+RUN useradd -m -u 1000 ttsuser
+# Eigener Schritt vor USER, damit GGUF-Modelle und qwentts-Build im Cache bleiben.
+RUN pip install --no-cache-dir cryptography
+USER ttsuser
+ENV QWEN_TALKER=/app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf \
+    QWEN_BASE_TALKER=/app/models/qwen-talker-1.7b-base-Q8_0.gguf \
+    QWEN_CODEC=/app/models/qwen-tokenizer-12hz-Q8_0.gguf \
+    QWEN_LANG=auto \
+    QWEN_VOICE= \
+    QWEN_SERVER_PORT=8080 \
+    OMP_NUM_THREADS=1 \
+    GGML_NUM_THREADS=6 \
+    OPENBLAS_NUM_THREADS=1
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]

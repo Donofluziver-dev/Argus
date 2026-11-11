@@ -1,0 +1,19 @@
+Argus
+Copyright 2026 Donofluziver-dev
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party material:
+
+- tts_service/tts-server.patched.cpp is a modified copy of tools/tts-server.cpp
+  from qwentts.cpp (https://github.com/ServeurpersoCom/qwentts.cpp),
+  Copyright (c) 2023-2026 The omnivoice.cpp authors, MIT License. The full
+  notice is kept in the file header.
+
+- The fonts in rag_backend/static/fonts (Barlow, Chakra Petch, JetBrains Mono)
+  are licensed under the SIL Open Font License 1.1. The license texts are in
+  the same folder.
+
+Argus also installs or starts further software that is not part of this
+repository, each under its own license, among them SearXNG (AGPL-3.0) and
+Arize Phoenix (Elastic License 2.0). See THIRD_PARTY_NOTICES.md.
