@@ -65,3 +65,21 @@ def test_get_prompt_uses_defaults_without_workspace_files(tmp_path, monkeypatch)
     #--- Mit Konto steht dort die angemeldete Person.
     monkeypatch.setattr(agent, "_account_display_name", lambda uid: "Ada Lovelace" if uid == 7 else None)
     assert "Du bist Test-Argus fuer Ada Lovelace." in agent.get_prompt_from_env("SYSTEM_PROMPT", "", user_id=7)
+
+
+def test_anrede_comes_from_the_environment(monkeypatch):
+    monkeypatch.delenv("ARGUS_ANREDE", raising=False)
+    assert prompts.render("Use {{ANREDE}}.", tool_names=set()) == 'Use the informal "du".'
+    monkeypatch.setenv("ARGUS_ANREDE", " Sie ")
+    assert prompts.render("Use {{ANREDE}}.", tool_names=set()) == 'Use the formal "Sie".'
+    #--- Unbekannte Werte fallen auf du zurueck, statt den Platzhalter stehen zu lassen.
+    monkeypatch.setenv("ARGUS_ANREDE", "ihr")
+    assert prompts.render("Use {{ANREDE}}.", tool_names=set()) == 'Use the informal "du".'
+
+
+def test_defaults_keep_internal_details_out_of_the_web(tmp_path):
+    soul = prompts.render(prompts.load("SOUL.md", tmp_path)[0], tool_names={"web_search"})
+    assert "<confidentiality>" in soul and "Never search the web for a file name" in soul
+    assert "JARVIS" not in soul and "{{" not in soul
+    skill = prompts.render(prompts.load("SKILL.md", tmp_path)[0], tool_names={"document_search"})
+    assert "A file name is never a web search" in skill

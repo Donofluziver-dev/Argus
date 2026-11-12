@@ -61,9 +61,25 @@ roles, administrator and user.
 - Changing an account's role ends its sessions.
 - The form of address taken from the account name accepts Latin letters only, three words
   at most, so that an account name cannot carry text into the system prompt.
+- A task-wide approval applies only to the account that gave it.
+- Page fetches read at most `WEBPAGE_MAX_BYTES` (3 MB); a page that announces more is not
+  loaded at all. Before, the whole response was held in memory before it was cut.
 
 ### Added
 
+- **Audit of logins and account changes, forwarding to a SIEM.** Logins (successful, failed,
+  locked), API logins, logouts, setup, password changes and every account change by an
+  administrator go into the HMAC-chained audit log, with account, address and reason but
+  never a password; an unknown account name is stored only as a hash. `AUDIT_SIEM=syslog`
+  (RFC 5424 over UDP or TCP) or `stdout` forwards every audit entry, as JSON or CEF
+  (`AUDIT_SIEM_FORMAT`), without blocking a request. The monitor shows the new events by
+  name.
+- **Default prompts in a company tone.** Argus speaks like a factual colleague, judges
+  company documents (contracts, offers, policies, data sheets, test reports) against what is
+  customary and names the function that should sign off at the end, instead of a disclaimer.
+  A confidentiality section keeps internal names, figures and file names out of web
+  searches; a file it cannot find leads to a request to attach it, not to a web search.
+  `ARGUS_ANREDE=Sie` switches from "du" to "Sie".
 - **One file area per account.** Every account, not only administrators, can attach files
   in the chat (drag and drop or paper clip), let Argus read and analyse them in the sandbox
   and download the results (download pills above the answer, dialog *Meine Dateien*).
@@ -112,5 +128,10 @@ roles, administrator and user.
 - A wrong password reported "not logged in" instead of the backend's message.
 - With the cloud module enabled, the router started a background mission for any account;
   now only for administrators.
-- Deleting an account left its long-term memory behind.
+- Deleting an account left its long-term memory behind. A reflection still running while the
+  account was deleted could also write it again; it now checks that the account exists.
+- Research questions were never planned by the cloud model, because the check read the
+  question's category before the router had set it. Planning now runs for administrators
+  with the cloud module; for users the request never leaves the machine.
+- The router and the solver still offered PowerShell, which the sandbox no longer has.
 - The API description (`/docs`) was readable without login; it is off unless `API_DOCS=true`.

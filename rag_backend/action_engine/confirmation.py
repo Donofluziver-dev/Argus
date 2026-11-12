@@ -136,12 +136,20 @@ class ConfirmationStore:
 
     #--- Aufgaben-Freigabe (Auto-Modus) ---------------------------------------
 
-    def task_status(self, task_id: Optional[str], tool_name: Optional[str] = None) -> Optional[str]:
+    def task_status(
+        self,
+        task_id: Optional[str],
+        tool_name: Optional[str] = None,
+        actor: Optional[int] = None,
+    ) -> Optional[str]:
         '''"approved" | "rejected" | None fuer diese Aufgabe.
 
         Mit tool_name gilt eine Freigabe nur fuer DASSELBE Werkzeug, mit dem sie
         erteilt wurde (Eintraege ohne Werkzeug zaehlen dann nicht). Eine Ablehnung
         gilt fuer die ganze Aufgabe.
+
+        Mit actor gilt der Eintrag nur, wenn das gespeicherte Konto uebereinstimmt.
+        Eintraege ohne gespeichertes Konto gelten bei gesetztem actor als nicht vorhanden.
 
         Raeumt abgelaufene Eintraege gleich mit weg: die Freigabe soll nach dem
         Zeitdeckel wirklich verschwinden und nicht nur ignoriert werden.'''
@@ -160,6 +168,10 @@ class ConfirmationStore:
                 _save_tasks(tasks)
         if not entry:
             return None
+        if actor is not None:
+            stored_actor = entry.get("actor") if "actor" in entry else entry.get("requested_by")
+            if stored_actor is None or stored_actor != actor:
+                return None
         status = entry.get("status")
         if status == "approved" and tool_name is not None and entry.get("tool") != tool_name:
             return None
@@ -181,6 +193,7 @@ class ConfirmationStore:
                 "resolved_at": time.time(),
                 "expires_at": time.time() + self._task_ttl,
                 "requested_by": req.requested_by,
+                "actor": req.requested_by,
                 "task_description": req.task_description,
             }
             _save_tasks(tasks)

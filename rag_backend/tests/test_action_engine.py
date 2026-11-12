@@ -3,6 +3,8 @@ BaseTool.run() (Audit -> Veto -> Confirmation-Gate -> Ausfuehrung). Keine DB -- 
 (write_audit_log, confirmation_store) gemonkeypatcht.
 Muster wie tests/test_cloud_agents.py; pytest.ini setzt asyncio_mode=auto.
 '''
+import os
+os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 import pytest
 from pydantic import BaseModel
 
@@ -334,6 +336,41 @@ async def test_task_approval_expires(monkeypatch, task_store):
     monkeypatch.setattr(store, "_task_ttl", -1)
     store._mark_task(_Req(), "approved")
     assert store.task_status("task-1") is None
+
+
+async def test_task_approval_bound_to_actor(task_store):
+    import time
+    _set_task()
+    class _Req:
+        id = "req-1"
+        task_id = "task-konto"
+        task_scope = True
+        tool_class = "write"
+        tool_name = "dummy_tool"
+        task_description = "Aufgabe fuer Konto 3"
+        requested_by = 3
+
+    store = task_store.confirmation_store
+    store._mark_task(_Req(), "approved")
+
+    # Freigabe von Konto 3 gilt fuer Konto 3:
+    assert store.task_status("task-konto", actor=3) == "approved"
+    # Freigabe von Konto 3 gilt NICHT fuer Konto 4 mit derselben task_id:
+    assert store.task_status("task-konto", actor=4) is None
+    # Ohne actor bleibt das alte Verhalten erhalten:
+    assert store.task_status("task-konto") == "approved"
+
+    # Eintraege ohne gespeichertes Konto (alte Datei) gelten bei gesetztem actor als nicht vorhanden:
+    from rag_backend.action_engine.confirmation import _load_tasks, _save_tasks
+    tasks = _load_tasks()
+    tasks["task-alt"] = {
+        "status": "approved",
+        "tool": "dummy_tool",
+        "expires_at": time.time() + 300,
+    }
+    _save_tasks(tasks)
+    assert store.task_status("task-alt") == "approved"
+    assert store.task_status("task-alt", actor=3) is None
 
 
 async def test_task_reject_blocks_followup_writes(monkeypatch, audit_calls, task_store):

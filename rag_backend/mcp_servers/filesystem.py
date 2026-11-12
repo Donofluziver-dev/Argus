@@ -15,6 +15,9 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+#--- stdout gehoert dem MCP-Protokoll: die SIEM-Ausgabe (AUDIT_SIEM=stdout) weicht
+#--- in diesem Prozess auf stderr aus.
+os.environ["ARGUS_STDOUT_RESERVED"] = "1"
 
 WORKSPACE_CONTAINER = Path("/host/argus_workspace")
 WORKSPACE_WIN = "C:\\Argus_Workspace"

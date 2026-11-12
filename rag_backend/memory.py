@@ -56,7 +56,16 @@ class EpisodicMemory:
         except Exception:
             return ""
 
+    def _user_exists(self, user_id: int) -> bool:
+        from rag_backend.database import SessionLocal
+        from rag_backend.models import User
+        with SessionLocal() as db:
+            return db.get(User, user_id) is not None
+
     def _write_memory(self, user_id: int, content: str) -> None:
+        if not self._user_exists(user_id):
+            log.info(f"Reflektion Schreiben unterdrueckt (user={user_id}): Konto existiert nicht mehr.")
+            return
         p = self._memory_path(user_id)
         p.parent.mkdir(parents=True, exist_ok=True)
         # Eine Backup-Generation vor dem Ueberschreiben.
@@ -127,6 +136,9 @@ class EpisodicMemory:
             else:
                 if len(updated) > self._max_memory_chars:
                     updated = updated[:self._max_memory_chars]
+                if not await asyncio.to_thread(self._user_exists, user_id):
+                    log.info(f"Reflektion abgebrochen (user={user_id}): Konto existiert nicht mehr.")
+                    return 0
                 try:
                     await asyncio.to_thread(self._write_memory, user_id, updated + "\n")
                     wrote = 1
@@ -135,6 +147,9 @@ class EpisodicMemory:
                     return 0
 
             # Wasserzeichen erst nach erfolgreichem (oder bewusst verworfenem) Lauf setzen.
+            if not await asyncio.to_thread(self._user_exists, user_id):
+                log.info(f"Reflektion abgebrochen (user={user_id}): Konto existiert nicht mehr.")
+                return 0
             try:
                 await asyncio.to_thread(self._set_watermark, user_id, max_ts)
             except Exception as e:
@@ -174,8 +189,11 @@ class EpisodicMemory:
 
     def _set_watermark(self, user_id: int, max_ts):
         from rag_backend.database import SessionLocal
-        from rag_backend.models import ReflectionState
+        from rag_backend.models import ReflectionState, User
         with SessionLocal() as db:
+            if db.get(User, user_id) is None:
+                log.info(f"Reflektion Wasserzeichen unterdrueckt (user={user_id}): Konto existiert nicht mehr.")
+                return
             state = db.get(ReflectionState, user_id)
             if state is None:
                 state = ReflectionState(user_id=user_id)

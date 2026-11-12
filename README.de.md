@@ -10,6 +10,7 @@ jeder Weg nach außen gesperrt.
 ![Frage an die eigenen Dokumente: Suchschritt, gefundene Dokumente mit Relevanz, Antwort](docs/images/chat-dokumente.png)
 
 **Inhalt:** [Wofür](#wofür) · [Was heute geht](#was-heute-geht) · [Gemessen](#gemessen) ·
+[Warum sicher](#warum-argus-sicher-ist) · [Audit und SIEM](#wer-hat-was-getan-auditprotokoll-und-siem) ·
 [Websuche](#warum-websuche-und-wie-sie-abgesichert-ist) ·
 [Modell](#das-modell-ist-austauschbar) · [Was fehlt](#was-bis-zum-einsatz-fehlt) ·
 [Architektur](#architektur) · [Sicherheitskonzept](#sicherheitskonzept) ·
@@ -61,15 +62,16 @@ hingehört.
 | Gedacht für | allgemeines internes Wissen, Office-Alltag | Unterlagen, die nicht in eine Cloud sollen |
 | Schutz vor Datenabfluss | vertraglich und durch den Anbieter | technisch: Modell ohne Internet, Sperre nach Firmendaten, bei jeder Änderung automatisch geprüft |
 | Modell | vom Anbieter vorgegeben | frei wählbar und austauschbar |
-| Nachvollziehbar | je nach Produkt | jeder Schritt steht im Chat, dazu Auditprotokoll und Ablaufverfolgung im eigenen Haus |
+| Nachvollziehbar | je nach Produkt | jeder Schritt steht im Chat, dazu signiertes Auditprotokoll mit Weitergabe an das eigene SIEM und Ablaufverfolgung im eigenen Haus |
 | Kosten | Lizenz je Nutzer | Hardware und Betrieb, keine Lizenz je Nutzer |
 | Einbindung in Office | ja | nein |
 | Reife | Produkt mit Support | Eigenentwicklung mit [offenen Punkten](#was-bis-zum-einsatz-fehlt) |
 
 Argus ist kein TISAX-Nachweis. Es bringt die technischen Eigenschaften mit, auf die es bei
 Unterlagen mit hohem Schutzbedarf ankommt, und macht sie prüfbar: Der Quelltext liegt offen,
-die Netz-Abschottung wird bei jeder Änderung automatisch kontrolliert, und jede Sperre steht
-im Auditprotokoll.
+die Netz-Abschottung wird bei jeder Änderung automatisch kontrolliert, und Sperren,
+Anmeldungen und Kontoänderungen stehen im Auditprotokoll, das an das SIEM der Firma gehen
+kann ([Warum Argus sicher ist](#warum-argus-sicher-ist)).
 
 ## Was heute geht
 
@@ -96,8 +98,9 @@ im Auditprotokoll.
   Benutzer fragen, suchen in den Dokumenten und recherchieren. Argus spricht jede Person mit
   ihrem Namen an.
 - **Nachvollziehbarkeit:** Jeder Werkzeugschritt steht im Chat, jede Anfrage als Ablauf in
-  Phoenix (im eigenen Haus, Inhalte geschwärzt), sicherheitsrelevante Ereignisse im
-  Auditprotokoll.
+  Phoenix (im eigenen Haus, Inhalte geschwärzt). Sicherheitsrelevante Ereignisse wie
+  Anmeldungen, Kontoänderungen und Sperren stehen im signierten Auditprotokoll und gehen auf
+  Wunsch an das SIEM der Firma.
 
 ![Web-Recherche in einem eigenen Gespräch: Suchen, gelesene Seiten, Antwort mit Quellen](docs/images/recherche.png)
 
@@ -117,15 +120,98 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 |---|---|---|
 | Dokumentensuche: richtiges Dokument an erster Stelle | 96 % (vor dem Umbau 67 %) | 60 Fragen an 30 Dokumente, `eval/retrieval` |
 | Dauer einer Dokumentensuche | 3,5 s (vorher 19,9 s) | ebenda, Suche und Bewertung auf der CPU |
-| Aufgaben, die der ganze Agent richtig löst | 88 von 96 | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
-| Dauer je Aufgabe | 23 s im Median | ebenda |
+| Aufgaben, die der ganze Agent richtig löst | 91 von 96 | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
+| Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 300 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 326 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
 sich von eingeschleusten Anweisungen in Dokumenten nicht lenken lässt.
+
+## Warum Argus sicher ist
+
+Nicht, weil sich das Modell gut benimmt, sondern weil es nichts Gefährliches tun kann. Ein
+Sprachmodell lässt sich mit geschickt formuliertem Text (Prompt Injection) zu fast allem
+überreden, auch über eine präparierte Webseite oder ein präpariertes Dokument. Argus geht
+deshalb davon aus, dass das Modell irgendwann falsch handelt, und sorgt dafür, dass daraus
+kein Schaden entsteht. Die Schutzmaßnahmen sitzen außerhalb des Modells:
+
+| Argus ist sicher, weil … | So ist es umgesetzt | Prüfbar über |
+|---|---|---|
+| das Modell nichts hinausschicken kann | Es läuft in einem Netz ohne Ausgang. Ins Internet kommen nur das Backend und die eigene Suchinstanz. | `setup/check_networks.py`, bei jeder Änderung im CI |
+| Firmendaten und Internet nie im selben Gespräch zusammenkommen | Hat ein Gespräch Firmendaten gelesen oder eine Datei bekommen, ist darin jeder Weg nach außen gesperrt. | Tests, Agenten-Messung (Gruppe Sicherheit) |
+| jede Person nur ihr Eigenes sieht | Rollen werden an jeder Route im Backend geprüft. Dateien liegen je Konto getrennt, die Code-Sandbox bekommt nur die Dateien des eigenen Kontos. | Tests (`test_user_files.py`) |
+| das Modell auf keinem Rechner etwas ausführen kann | Kein Zugang zu Rechnern, keine Zugangsdaten in den Containern. Code läuft nur in einer Sandbox ohne Netz, die nach jedem Lauf alles löscht. | Compose-Datei, Tests der Sandbox |
+| fremde Inhalte als Daten gelten, nicht als Anweisung | Webseiten und Dokumente laufen durch eine Prüfung auf eingeschleuste Anweisungen. Köder-Schlüssel schlagen Alarm, wenn etwas Geschütztes hinaus will. | Agenten-Messung (Injection in Dokument und Webseite) |
+| sich alles nachvollziehen lässt | Signiertes Auditprotokoll, auf Wunsch weitergegeben an das SIEM der Firma ([unten](#wer-hat-was-getan-auditprotokoll-und-siem)). | `GET /v1/dashboard/audit/verify`, das SIEM |
+| man es nicht glauben muss | Quelltext offen, Tests und Messungen liegen im Repo und lassen sich wiederholen. | dieses Repo |
+
+Die Einzelheiten stehen im [Sicherheitskonzept](#sicherheitskonzept). Was noch fehlt, steht
+unter [Offen für einen Einsatz im Unternehmen](#offen-für-einen-einsatz-im-unternehmen), vor
+allem: Wer den Server bedient, kann die Dateien lesen, und eine Anmeldung über das
+Firmenverzeichnis (SSO) gibt es noch nicht.
+
+### Wer hat was getan: Auditprotokoll und SIEM
+
+**Was ist ein SIEM?** Ein SIEM (Security Information and Event Management) ist die zentrale
+Stelle, an der die IT-Sicherheit die Protokolle aller Systeme sammelt: Firewall,
+Verzeichnisdienst, Virenschutz auf den Rechnern, Server. Dort werden sie unveränderlich
+aufbewahrt, miteinander verknüpft und automatisch ausgewertet. Typische Regeln sind viele
+Fehlanmeldungen in kurzer Zeit, eine Anmeldung zu ungewöhnlicher Uhrzeit oder ein neues
+Administratorkonto. Schlägt eine Regel an, bekommt das Sicherheitsteam einen Alarm. Verbreitet
+sind etwa Microsoft Sentinel, Splunk, IBM QRadar, CrowdStrike Falcon Next-Gen SIEM oder das
+freie Wazuh.
+
+**Warum das zählt.** Ein neues System, das vertrauliche Unterlagen verarbeitet, muss sich in
+diese Überwachung einfügen. Der VDA-ISA-Katalog, auf dem TISAX beruht, verlangt, dass
+sicherheitsrelevante Ereignisse protokolliert, vor Veränderung geschützt und ausgewertet
+werden. Ein Protokoll, das nur auf dem Server selbst liegt, erfüllt das schlecht: Wer den
+Server übernimmt, kann es löschen.
+
+**Was Argus protokolliert:**
+
+| Ereignis | Beispiele | Wofür im SIEM |
+|---|---|---|
+| Anmeldung | erfolgreich, falsches Passwort, unbekanntes Konto, gesperrt nach Fehlversuchen, Abmeldung | Passwort-Raten erkennen, Anmeldungen mit anderen Systemen abgleichen |
+| Kontoänderung durch einen Administrator | Konto angelegt oder gelöscht, Rolle geändert, Passwort zurückgesetzt | Rechteausweitung erkennen: Wer hat wen wann zum Administrator gemacht? |
+| Sperre nach Firmendaten | Websuche in einem Gespräch mit Firmendaten abgewiesen | Eine Häufung zeigt Fehlbedienung oder einen Angriffsversuch über präparierte Inhalte |
+| Köder-Alarm | ein Köder-Schlüssel sollte hinaus | höchste Stufe: deutet auf einen gezielten Abflussversuch |
+| Schreiben im Arbeitsordner | Datei über ein Werkzeug der Administratoren angelegt oder geändert, mit Pfad | Änderungen an Dateien nachvollziehen |
+| Freigaben und Cloud-Aufrufe (nur mit Cloud-Modul) | wer was freigegeben hat, was an ein Cloud-Modell ging | nachvollziehen, was das Haus verlassen hat |
+| Leeren des Protokolls | ein Administrator löscht die Einträge in der Datenbank | wird selbst gemeldet; im SIEM bleiben die alten Einträge erhalten |
+
+Jeder Eintrag trägt Zeit, Ereignis und Ergebnis, dazu Konto und Adresse, wo sie bekannt sind.
+**Nicht im Protokoll** stehen Passwörter, Chat-Verläufe und Dokumenttexte. Ein unbekannter
+Kontoname wird nur als Prüfsumme gespeichert, weil in diesem Feld oft versehentlich ein
+Passwort landet. Die einzige Ausnahme bei Inhalten: Was mit dem Cloud-Modul an ein
+Cloud-Modell geht, steht als Anfrage im Protokoll, denn genau das soll nachvollziehbar sein.
+
+**Schutz vor Manipulation.** Jeder Eintrag ist mit einem geheimen Schlüssel signiert und mit
+dem vorigen verkettet (HMAC-Kette). Wer einen Eintrag ändert, löscht oder umsortiert, bricht
+die Kette, und die Prüfung meldet die Stelle. Endgültig sicher ist das Protokoll erst im
+SIEM, denn darauf hat ein Administrator von Argus keinen Zugriff.
+
+**Einschalten** in der `.env`, zum Beispiel für einen Syslog-Empfänger des SIEM:
+
+```ini
+AUDIT_SIEM=syslog
+AUDIT_SIEM_FORMAT=cef
+AUDIT_SYSLOG_HOST=siem-collector.firma.local
+AUDIT_SYSLOG_PROTOCOL=tcp
+```
+
+Argus sendet nach RFC 5424 über UDP oder TCP, als JSON oder als CEF (Common Event Format),
+das gängige SIEM-Produkte direkt einlesen. Alternativ schreibt `AUDIT_SIEM=stdout` jeden
+Eintrag ins Container-Log, wo ein vorhandener Log-Sammler ihn abholt. Die Weitergabe hält
+keine Anfrage auf. Ist das SIEM nicht erreichbar, zählt Argus die nicht zugestellten Einträge
+und warnt. Alle Schalter stehen unter [Sicherheits-Schalter](#sicherheits-schalter).
+
+**Für den Betrieb:** Das Protokoll enthält Anmeldungen einzelner Personen. Wie andere
+Protokolle gehört es deshalb ins Löschkonzept und, wo es einen Betriebsrat gibt, in die
+passende Betriebsvereinbarung. Argus löscht Audit-Einträge nicht von selbst; wie lange sie
+aufbewahrt werden, regelt das SIEM.
 
 ## Warum Websuche, und wie sie abgesichert ist
 
@@ -295,7 +381,8 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   Neustart bestehen. Jede Sperre landet im Audit, ohne Inhalte. Für eine
   Recherche beginnt man ein neues Gespräch.
 - **Fremde Inhalte:** Websuche und Seitenabruf laufen durch eine Injection-Prüfung
-  (`WEB_INJECTION_GUARD`). Der Seitenabruf sperrt interne Adressen, auch nach Weiterleitungen.
+  (`WEB_INJECTION_GUARD`). Der Seitenabruf sperrt interne Adressen, auch nach Weiterleitungen,
+  und liest höchstens 3 MB je Seite (`WEBPAGE_MAX_BYTES`).
 - **Rollen:** Geprüft wird an jeder Route im Backend, nicht in der Oberfläche. Benutzer
   bekommen die Werkzeuge für Cloud, Unteragenten und die Wissensbasis gar nicht erst
   angeboten, und der Prompt beschreibt sie ihnen nicht.
@@ -313,6 +400,15 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   Selbstregistrierung, Sperre nach fünf Fehlversuchen. Abmelden und Passwortwechsel beenden
   alle Sitzungen des Kontos. Das erste Administrator-Konto legt nur an, wer den
   Einrichtungs-Schlüssel der Installation kennt (`DASHBOARD_SETUP_TOKEN`).
+- **Audit:** Ein Protokoll mit HMAC-Kette hält fest, was sicherheitsrelevant ist:
+  Werkzeugaufrufe mit Schreibzugriff, Sperren nach Firmendaten, Köder-Alarme, Freigaben,
+  Anmeldungen (erfolgreich, fehlgeschlagen, gesperrt), Abmeldungen und jede Kontoänderung
+  durch einen Administrator (angelegt, Rolle, Passwort, gelöscht). Gespeichert werden Konto,
+  Adresse und Grund, nie Passwörter oder Inhalte. Bei einem unbekannten Kontonamen steht nur
+  ein Hash im Protokoll, weil dort oft ein Passwort im falschen Feld landet. Jede Änderung oder
+  Lücke in der Kette meldet `GET /v1/dashboard/audit/verify` (nur für Administratoren). Mit
+  `AUDIT_SIEM` geht jeder Eintrag zusätzlich an ein SIEM (siehe
+  [Sicherheits-Schalter](#sicherheits-schalter)).
 - **Oberfläche:** Die Seite lädt nichts von fremden Hosts (Schriften und Skripte liegen im
   Repo). Content-Security-Policy, Prüfung von Host- und Origin-Header gegen DNS-Rebinding und
   CSRF. Text des Modells wird vor der Anzeige maskiert.
@@ -345,16 +441,13 @@ sollte sie kennen.
 - **Cloud-Missionen:** Erkennt der Router eine Nachricht eines Administrators als
   Hintergrund-Auftrag, startet er die Mission ohne Karte im Chat (Schwärzung und PII-Stopp
   laufen trotzdem). Betrifft nur Installationen mit Cloud-Modul.
-- **Seitenabruf ohne Größengrenze:** Eine sehr große Antwort wird ganz in den Speicher
-  geladen, bevor sie gekürzt wird.
 - **Langzeitgedächtnis:** Die Zusammenfassung je Konto wird im normalen Chat derzeit nicht
   fortgeschrieben.
-- **Prompts:** Ton und Beispiele der Vorgaben stammen aus einem persönlichen Assistenten und
-  sind noch nicht auf den Firmeneinsatz umgeschrieben. Die Anrede leitet sich aus dem
-  Kontonamen ab; mit SSO käme der Name aus dem Verzeichnis.
-- **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren (das Leeren wird
-  vermerkt). Anmeldungen und Kontoänderungen stehen nicht im Audit, eine Ausgabe für ein SIEM
-  fehlt.
+- **Name in der Anrede:** Er leitet sich aus dem Kontonamen ab; mit SSO käme er aus dem
+  Verzeichnis.
+- **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
+  vermerkt und mit `AUDIT_SIEM` auch ans SIEM gemeldet. Unveränderlich ist das Protokoll erst
+  dort. Was das SIEM nicht erreicht, wird nicht nachgeliefert.
 - **Betrieb:** Der Stapel bringt keinen TLS-Proxy mit. Hinter einem Proxy teilen sich alle
   Nutzer ein Ratenlimit, weil nach Adresse gezählt wird. Wer Docker auf dem Server bedienen
   darf, hat dort praktisch Admin-Rechte.
@@ -524,8 +617,16 @@ Der Systemprompt setzt sich aus drei Dateien zusammen: `SOUL.md` (Haltung, Ton),
 `rag_backend/prompts/identity/`. Eine gleichnamige Datei in `<Arbeitsordner>/identity/` ersetzt
 die Vorgabe. Abschnitte zu einem Werkzeug erscheinen nur, wenn das angemeldete Konto es hat;
 `{{OWNER}}` ist die angemeldete Person. Eigene Dateien können dieselben Platzhalter benutzen
-(`{{OWNER}}`, `{{#tool:NAME}}…{{/tool:NAME}}`, Beschreibung in
+(`{{OWNER}}`, `{{ANREDE}}`, `{{#tool:NAME}}…{{/tool:NAME}}`, Beschreibung in
 `rag_backend/prompts/__init__.py`).
+
+Die Vorgaben sprechen wie ein sachlicher Kollege: freundlich, knapp, ohne Floskeln und ohne
+Hinweise wie „ich darf nicht beraten“. Unterlagen (Verträge, Angebote, Richtlinien,
+Datenblätter, Prüfberichte) beurteilt Argus konkret gegen das Übliche. Wo eine Fachstelle
+entscheiden muss (Recht, Datenschutz, Exportkontrolle), nennt es sie einmal am Ende. Ein
+eigener Abschnitt zur Vertraulichkeit verbietet interne Namen, Zahlen und Dateinamen in
+Websuchen; findet Argus eine genannte Datei nicht, bittet es um den Anhang, statt im Web zu
+suchen. `ARGUS_ANREDE=Sie` stellt die Anrede von „du“ (Vorgabe) auf „Sie“ um.
 
 Unabhängig von den Dateien hängt das Backend eine Regel für interne Fragen an: Richtlinien,
 Verträge, Preise und Datenblätter erst in den Dokumenten suchen, keine Zahlen selbst
@@ -542,6 +643,7 @@ Runden, Details in `eval/agent/README.md`):
 | Ausgang | 7 von 17 | 155 s, 4 × Zeitlimit | – |
 | Router, Deckel | 61 von 78 | 16 s | 10 von 18 |
 | plus Regel, Vorgaben aus dem Repo | 73 von 78 | 23 s | 15 von 18 |
+| plus Firmenton und Vertraulichkeit | 73 von 78 | 24 s | 18 von 18 |
 
 ## Sicherheits-Schalter
 
@@ -558,6 +660,18 @@ Alle per `.env` änderbar:
 | `TRACE_CONTENT` | `redacted` | Was Phoenix sieht: `redacted` (Inhalte mit geschwärzten Schlüsseln und PII) oder `metadata` (nur Ablauf, Dauer, Token-Zahlen, Werkzeugnamen). Einen Klartext-Modus gibt es nicht. |
 | `CANARY_TOKENS` | von `init_stack.py` erzeugt | Köder-Schlüssel (Komma-getrennt, je ab 12 Zeichen). Taucht einer in einer Cloud-Anfrage, Websuche, URL oder in Werkzeug-Parametern auf, wird blockiert, als Fehler protokolliert und im Audit vermerkt. |
 | `SEARXNG_SECRET` | von `init_stack.py` erzeugt | HMAC-Schlüssel für SearXNG. |
+| `WEBPAGE_MAX_BYTES` | `3000000` | Höchstens so viele Bytes liest der Seitenabruf; meldet eine Seite vorab mehr, wird sie gar nicht geladen. |
+| `AUDIT_SIEM` | `off` | Weitergabe jedes Audit-Eintrags: `syslog` an einen Syslog-Empfänger (RFC 5424), `stdout` als JSON-Zeile ins Container-Log (für einen Log-Sammler). |
+| `AUDIT_SIEM_FORMAT` | `json` | `json` oder `cef` (Common Event Format, etwa für Microsoft Sentinel, Falcon LogScale, QRadar). |
+| `AUDIT_SYSLOG_HOST`, `AUDIT_SYSLOG_PORT`, `AUDIT_SYSLOG_PROTOCOL` | –, `514`, `udp` | Ziel für `syslog`. Bei `tcp` mit Längenangabe je Nachricht (RFC 6587), die Verbindung wird gehalten und nach Fehlern neu aufgebaut. |
+| `AUDIT_SIEM_HOSTNAME` | Name des Containers | Rechnername im Syslog-Kopf und im Feld `host`. |
+| `AUDIT_TRUST_FORWARDED` | `false` | Schreibt die erste Adresse aus `X-Forwarded-For` mit ins Protokoll. Nur hinter einem eigenen Proxy einschalten, sonst ist der Wert gefälscht. |
+
+Die Weitergabe ans SIEM blockiert keine Anfrage: Einträge gehen über eine Warteschlange
+(10.000 Plätze). Ist das SIEM nicht erreichbar oder die Warteschlange voll, wird der Eintrag
+nicht nachgeliefert, sondern gezählt und höchstens einmal je Minute gewarnt. Maßgeblich
+bleibt das Protokoll in der Datenbank. Jeder weitergegebene Eintrag trägt seine
+HMAC-Signatur, so lässt er sich dort wiederfinden.
 | `CLOUD_AGENTS_ENABLED` | `false` | Cloud-Modelle (Gemini) als Helfer. |
 | `CLOUD_MISSION_AUTO_APPROVE` | `false` | Mit `true` gehen Cloud-Anfragen ohne Rückfrage raus; Schwärzung, PII-Stopp und Köder-Prüfung laufen trotzdem. In einem Gespräch mit Firmendaten nie ohne Rückfrage. |
 | `API_DOCS` | `false` | Mit `true` ist die API-Beschreibung unter `/docs` erreichbar, ohne Anmeldung. |

@@ -2,6 +2,9 @@ function getStatusLabel(status) {
   if (!status) return "-";
   const s = status.toLowerCase();
   if (s === "ok" || s === "success") return "ERFOLGREICH";
+  if (s === "failed") return "FEHLGESCHLAGEN";
+  if (s === "locked") return "GESPERRT";
+  if (s === "denied") return "ABGELEHNT";
   if (s === "error") return "FEHLER";
   if (s === "exception") return "SYSTEMAUSNAHME";
   if (s === "blocked") return "BLOCKIERT";
@@ -18,15 +21,20 @@ function getFriendlyActionName(tool, details) {
   // String(): ein Audit-Eintrag ohne Werkzeugnamen wirft sonst mitten im tick()
   // einen TypeError, den der stille catch verschluckt.
   const name = String(tool || "");
+  const friendly = {
+    "auth.login": "Anmeldung",
+    "auth.api_login": "API-Anmeldung",
+    "auth.logout": "Abmeldung",
+    "auth.setup": "Einrichtung",
+    "auth.register": "Registrierung",
+    "auth.password_change": "Passwort geändert",
+    "account.create": "Konto angelegt",
+    "account.password_reset": "Passwort zurückgesetzt",
+    "account.role_change": "Rolle geändert",
+    "account.delete": "Konto gelöscht",
+  };
+  if (friendly[name]) return friendly[name];
   if (!details) return name;
-  if (name.toLowerCase().includes("powershell")) {
-    const clean = details.trim().replace(/^#.*$/gm, "").trim();
-    const firstLine = clean.split('\n')[0] || "";
-    if (firstLine.length > 40) {
-      return firstLine.substring(0, 37) + "...";
-    }
-    return firstLine || "PowerShell Befehl";
-  }
   if (details.startsWith("{")) {
     try {
       const p = JSON.parse(details);
@@ -211,7 +219,7 @@ async function tick(force) {
       const auRows = au.audit || [];
       $("auditEmpty").style.display = auRows.length ? "none" : "block";
       const aSub = $("audit-sub");
-      if (aSub) aSub.textContent = "ACTION-ENGINE" + (auRows.length ? " \u00b7 LETZTE " + auRows.length : "");
+      if (aSub) aSub.textContent = "AUDIT" + (auRows.length ? " \u00b7 LETZTE " + auRows.length : "");
       $("audit").innerHTML = auRows.map(function (r) {
         // Sekunden wie im Entwurf (0,42 s) statt Millisekunden -- die Zahlen
         // stehen neben Werkzeugdauern im Chat und sollen sich gleich lesen.
@@ -227,8 +235,8 @@ async function tick(force) {
 
         let rowHtml = "<tr onclick='if(window.toggleAuditRow) window.toggleAuditRow(this)' style='" + cursorStyle + "'>" +
           "<td><span style='color:var(--color-blue); opacity:0.5;'>»</span> " + tcell(r.ts) + "</td>" +
-          // escapeHtml ist PFLICHT: der Text ist die erste Zeile des ausgefuehrten
-          // PowerShell-Skripts und damit per Prompt-Injection steuerbar.
+          // escapeHtml ist PFLICHT: der Text stammt teilweise aus r.details und
+          // ist damit per Prompt-Injection steuerbar.
           "<td><span style='color:var(--color-blue); font-weight:bold;'>" + escapeHtml(getFriendlyActionName(r.tool, r.details)) + chevron + "</span></td>" +
           "<td><span style='color:var(--text-secondary);'>" + escapeHtml(r.tool_class || "") + "</span></td>" +
           "<td>" + statusDot + "<span class='" + statusClass + "'>" + escapeHtml(getStatusLabel(r.status)) + "</span></td>" +

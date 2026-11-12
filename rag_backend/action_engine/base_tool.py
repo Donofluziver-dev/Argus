@@ -286,7 +286,7 @@ class BaseTool(ABC):
                 #--- Die Aufgaben-Freigabe gilt nur fuer DASSELBE Werkzeug: eine
                 #--- im selben Turn eingeschleuste Aktion mit einem anderen Werkzeug
                 #--- fragt neu.
-                prior = confirmation_store.task_status(task_id, self.name)
+                prior = confirmation_store.task_status(task_id, self.name, actor=user_id)
                 if prior == "rejected":
                     return self._task_rejected(_audit)
                 if prior == "approved":
@@ -297,7 +297,7 @@ class BaseTool(ABC):
                     #--- Im Aufgaben-Lock nachfassen: ein paralleler Sub-Agent
                     #--- kann inzwischen gefragt haben.
                     async with _task_gate(task_id):
-                        prior = confirmation_store.task_status(task_id, self.name)
+                        prior = confirmation_store.task_status(task_id, self.name, actor=user_id)
                         if prior == "rejected":
                             return self._task_rejected(_audit)
                         if prior == "approved":

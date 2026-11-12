@@ -122,6 +122,24 @@ def write_audit_log(
                 log.error(f"audit_log Anker nicht schreibbar: {anchor_err}")
             db.commit()
 
+        # Weitergabe an SIEM (optional, blockiert nicht)
+        try:
+            from rag_backend import siem
+            siem.forward({
+                "ts": ts.isoformat(timespec="microseconds"),
+                "tool": tool,
+                "tool_class": tool_class,
+                "status": status,
+                "latency_ms": latency_ms,
+                "input_hash": input_hash,
+                "output_hash": output_hash,
+                "user_id": user_id,
+                "details": details,
+                "hmac": signature,
+            })
+        except Exception as siem_err:
+            log.warning(f"audit_log SIEM-Weiterleitung fehlgeschlagen: {siem_err}")
+
         # Zusaetzlich als JSONL auf dem Host-Volume, ein File pro Tag.
         try:
             audit_dir = Path("/app/evals/Action_Audit")

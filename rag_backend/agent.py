@@ -881,12 +881,41 @@ async def _fetch_clean_page(url: str) -> str:
     if check_canary(url, "Webseiten-Abruf"):
         return "ERROR: URL blocked -- it contains protected data."
     max_chars = int(os.getenv("WEBPAGE_MAX_CHARS", 14000))
+    max_bytes = int(os.getenv("WEBPAGE_MAX_BYTES", 3000000))
 
     try:
         await _ensure_models_loaded()
-        resp = await _http_client_web.get(url)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        async with _http_client_web.stream("GET", url) as resp:
+            resp.raise_for_status()
+            cl = resp.headers.get("content-length")
+            if cl:
+                try:
+                    if int(cl) > max_bytes:
+                        return "ERROR: Page too large -- pick a different URL."
+                except (ValueError, TypeError):
+                    pass
+
+            chunks: list[bytes] = []
+            total_bytes = 0
+            async for chunk in resp.aiter_bytes():
+                needed = max_bytes - total_bytes
+                if len(chunk) > needed:
+                    chunks.append(chunk[:needed])
+                    total_bytes += needed
+                    break
+                chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes >= max_bytes:
+                    break
+
+            raw = b"".join(chunks)
+            encoding = resp.encoding or "utf-8"
+            try:
+                html_text = raw.decode(encoding, errors="replace")
+            except Exception:
+                html_text = raw.decode("utf-8", errors="replace")
+
+        soup = BeautifulSoup(html_text, "html.parser")
 
         for element in soup(_GARBAGE_TAGS):
             element.extract()
@@ -911,7 +940,7 @@ async def _fetch_clean_page(url: str) -> str:
         if len(clean_text) < 1500 and any(term in head for term in ["bot check", "cloudflare", "captcha", "access denied"]):
             return "ERROR: ACCESS BLOCKED (bot protection/paywall). Try a different URL!"
 
-        if '<div id="root"' in resp.text or '<div id="app"' in resp.text:
+        if '<div id="root"' in html_text or '<div id="app"' in html_text:
             clean_text += "\n\n[NOTE: Page is JavaScript-based -- content may be incomplete.]"
 
         if len(clean_text) < 200:
@@ -3219,7 +3248,7 @@ async def _classify_routing_decision(text: str) -> dict:
         "and in that case, when in doubt, choose research rather than mission.\n"
         "   Careful: merely TALKING about missions ('what is a mission?', 'show my missions') "
         "is not a request to start one.\n"
-        "2. coding: writing/debugging scripts or programs, PowerShell automation.\n"
+        "2. coding: writing/debugging scripts or programs.\n"
         "3. research: deep research or multi-source comparison with an IMMEDIATE answer in chat.\n"
         "4. reasoning: logical thinking, math, explanations without cloud need (Qwen think solo).\n"
         "5. simple: small talk, short greetings, confirmations (Qwen fast solo).\n\n"
@@ -3358,7 +3387,7 @@ async def solver_node(state: State):
         "1. Answer ONLY in the following JSON format so your output can be written directly to the blackboard:\n"
         "{\n"
         '  "solution_plan": "short summary of your progress or solution approach",\n'
-        '  "code_draft": "optional: your complete Python or PowerShell code if the task requires code execution/validation, otherwise leave empty or null",\n'
+        '  "code_draft": "optional: your complete Python code if the task requires code execution/validation, otherwise leave empty or null",\n'
         '  "text_draft": "optional: your text-based answer, concept, report or solution if no code needs to run, otherwise leave empty",\n'
         '  "issue_description": "if an error occurred or you need deeper information from the researcher, describe the problem here for the research agent. Otherwise leave this key empty or set it to null",\n'
         '  "status": "one of: resolved | error_found"\n'
@@ -3733,6 +3762,7 @@ async def agent_node(state: State):
     route = "local"
     reasoning_decision = None
     routing_res = None
+    _admin_turn = (request_origin_var.get() or {}).get("user_role") in (None, "admin")
 
     if first_hop:
         last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
@@ -3880,8 +3910,10 @@ async def agent_node(state: State):
 
     # Recherche-Kollaboration: Gemini plant die Teilthemen, Qwen recherchiert und
     # synthetisiert. Faellt die Cloud aus, waehlt Qwen selbst.
+    # Cloud-Modell darf nur in einem Turn mit _admin_turn aufgerufen werden.
     _research_guidance = ""
-    if route == "deep" and first_hop and state.get("task_type") == "research":
+    _turn_task_type = (routing_res.get("task_type") if isinstance(routing_res, dict) else None) or state.get("task_type")
+    if route == "deep" and first_hop and _turn_task_type == "research" and _admin_turn:
         _subs = await _plan_research_subtopics(last_text)
         if _subs:
             _joined = "\n".join(f"{i}. {s}" for i, s in enumerate(_subs, 1))
@@ -3894,7 +3926,7 @@ async def agent_node(state: State):
         else:
             log.info("Research-Plan: Gemini nicht verfuegbar -> Qwen waehlt Teilthemen selbst.")
 
-    if route == "deep" and first_hop and (not has_history or state.get("task_type") == "research"):
+    if route == "deep" and first_hop and (not has_history or _turn_task_type == "research"):
         # Beide Recherche-Werkzeuge anbieten, nur den Tool-ZWANG setzen: research
         # fuer Mehr-Produkt-Vergleiche, deep_research fuer EIN breites Thema.
         # get_weather gehoert dazu, obwohl es keine Recherche ist: eine Wetterfrage

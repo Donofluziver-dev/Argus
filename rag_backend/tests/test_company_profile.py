@@ -205,6 +205,55 @@ async def test_solver_loop_runs_sandbox_code_only_for_admins(monkeypatch, _clean
     assert out["blackboard"]["status"] == "init"
 
 
+async def test_research_collaboration_plans_subtopics_only_for_admin(monkeypatch, _clean_origin):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    plan_calls = []
+
+    async def _fake_plan(topic: str):
+        plan_calls.append(topic)
+        return ["Thema A", "Thema B"]
+
+    class _FakeLLM:
+        def bind_tools(self, *_a, **_k):
+            return self
+
+        async def ainvoke(self, messages, **_k):
+            return AIMessage(content="Ergebnis")
+
+    async def _fake_router(text):
+        return {"task_type": "research", "needs_web_search": True, "needs_reasoning": False}
+
+    monkeypatch.setattr(agent, "_classify_routing_decision", _fake_router)
+    monkeypatch.setattr(agent, "_plan_research_subtopics", _fake_plan)
+    monkeypatch.setattr(agent, "_llm_fast", _FakeLLM())
+    monkeypatch.setattr(agent, "_llm_think", _FakeLLM())
+    monkeypatch.setattr(agent, "_serving_budget", lambda: 100_000)
+    monkeypatch.setattr(agent, "_dynamic_max_tokens", lambda *a, **k: 512)
+
+    async def _no_compact(msgs, *_a, **_k):
+        return msgs
+
+    monkeypatch.setattr(agent, "_compact_messages_if_overflow", _no_compact)
+    monkeypatch.setattr(agent, "get_prompt_from_env", lambda *a, **k: "System Prompt")
+
+    state = {
+        "messages": [HumanMessage(content="Recherchiere die Unterschiede zwischen X und Y.")],
+        "user_id": 5,
+    }
+
+    # 1. Rolle 'user': _plan_research_subtopics darf NICHT aufgerufen werden
+    agent.request_origin_var.set({"user_role": "user", "channel": "dashboard"})
+    out_user = await agent.agent_node(dict(state))
+    assert plan_calls == [], "Rolle user darf _plan_research_subtopics nicht aufrufen"
+
+    # 2. Rolle 'admin': _plan_research_subtopics MUSS aufgerufen werden
+    agent.request_origin_var.set({"user_role": "admin", "channel": "dashboard"})
+    out_admin = await agent.agent_node(dict(state))
+    assert len(plan_calls) == 1, "Rolle admin muss _plan_research_subtopics aufrufen"
+    assert "Recherchiere die Unterschiede" in plan_calls[0]
+
+
 # ---- Anrede aus dem Konto -----------------------------------------------------
 
 @pytest.mark.parametrize("account, expected", [
@@ -248,8 +297,8 @@ def test_prompt_addresses_the_account(client, monkeypatch, tmp_path):
     assert agent._account_display_name(0) is None            # Dienstkonto
     assert agent._account_display_name(99999) is None        # gibt es nicht
     prompt = agent.get_prompt_from_env("SYSTEM_PROMPT", "", user_id=uid)
-    assert "assistant of Anna Schmidt" in prompt and "Zentral" not in prompt
-    assert "assistant of the user" in agent.get_prompt_from_env("SYSTEM_PROMPT", "")
+    assert "talking to Anna Schmidt" in prompt and "Zentral" not in prompt
+    assert "talking to the user" in agent.get_prompt_from_env("SYSTEM_PROMPT", "")
 
 
 def test_prompt_describes_only_tools_of_the_role(monkeypatch, tmp_path, _clean_origin):

@@ -18,7 +18,11 @@ _DEFAULT_MCP_SERVERS = (
 )
 
 
-_ALLOWED_ENV_VARS = {"PATH", "HOME", "LANG", "PYTHONPATH", "NODE_ENV"}
+#--- AUDIT_*: der Dateisystem-Server schreibt ins Auditprotokoll und gibt es wie das
+#--- Backend an ein SIEM weiter. Die Werte enthalten keine Geheimnisse.
+_ALLOWED_ENV_VARS = {"PATH", "HOME", "LANG", "PYTHONPATH", "NODE_ENV",
+                     "AUDIT_SIEM", "AUDIT_SIEM_FORMAT", "AUDIT_SIEM_HOSTNAME",
+                     "AUDIT_SYSLOG_HOST", "AUDIT_SYSLOG_PORT", "AUDIT_SYSLOG_PROTOCOL"}
 _FORBIDDEN_ENV_SUBSTRINGS = {"SECRET", "TOKEN", "KEY", "PASSWORD"}
 
 

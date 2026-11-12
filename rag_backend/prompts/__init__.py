@@ -6,6 +6,7 @@ bleibt der Teil leer.
 
 Platzhalter und Bloecke (gelten fuer Vorgaben und eigene Dateien):
   {{OWNER}}                    Anrede der angemeldeten Person, sonst "the user"
+  {{ANREDE}}                   du oder Sie, laut ARGUS_ANREDE (Vorgabe du)
   {{#tool:NAME}}...{{/tool:NAME}}     nur wenn das Werkzeug NAME angeboten wird
   {{^tool:NAME}}...{{/tool:NAME}}     nur wenn es fehlt
 So beschreibt der Prompt keine Werkzeuge, die es in dieser Installation nicht
@@ -16,11 +17,18 @@ Ein unbekannter Schluessel gilt als "nicht vorhanden": aeltere eigene Dateien mi
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 DEFAULT_DIR = Path(__file__).parent / "identity"
 _BLOCK = re.compile(r"\{\{([#^])([\w:]+)\}\}(.*?)\{\{/\2\}\}", re.S)
+_ANREDE = {"du": 'the informal "du"', "sie": 'the formal "Sie"'}
+
+
+def anrede() -> str:
+    """Form der Anrede fuer die ganze Installation. Unbekannte Werte gelten als du."""
+    return _ANREDE.get(os.getenv("ARGUS_ANREDE", "du").strip().lower(), _ANREDE["du"])
 
 
 def load(name: str, workspace_identity: Path) -> tuple[str, str]:
@@ -48,5 +56,5 @@ def render(text: str, *, tool_names: set[str], owner: str | None = None) -> str:
     while prev != text:  # verschachtelte Bloecke von innen nach aussen
         prev, text = text, _BLOCK.sub(sub, text)
     owner = (owner or "").strip() or "the user"
-    text = text.replace("{{OWNER}}", owner)
+    text = text.replace("{{OWNER}}", owner).replace("{{ANREDE}}", anrede())
     return re.sub(r"\n{3,}", "\n\n", text).strip()

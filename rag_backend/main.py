@@ -36,6 +36,7 @@ from rag_backend.agent import agent_executor, startup_load_models, startup_mcp_a
 from rag_backend.memory import run_reflection_cycle
 from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
 from rag_backend import metrics
+from rag_backend.security_audit import audit_auth
 from rag_backend.utils import get_env_first
 from rag_backend.schema_utils import (ensure_message_performance_columns, ensure_user_role_column,
                                       ensure_user_token_version_column, ensure_sensitive_session_columns)
@@ -717,6 +718,7 @@ def dashboard_auth_register(request: Request, body: DashboardLoginIn,
     db.add(user)
     db.commit()
     db.refresh(user)
+    audit_auth("auth.register", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     log.info(f"Selbstregistrierung: '{user.email}' (Rolle user, id={user.id})")
     resp = JSONResponse({"status": "ok", "username": user.email, "role": user.role,
                          "user_id": user.id})
@@ -738,6 +740,7 @@ def dashboard_auth_setup(request: Request, body: DashboardUserIn,
     setup_token = os.getenv("DASHBOARD_SETUP_TOKEN", "").strip()
     if setup_token and not hmac.compare_digest(
             (request.headers.get("x-setup-token") or "").encode(), setup_token.encode()):
+        audit_auth("auth.setup", status="denied", request=request, account=body.username.strip(), account_exists=False, details={"reason": "setup_token"})
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Einrichtungs-Schlüssel fehlt oder stimmt nicht.")
     name = body.username.strip()
     if len(name) < 3 or len(body.password) < 8:
@@ -757,6 +760,7 @@ def dashboard_auth_setup(request: Request, body: DashboardUserIn,
     #--- Administrator ueber, statt unerreichbar zu werden.
     db.query(ChatSession).filter_by(user_id=_SERVICE_UID).update({"user_id": user.id})
     db.commit()
+    audit_auth("auth.setup", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     resp = JSONResponse({"status": "ok", "username": user.email, "role": user.role,
                          "user_id": user.id})
     _set_session_cookie(resp, user.id, request=request)
@@ -794,23 +798,28 @@ def dashboard_auth_login(request: Request, body: DashboardLoginIn,
                          db: Session = Depends(get_db),
                          csrf = Depends(check_dashboard_csrf)):
     name = body.username.strip()
+    user = db.query(User).filter_by(email=name).first()
+    exists = bool(user and user.id != _SERVICE_UID)
     if _login_locked(name.lower()):
+        audit_auth("auth.login", status="locked", request=request, account=name, account_exists=exists)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Zu viele Fehlversuche. Bitte spaeter erneut versuchen.")
-    user = db.query(User).filter_by(email=name).first()
     #--- Gleiche Meldung UND gleiche Laufzeit fuer 'Konto gibt es nicht' und
     #--- 'Passwort falsch'.
     try:
-        if not user or user.id == _SERVICE_UID:
+        if not exists:
             _ph.verify(_DUMMY_HASH, body.password + "\x00")
             raise VerifyMismatchError()
         _ph.verify(user.hashed_password, body.password)
     except (VerifyMismatchError, InvalidHash):
         _login_failed(name.lower())
+        reason = "wrong_password" if exists else "unknown_account"
+        audit_auth("auth.login", status="failed", request=request, account=name, account_exists=exists, details={"reason": reason})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Anmeldung fehlgeschlagen.")
     if _ph.check_needs_rehash(user.hashed_password):
         user.hashed_password = _ph.hash(body.password)
         db.commit()
+    audit_auth("auth.login", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     resp = JSONResponse({"status": "ok", "username": user.email,
                          "role": getattr(user, "role", "user"), "user_id": user.id,
                          "remember_days": _DASHBOARD_REMEMBER_DAYS if body.remember else 0})
@@ -826,6 +835,7 @@ def dashboard_auth_logout(request: Request, db: Session = Depends(get_db),
         user = dashboard_user(request, db)
         user.token_version = _tv(user) + 1
         db.commit()
+        audit_auth("auth.logout", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     except HTTPException:
         pass
     resp = JSONResponse({"status": "ok"})
@@ -843,11 +853,13 @@ def dashboard_auth_password(request: Request, body: DashboardPasswordIn,
     try:
         _ph.verify(user.hashed_password, body.current_password)
     except (VerifyMismatchError, InvalidHash):
+        audit_auth("auth.password_change", status="failed", request=request, user_id=user.id, account=user.email, account_exists=True, details={"reason": "wrong_current_password"})
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Aktuelles Passwort stimmt nicht.")
     user.hashed_password = _ph.hash(body.password)
     #--- Alle anderen Sitzungen enden; diese bekommt ein frisches Cookie.
     user.token_version = _tv(user) + 1
     db.commit()
+    audit_auth("auth.password_change", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     resp = JSONResponse({"status": "ok"})
     _set_session_cookie(resp, user.id, request=request, tv=_tv(user))
     return resp
@@ -887,7 +899,8 @@ def dashboard_users(db: Session = Depends(get_db), admin: User = Depends(dashboa
 @app.post("/v1/dashboard/users", tags=["Dashboard"])
 def dashboard_user_create(body: DashboardUserIn, db: Session = Depends(get_db),
                           admin: User = Depends(dashboard_admin),
-                          csrf = Depends(check_dashboard_csrf)):
+                          csrf = Depends(check_dashboard_csrf),
+                          request: Request = None):
     name = body.username.strip()
     if len(name) < 3 or len(body.password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -900,6 +913,7 @@ def dashboard_user_create(body: DashboardUserIn, db: Session = Depends(get_db),
     db.add(user)
     db.commit()
     db.refresh(user)
+    audit_auth("account.create", status="success", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": user.id, "target_account": user.email, "role": user.role})
     return {"id": user.id, "username": user.email, "role": user.role, "chats": 0}
 
 
@@ -907,7 +921,8 @@ def dashboard_user_create(body: DashboardUserIn, db: Session = Depends(get_db),
 def dashboard_user_password(user_id: int, body: DashboardPasswordIn,
                             db: Session = Depends(get_db),
                             admin: User = Depends(dashboard_admin),
-                            csrf = Depends(check_dashboard_csrf)):
+                            csrf = Depends(check_dashboard_csrf),
+                            request: Request = None):
     if len(body.password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Passwort ab 8 Zeichen.")
     target = db.get(User, user_id)
@@ -916,45 +931,54 @@ def dashboard_user_password(user_id: int, body: DashboardPasswordIn,
     target.hashed_password = _ph.hash(body.password)
     target.token_version = _tv(target) + 1
     db.commit()
+    audit_auth("account.password_reset", status="success", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": target.id, "target_account": target.email})
     return {"status": "ok"}
 
 
 @app.post("/v1/dashboard/users/{user_id}/role", tags=["Dashboard"])
 def dashboard_user_role(user_id: int, role: str, db: Session = Depends(get_db),
                         admin: User = Depends(dashboard_admin),
-                        csrf = Depends(check_dashboard_csrf)):
+                        csrf = Depends(check_dashboard_csrf),
+                        request: Request = None):
     if role not in DASHBOARD_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Unbekannte Rolle.")
     target = db.get(User, user_id)
     if not target or target.id == _SERVICE_UID:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Konto nicht gefunden.")
+    old_role = target.role
     #--- Der letzte Administrator darf sich nicht selbst degradieren.
     if target.role == "admin" and role != "admin":
         remaining = db.query(User).filter(User.role == "admin",
                                           User.id != user_id, User.id != _SERVICE_UID).count()
         if not remaining:
+            audit_auth("account.role_change", status="denied", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": target.id, "target_account": target.email, "old_role": old_role, "new_role": role, "reason": "last_admin"})
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 detail="Das ist der letzte Administrator.")
     target.role = role
     #--- Bestehende Sitzungen des Kontos beenden, damit die neue Rolle sofort gilt.
     target.token_version = _tv(target) + 1
     db.commit()
+    audit_auth("account.role_change", status="success", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": target.id, "target_account": target.email, "old_role": old_role, "new_role": role})
     return {"status": "ok", "id": target.id, "role": target.role}
 
 
 @app.delete("/v1/dashboard/users/{user_id}", tags=["Dashboard"])
 def dashboard_user_delete(user_id: int, db: Session = Depends(get_db),
                           admin: User = Depends(dashboard_admin),
-                          csrf = Depends(check_dashboard_csrf)):
+                          csrf = Depends(check_dashboard_csrf),
+                          request: Request = None):
     if user_id == admin.id:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             detail="Das eigene Konto laesst sich nicht loeschen.")
     target = db.get(User, user_id)
     if not target or target.id == _SERVICE_UID:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Konto nicht gefunden.")
+    target_id = target.id
+    target_account = target.email
     #--- Chats des Kontos gehen mit, sonst bleiben verschluesselte Verlaeufe
     #--- ohne Besitzer stehen.
     sessions = db.query(ChatSession).filter_by(user_id=user_id).all()
+    chats_removed = len(sessions)
     for s in sessions:
         db.query(Message).filter_by(session_id=s.id).delete()
         db.delete(s)
@@ -965,7 +989,8 @@ def dashboard_user_delete(user_id: int, db: Session = Depends(get_db),
     db.delete(target)
     db.commit()
     _remove_user_files(user_id)
-    return {"status": "deleted", "id": user_id, "chats_removed": len(sessions)}
+    audit_auth("account.delete", status="success", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": target_id, "target_account": target_account, "chats_removed": chats_removed})
+    return {"status": "deleted", "id": user_id, "chats_removed": chats_removed}
 
 
 def _remove_user_files(user_id: int) -> None:
@@ -993,19 +1018,25 @@ def register(request: Request, body: RegisterRequest, db: Session = Depends(get_
 @app.post("/login")
 @limiter.limit("5/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter_by(email=form.username).first()
-    if not user:
+    name = form.username
+    user = db.query(User).filter_by(email=name).first()
+    exists = bool(user and user.id != _SERVICE_UID)
+    if not exists:
+        audit_auth("auth.api_login", status="failed", request=request, account=name, account_exists=False, details={"reason": "unknown_account"})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Falsche Anmeldedaten.")
     try:
         _ph.verify(user.hashed_password, form.password)
     except (VerifyMismatchError, InvalidHash):
+        audit_auth("auth.api_login", status="failed", request=request, account=name, account_exists=True, details={"reason": "wrong_password"})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Falsche Anmeldedaten.")
     #--- API-Tokens erreichen Missionen und Freigaben -- nur fuer Administratoren.
     if getattr(user, "role", "user") != "admin":
+        audit_auth("auth.api_login", status="denied", request=request, user_id=user.id, account=user.email, account_exists=True, details={"reason": "role"})
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="API-Zugang nur fuer Administratoren.")
     if _ph.check_needs_rehash(user.hashed_password):
         user.hashed_password = _ph.hash(form.password)
         db.commit()
+    audit_auth("auth.api_login", status="success", request=request, user_id=user.id, account=user.email, account_exists=True)
     return {"access_token": create_token(user.id, _tv(user)), "token_type": "bearer"}
 
 @app.get("/healthz", tags=["System"])

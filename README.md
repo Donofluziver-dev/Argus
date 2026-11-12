@@ -42,14 +42,15 @@ Argus does not replace a cloud assistant; it adds the part that does not belong 
 | Meant for | general internal knowledge, office work | material that should not go to a cloud |
 | Protection against data leaving | contractual and by the provider | technical: model without internet, lock after company data, checked automatically on every change |
 | Model | chosen by the provider | your choice, exchangeable |
-| Traceability | depends on the product | every step shown in the chat, audit log and tracing in-house |
+| Traceability | depends on the product | every step shown in the chat, signed audit log forwarded to your own SIEM, tracing in-house |
 | Cost | licence per user | hardware and operation, no licence per user |
 | Office integration | yes | no |
 | Maturity | product with support | in-house development with [known gaps](#known-gaps-for-multi-user-use) |
 
 Argus is not a TISAX certificate. It provides the technical properties that matter for
 material with a high protection need and makes them verifiable: the source is open, network
-isolation is checked on every change, and every lock is recorded in the audit log.
+isolation is checked on every change, and locks, logins and account changes are recorded in
+an audit log that can go to the company's SIEM ([Why Argus is secure](#why-argus-is-secure)).
 
 ## What works today
 
@@ -73,7 +74,8 @@ isolation is checked on every change, and every lock is recorded in the audit lo
 - **Accounts and roles:** administrators manage documents and accounts and see the monitor;
   users ask, search the documents and research. Argus addresses each person by name.
 - **Traceability:** every tool step is shown in the chat, every request as a trace in Phoenix
-  (in-house, content redacted), security events in the audit log.
+  (in-house, content redacted). Security events such as logins, account changes and locks are
+  in the signed audit log and can be forwarded to the company's SIEM.
 
 ![Web research in its own conversation: searches, pages read, answer with sources](docs/images/recherche.png)
 
@@ -93,11 +95,78 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 |---|---|---|
 | Document search: correct document ranked first | 96 % (67 % before the rebuild) | 60 questions on 30 documents, `eval/retrieval` |
 | Time per document search | 3.5 s (19.9 s before) | same, search and reranking on the CPU |
-| Tasks the whole agent solves correctly | 88 of 96 | 32 tasks, 3 runs each, against the real agent, `eval/agent` |
-| Time per task | 23 s median | same |
+| Tasks the whole agent solves correctly | 91 of 96 | 32 tasks, 3 runs each, against the real agent, `eval/agent` |
+| Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 300 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 326 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+
+## Why Argus is secure
+
+Not because the model behaves well, but because it cannot do anything dangerous. A language
+model can be talked into almost anything with cleverly worded text (prompt injection),
+including through a prepared web page or document. Argus therefore assumes the model will
+act wrongly at some point and makes sure no harm follows. The safeguards sit outside the
+model:
+
+| Argus is secure because … | How | Verifiable through |
+|---|---|---|
+| the model cannot send anything out | It runs in a network without egress; only the backend and the own search instance reach the internet. | `setup/check_networks.py`, in CI on every change |
+| company data and the internet never meet in one conversation | Once a conversation has read company data or received a file, every outbound path in it is blocked. | tests, agent measurement (security group) |
+| everyone sees only their own | Roles are checked at every backend route. Files are kept per account; the code sandbox receives only the account's own files. | tests (`test_user_files.py`) |
+| the model cannot run anything on a machine | No access to machines, no credentials in the containers. Code runs only in a sandbox without network that removes everything after each run. | compose file, sandbox tests |
+| foreign content counts as data, not as instructions | Web pages and documents pass an injection check; canary tokens raise an alarm when something protected tries to leave. | agent measurement (injection in document and web page) |
+| everything can be traced | Signed audit log, optionally forwarded to the company's SIEM ([below](#who-did-what-audit-log-and-siem)). | `GET /v1/dashboard/audit/verify`, the SIEM |
+| you do not have to take it on trust | Open source; tests and measurements are in the repository and can be repeated. | this repository |
+
+What is still missing is listed under [Known gaps](#known-gaps-for-multi-user-use), above all:
+whoever operates the server can read the files, and there is no single sign-on yet.
+
+### Who did what: audit log and SIEM
+
+**What is a SIEM?** A SIEM (Security Information and Event Management) is the central place
+where IT security collects the logs of all systems: firewall, directory, endpoint protection,
+servers. It keeps them tamper-proof, correlates them and evaluates them automatically, for
+example many failed logins in a short time, a login at an unusual hour or a new
+administrator account. When a rule fires, the security team gets an alert. Common products
+are Microsoft Sentinel, Splunk, IBM QRadar, CrowdStrike Falcon Next-Gen SIEM and the free
+Wazuh.
+
+**Why it matters.** A new system that processes confidential material has to fit into this
+monitoring. The VDA ISA catalogue that TISAX is based on requires security-relevant events to
+be logged, protected against modification and evaluated. A log that lives only on the server
+itself does that poorly: whoever takes over the server can delete it.
+
+**What Argus records:** logins (successful, wrong password, unknown account, locked, logout),
+account changes by an administrator (created, deleted, role changed, password reset), locks
+after company data, canary alarms, writes in the workspace through administrator tools,
+approvals and cloud calls (cloud module only), and clearing of the log itself. Each entry
+carries time, event and outcome, plus account and address where known. **Not in the log:**
+passwords, chat histories and document text. An unknown account name is stored only as a
+hash, because people often type a password into that field. The one exception for content:
+what the cloud module sends to a cloud model is logged as the request, since that is exactly
+what must be traceable.
+
+**Tamper protection.** Every entry is signed with a secret key and chained to the previous one
+(HMAC chain). Changing, deleting or reordering an entry breaks the chain, and the check
+reports where. The log is only final in the SIEM, where an Argus administrator has no access.
+
+**Switching it on** in `.env`, for example for a syslog receiver of the SIEM:
+
+```ini
+AUDIT_SIEM=syslog
+AUDIT_SIEM_FORMAT=cef
+AUDIT_SYSLOG_HOST=siem-collector.example.local
+AUDIT_SYSLOG_PROTOCOL=tcp
+```
+
+Argus sends RFC 5424 syslog over UDP or TCP, as JSON or as CEF (Common Event Format), which
+common SIEM products read directly. Alternatively `AUDIT_SIEM=stdout` writes each entry to the
+container log for an existing log collector. Forwarding never holds up a request; if the SIEM
+is unreachable, Argus counts the undelivered entries and warns. The log contains logins of
+individual people, so it belongs in the retention policy and, where there is a works council,
+in the relevant agreement. Argus does not delete audit entries on its own; the SIEM decides
+how long they are kept.
 
 ## Why web search, and how it is secured
 
@@ -201,6 +270,11 @@ model behaving well.
   everything, including leftover processes, is removed afterwards.
 - **Login:** HttpOnly session cookie, Argon2, no self-registration, lockout after five failed
   attempts. The first administrator account requires the installation's setup token.
+- **Audit:** an HMAC-chained log records tool calls that write, locks after company data,
+  canary alarms, approvals, logins (successful, failed, locked), logouts and every account
+  change by an administrator. It stores account, address and reason, never passwords or
+  content; an unknown account name is stored only as a hash. With `AUDIT_SIEM=syslog` (RFC
+  5424 over UDP or TCP) or `stdout`, every entry also goes to a SIEM, as JSON or CEF.
 - **UI:** loads nothing from other hosts, Content-Security-Policy, host and origin checks
   against DNS rebinding and CSRF.
 - **Containers:** ports on `127.0.0.1` only, `cap_drop: ALL`, `no-new-privileges`, memory and
@@ -216,12 +290,9 @@ These are known and not solved yet:
 - No source-level permissions in document search, no SSO (OIDC).
 - With the cloud module enabled, the router starts an administrator's background mission
   without a confirmation card.
-- Page fetches have no size limit.
 - Long-term memory is currently not updated during normal chat.
-- Tone and examples of the default prompts come from a personal assistant and have not been
-  rewritten for company use yet.
-- An administrator can clear the audit log in the database; logins are not audited; no SIEM
-  export.
+- An administrator can clear the audit log in the database (this is recorded and forwarded
+  to the SIEM); entries the SIEM does not receive are not re-sent.
 - No TLS proxy in the stack; behind a proxy all users share one rate limit.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) are fixed parts of the
   stack; for an offer to third parties both should be optional or replaceable.

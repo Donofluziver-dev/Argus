@@ -53,7 +53,7 @@ Phoenix-Projekt `argus-eval`). Ergebnisse liegen unter `%TEMP%\argus_agent_eval\
 Werkzeugaufrufen. Der Code wird beim Start kopiert; Änderungen während einer Messung
 wirken erst in der nächsten.
 
-## Ergebnisse (10.11.2026)
+## Ergebnisse (10. und 12.11.2026)
 
 Alle Zahlen mit denselben Prüfungen (ältere Läufe per `-Rescore` neu bewertet). Je
 Aufgabe 3 Runden; die Ausgangsmessung wurde nach 17 Läufen abgebrochen, weil der Fehler
@@ -64,7 +64,8 @@ eindeutig war.
 | Ausgang | eigene (Workspace) | 7/17 | 155 s | 4 | – |
 | Router und Deckel | eigene | 61/78 | 16 s | 2 | 10/18 |
 | plus Regel für interne Fragen | eigene | 68/78 | 19 s | 1 | **16/18** |
-| plus Regel für interne Fragen | Vorgaben aus dem Repo | **73/78** | 23 s | 0 | **15/18** |
+| plus Regel für interne Fragen | Vorgaben aus dem Repo | **73/78** | 23 s | 0 | 15/18 |
+| Firmenton und Vertraulichkeit (12.11.) | Vorgaben aus dem Repo | **73/78** | 24 s | 0 | **18/18** |
 
 **Ausgang.** Der Router hielt Dokumentfragen („Was hat Frau Okonkwo im Juni-Meeting
 zugesagt?“) für Web-Recherche. Auf diesem Pfad bekam der Agent nur Recherche-Werkzeuge,
@@ -90,13 +91,21 @@ Dateien probierte der Agent bei „Starte den Druckerdienst neu“ Umwege über 
 Rechenwerkzeug und Workspace-Dateien (0/3). Die Vorgaben aus dem Repo zeigen den
 Host-Abschnitt nur mit Host-Werkzeugen und sagen sonst „kein Zugriff“ (3/3).
 
-**Offen.**
-- Kilometerpauschale 2024/2025 (1/3 mit Vorgaben): Das Modell kennt die gesetzliche
-  Entfernungspauschale und antwortet damit, einmal sogar mit erfundenem Quellenverweis.
-- Mindestlänge eines Passworts (0/3 mit Vorgaben, Kontrollaufgabe): Antwort aus dem
-  Allgemeinwissen ohne Dokumentsuche. Nicht nachgeschärft, weil Kontrollaufgabe.
-- Vergleichstabelle XD-500/XD-700/KG-200 (1/3): der Wert des KG-200 fehlt oder wird als
-  „nicht vorhanden“ bezeichnet, obwohl er im Datenblatt steht.
+**Firmenton und Vertraulichkeit** (`SOUL.md` neu geschrieben, Label `firmenton`): Ton eines
+sachlichen Kollegen statt eines persönlichen Assistenten, Beispiele aus Firmenunterlagen,
+ein Abschnitt zur Vertraulichkeit (keine internen Namen, Zahlen oder Dateinamen in
+Websuchen) und zwei Reste von PowerShell aus Router und Löser entfernt. Die Hauptaufgaben
+bleiben bei 73/78, die zurückgehaltenen Kontrollaufgaben steigen auf 18/18. Auch die
+Mindestlänge des Passworts (vorher 0/3) beantwortet Argus jetzt aus den Dokumenten. Die
+Kontrollaufgaben wurden dafür nicht angesehen; die neuen Regeln sind allgemein formuliert.
+
+**Offen** (Stand `firmenton`).
+- Kilometerpauschale 2024/2025 (2/3): Das Modell kennt die gesetzliche
+  Entfernungspauschale und recherchiert im Web, statt in den Dokumenten zu suchen.
+- Wochentag in 10 Tagen (1/3 am 12.11.): Das Datum stimmt, der Wochentag nicht (Samstag statt
+  Sonntag). Die Aufgabe hängt vom Tag der Messung ab; an den Tagen davor lief sie 3/3.
+- Vergleichstabelle XD-500/XD-700/KG-200 (2/3): der Wert des KG-200 fehlt einmal.
+- Umrechnung auf einen Zeitraum (2/3).
 
 ## Grenzen
 
