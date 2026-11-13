@@ -53,7 +53,7 @@ Phoenix-Projekt `argus-eval`). Ergebnisse liegen unter `%TEMP%\argus_agent_eval\
 Werkzeugaufrufen. Der Code wird beim Start kopiert; Änderungen während einer Messung
 wirken erst in der nächsten.
 
-## Ergebnisse (10. und 12.11.2026)
+## Ergebnisse (10. bis 13.11.2026)
 
 Alle Zahlen mit denselben Prüfungen (ältere Läufe per `-Rescore` neu bewertet). Je
 Aufgabe 3 Runden; die Ausgangsmessung wurde nach 17 Läufen abgebrochen, weil der Fehler
@@ -65,7 +65,9 @@ eindeutig war.
 | Router und Deckel | eigene | 61/78 | 16 s | 2 | 10/18 |
 | plus Regel für interne Fragen | eigene | 68/78 | 19 s | 1 | **16/18** |
 | plus Regel für interne Fragen | Vorgaben aus dem Repo | **73/78** | 23 s | 0 | 15/18 |
-| Firmenton und Vertraulichkeit (12.11.) | Vorgaben aus dem Repo | **73/78** | 24 s | 0 | **18/18** |
+| Firmenton und Vertraulichkeit (12.11.) | Vorgaben aus dem Repo | 73/78 | 24 s | 0 | **18/18** |
+| Gemma 4 26B-A4B, Google-Sampling, ohne MTP (13.11.) | Vorgaben aus dem Repo | 74/78 | 47 s | 1 | **18/18** |
+| Gemma 4 26B-A4B, Qwen-Sampling, mit MTP (13.11.) | Vorgaben aus dem Repo | **76/78** | 36 s | 0 | **18/18** |
 
 **Ausgang.** Der Router hielt Dokumentfragen („Was hat Frau Okonkwo im Juni-Meeting
 zugesagt?“) für Web-Recherche. Auf diesem Pfad bekam der Agent nur Recherche-Werkzeuge,
@@ -106,6 +108,13 @@ Kontrollaufgaben wurden dafür nicht angesehen; die neuen Regeln sind allgemein 
   Sonntag). Die Aufgabe hängt vom Tag der Messung ab; an den Tagen davor lief sie 3/3.
 - Vergleichstabelle XD-500/XD-700/KG-200 (2/3): der Wert des KG-200 fehlt einmal.
 - Umrechnung auf einen Zeitraum (2/3).
+
+**Korrekturen an der Messung (13.11.2026).** Die Prüfung der Bahnklasse (`folge_bahn`)
+verlangte die Ziffer („2. Klasse“) und ließ die richtige Antwort „zweite Wagenklasse“
+durchfallen; sie nimmt jetzt beides. Beim Neubewerten (`-Rescore`) prüften die
+Datumsaufgaben gegen den heutigen Tag statt gegen den Tag des Laufs; jetzt gilt der Tag, an
+dem der Lauf gespeichert wurde. Alle Zahlen oben sind mit den korrigierten Prüfungen
+bewertet.
 
 ## Grenzen
 

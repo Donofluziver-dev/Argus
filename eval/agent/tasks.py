@@ -119,8 +119,13 @@ NOT_FOUND = (r"(nicht|kein\w*).{0,80}(gefunden|vorhanden|enthalten|bekannt|finde
              r"|kein\w* (Eintr(ae|ä)ge?|Treffer|Hinweis\w*|Dokument\w*|Angabe\w*|Information\w*)")
 
 
+#--- Tag, gegen den Datumsaufgaben geprueft werden. Beim Neubewerten alter Laeufe
+#--- (--rescore) der Tag des Laufs, sonst stimmt "in 10 Tagen" nicht mehr.
+RUN_DAY: date | None = None
+
+
 def _today() -> date:
-    return datetime.now(ZoneInfo("Europe/Berlin")).date()
+    return RUN_DAY or datetime.now(ZoneInfo("Europe/Berlin")).date()
 
 
 def _weekday_in(days: int) -> str:
@@ -332,7 +337,9 @@ TASKS: list[Task] = [
     # --- Folgefragen -------------------------------------------------------------
     Task("folge_bahn", "folgefragen",
          ["Was regelt die Reisekostenrichtlinie 2025 zu Bahnfahrten?", "Und wie war das 2024?"],
-         lambda c: all_(has(c.answer, r"2\.\s*(Wagen)?[Kk]lasse"),
+         # "2. Klasse" und ausgeschrieben "zweite(n) Wagenklasse" (bis 13.11. nur die Ziffer;
+         # aeltere Laeufe mit -Rescore neu bewerten).
+         lambda c: all_(has(c.answer, r"(2\.|[Zz]weite[nr]?)\s*(Wagen)?[Kk]lasse"),
                         has(c.answer, r"ausnahmslos|nicht erstattungsf|auch bei l(ae|ä)ngeren|grundsätzlich|immer|nur")),
          run(["Bis 4 Stunden 2. Klasse, darueber 1. Klasse erlaubt.", "2024 galt ausnahmslos die 2. Wagenklasse, die 1. Klasse war nicht erstattungsfaehig."],
              ["document_search"], ["document_search"]),

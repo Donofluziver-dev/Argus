@@ -84,14 +84,32 @@ def get_env_first(*names: str, default: str = "") -> str:
 
 
 
+def _env_float(name: str, default: float) -> float:
+    import os
+    raw = (os.getenv(name) or "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
+
 def make_qwen_llm(*, temperature: float, top_p: float, max_tokens: int,
                   thinking: bool = False, presence_penalty: float = 0.0,
-                  min_p: float | None = None, api_key: str | None = None):
-    # Fabrik fuer alle lokalen LLM/Qwen-Instanzen. Imports lokal, damit
+                  min_p: float | None = None, api_key: str | None = None,
+                  tunable: bool = False):
+    # Fabrik fuer alle lokalen LLM-Instanzen. Imports lokal, damit
     # utils ohne langchain importierbar bleibt.
+    # Die Vorgaben sind auf Qwen abgestimmt. Ein anderes Modell braucht oft andere
+    # Werte (Gemma 4: 1.0 / 0.95 / 64): LLM_TOP_K gilt fuer alle Instanzen,
+    # LLM_TEMPERATURE und LLM_TOP_P nur fuer die mit tunable=True (die Antworten),
+    # nicht fuer kurze Pruefungen, die bewusst fast deterministisch laufen.
     import os
     from langchain_openai import ChatOpenAI
-    extra_body = {"chat_template_kwargs": {"enable_thinking": thinking}, "top_k": 20}
+    if tunable:
+        temperature = _env_float("LLM_TEMPERATURE", temperature)
+        top_p = _env_float("LLM_TOP_P", top_p)
+    top_k = int(_env_float("LLM_TOP_K", 20))
+    extra_body = {"chat_template_kwargs": {"enable_thinking": thinking}, "top_k": top_k}
     if min_p is not None:
         extra_body["min_p"] = min_p
     effective_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("SGLANG_API_KEY") or "dummy"

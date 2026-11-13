@@ -80,6 +80,10 @@ roles, administrator and user.
   A confidentiality section keeps internal names, figures and file names out of web
   searches; a file it cannot find leads to a request to attach it, not to a web search.
   `ARGUS_ANREDE=Sie` switches from "du" to "Sie".
+- **MTP draft file for other models.** `LLM_MTP_MODEL_FILE` names a separate MTP file, as
+  Gemma 4 ships it; Qwen3.6 keeps its MTP head inside the model file.
+- **Sampling per model.** `LLM_TEMPERATURE`, `LLM_TOP_P` and `LLM_TOP_K` replace the values
+  tuned for Qwen, so another model can run with the settings from its model card.
 - **One file area per account.** Every account, not only administrators, can attach files
   in the chat (drag and drop or paper clip), let Argus read and analyse them in the sandbox
   and download the results (download pills above the answer, dialog *Meine Dateien*).

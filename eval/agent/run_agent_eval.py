@@ -25,7 +25,9 @@ import statistics
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -68,6 +70,8 @@ def rescore(out_dir: Path) -> int:
         if task is None:
             continue
         if not r.get("error"):
+            #--- Datumsaufgaben gegen den Tag pruefen, an dem der Lauf gespeichert wurde.
+            T.RUN_DAY = datetime.fromtimestamp(f.stat().st_mtime, ZoneInfo("Europe/Berlin")).date()
             res = task.check(T.Ctx(answers=r["answers"], turn_tools=r["trace"], error=None))
             if res.ok != r["ok"]:
                 print(f"geaendert: {f.stem}: {'ok' if r['ok'] else 'FAIL'} -> {'ok' if res.ok else 'FAIL'}  {res.detail[:120]}")

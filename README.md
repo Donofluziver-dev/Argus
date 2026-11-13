@@ -95,11 +95,11 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 |---|---|---|
 | Document search: correct document ranked first | 96 % (67 % before the rebuild) | 60 questions on 30 documents, `eval/retrieval` |
 | Time per document search | 3.5 s (19.9 s before) | same, search and reranking on the CPU |
-| Tasks the whole agent solves correctly | 91 of 96 | 32 tasks, 3 runs each, against the real agent, `eval/agent` |
+| Tasks the whole agent solves correctly | 91 of 96 (with Gemma 4: 94 of 96, [comparison](#the-model-is-exchangeable)) | 32 tasks, 3 runs each, against the real agent, `eval/agent` |
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 326 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 327 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -200,16 +200,34 @@ folder and two lines in `.env` (`LLM_MODEL_FILE`, `OAI_MODEL`).
 | Model | Licence | Image input | Note |
 |---|---|---|---|
 | Qwen3.6-35B-A3B (Alibaba) | Apache 2.0 | yes | All values above were measured with it. |
-| Gemma 4, 26B or 31B (Google) | Apache 2.0 | yes | |
+| Gemma 4, 26B-A4B or 31B (Google) | Apache 2.0 | yes | 26B-A4B measured, see below |
 | Mistral Small 3.2, 24B (Mistral AI, France) | Apache 2.0 | yes | European vendor |
 | Llama 4 (Meta) | Llama 4 Community License | yes | The acceptable use policy excludes companies with their principal place of business in the EU from the rights to the multimodal models. Have it checked before use. |
 
-Licences as stated on the vendors' model cards, November 2026; check before use. Only
-Qwen3.6-35B-A3B has been measured so far. How good another model is can be measured instead
-of claimed: the agent evaluation (`eval/agent`) runs against any model in about an hour and
+Licences as stated on the vendors' model cards, November 2026; check before use. How good
+another model is can be measured instead of claimed: the agent evaluation (`eval/agent`) runs against any model in about an hour and
 produces the same table as above. A model of this size is weaker than the large cloud models,
 especially on long multi-step tasks; for questions about documents, summaries and research
 with sources it is sufficient, as the values above show.
+
+**Measured: Qwen against Gemma.** Same 16 GB card, both Q4 (Unsloth UD-Q4_K_XL), both with
+MTP, same prompts (developed on Qwen, not adapted) and the same agent evaluation:
+
+| | Qwen3.6-35B-A3B | Gemma 4 26B-A4B |
+|---|---|---|
+| Tasks solved | 91 of 96 | 94 of 96 |
+| of which held-out control tasks | 18 of 18 | 18 of 18 |
+| Time per task (median) | 24 s | 36 s |
+| Output speed with MTP | 79 tokens/s | 89 tokens/s |
+| VRAM, experts in RAM | 14.9 GB, 25 of 40 layers | 14.8 GB, 14 of 30 layers |
+
+A difference of three runs is close to the noise of this evaluation; what holds is that the
+switch gives an equally good result without a line of code or adapted prompts. Gemma solves
+the tasks Qwen misses but, on public questions, tends to search the company documents first,
+which locks web search for that conversation. With Google's recommended sampling
+(temperature 1.0) it scored 92 of 96 at 47 s median, with one task stuck in a reasoning loop;
+the table uses the calmer values Argus uses for Qwen. Settings: see
+[README.de.md](README.de.md#das-modell-ist-austauschbar).
 
 Image input: interface and backend can pass images to the model (`LLM_ENABLE_MULTIMODAL`).
 The model service does not load the required projector file (mmproj) yet, so image input is

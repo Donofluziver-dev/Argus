@@ -361,3 +361,23 @@ def test_fast_path_mentions_llamacpp():
     assert "SGLang" not in FAST_PATH_DICT["version"]
     assert "llama.cpp" in FAST_PATH_DICT["status"]
     assert "SGLang" not in FAST_PATH_DICT["status"]
+
+
+def test_sampling_follows_env_only_for_tunable_instances(monkeypatch):
+    #--- Ohne Schalter: die Qwen-Vorgaben.
+    for name in ("LLM_TEMPERATURE", "LLM_TOP_P", "LLM_TOP_K"):
+        monkeypatch.delenv(name, raising=False)
+    llm = make_qwen_llm(temperature=0.7, top_p=0.8, max_tokens=10, tunable=True)
+    assert (llm.temperature, llm.top_p, llm.extra_body["top_k"]) == (0.7, 0.8, 20)
+    #--- Mit Schaltern (Gemma 4): nur die Antwort-Instanzen folgen Temperatur und
+    #--- top_p, top_k gilt fuer alle.
+    monkeypatch.setenv("LLM_TEMPERATURE", "1.0")
+    monkeypatch.setenv("LLM_TOP_P", "0.95")
+    monkeypatch.setenv("LLM_TOP_K", "64")
+    llm = make_qwen_llm(temperature=0.7, top_p=0.8, max_tokens=10, tunable=True)
+    assert (llm.temperature, llm.top_p, llm.extra_body["top_k"]) == (1.0, 0.95, 64)
+    task = make_qwen_llm(temperature=0.1, top_p=0.9, max_tokens=10)
+    assert (task.temperature, task.top_p, task.extra_body["top_k"]) == (0.1, 0.9, 64)
+    #--- Unlesbare Werte fallen auf die Vorgabe zurueck.
+    monkeypatch.setenv("LLM_TEMPERATURE", "warm")
+    assert make_qwen_llm(temperature=0.7, top_p=0.8, max_tokens=10, tunable=True).temperature == 0.7

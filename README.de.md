@@ -120,11 +120,11 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 |---|---|---|
 | Dokumentensuche: richtiges Dokument an erster Stelle | 96 % (vor dem Umbau 67 %) | 60 Fragen an 30 Dokumente, `eval/retrieval` |
 | Dauer einer Dokumentensuche | 3,5 s (vorher 19,9 s) | ebenda, Suche und Bewertung auf der CPU |
-| Aufgaben, die der ganze Agent richtig löst | 91 von 96 | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
+| Aufgaben, die der ganze Agent richtig löst | 91 von 96 (mit Gemma 4: 94 von 96, [Vergleich](#das-modell-ist-austauschbar)) | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 326 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 327 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -253,12 +253,12 @@ eine Firma zulässt, ist damit ihre Entscheidung, etwa nach Herkunft oder Lizenz
 | Modell | Lizenz | Bilder als Eingabe | Anmerkung |
 |---|---|---|---|
 | Qwen3.6-35B-A3B (Alibaba) | Apache 2.0 | ja | Damit sind alle Werte oben gemessen. |
-| Gemma 4, 26B oder 31B (Google) | Apache 2.0 | ja | |
+| Gemma 4, 26B-A4B oder 31B (Google) | Apache 2.0 | ja | 26B-A4B gemessen, siehe unten |
 | Mistral Small 3.2, 24B (Mistral AI, Frankreich) | Apache 2.0 | ja | europäischer Anbieter |
 | Llama 4 (Meta) | Llama 4 Community License | ja | Die Nutzungsbedingungen nehmen Firmen mit Hauptsitz in der EU von den Rechten an den multimodalen Modellen aus. Vor einem Einsatz rechtlich prüfen. |
 
 Lizenzangaben nach den Modellkarten der Anbieter, Stand November 2026; vor einem Einsatz
-prüfen. Gemessen ist bisher nur Qwen3.6-35B-A3B.
+prüfen. Gemessen sind Qwen3.6-35B-A3B und Gemma 4 26B-A4B.
 
 **Wie gut ist ein Modell?** Das sagt bei Argus eine Messung und keine Behauptung: Die
 Agenten-Messung (`eval/agent`) läuft in etwa einer Stunde gegen ein beliebiges Modell und
@@ -266,6 +266,46 @@ liefert dieselbe Tabelle wie oben. So lässt sich ein Ersatzmodell vor dem Wechs
 bisherigen vergleichen. Ein Modell dieser Größe ist schwächer als die großen Cloud-Modelle,
 vor allem bei langen Aufgaben mit vielen Schritten. Für Fragen an Dokumente,
 Zusammenfassungen und Recherche mit Quellen reicht es, wie die Werte oben zeigen.
+
+**Gemessen: Qwen gegen Gemma.** Beide auf derselben Karte (16 GB), beide in Q4 (Unsloth
+UD-Q4_K_XL), beide mit MTP, mit denselben Prompts und derselben Agenten-Messung (32 Aufgaben,
+je 3 Durchläufe). Die Prompts sind an Qwen entwickelt und für Gemma nicht angepasst.
+
+| | Qwen3.6-35B-A3B | Gemma 4 26B-A4B |
+|---|---|---|
+| Aufgaben richtig gelöst | 91 von 96 | 94 von 96 |
+| davon zurückgehaltene Kontrollaufgaben | 18 von 18 | 18 von 18 |
+| Dauer je Aufgabe (Median) | 24 s | 36 s |
+| Schreibtempo mit MTP | 79 Token/s | 89 Token/s |
+| Einlesen | ~2.800 Token/s | ~3.600 Token/s |
+| Modelldatei | 22,9 GB | 17,0 GB, dazu 0,5 GB für MTP |
+| VRAM, Experten im RAM | 14,9 GB, 25 von 40 Schichten | 14,8 GB, 14 von 30 Schichten |
+
+Beide reichen für den Einsatzzweck. Ein Unterschied von drei Durchläufen liegt nahe am
+Rauschen dieser Messung; belastbar ist, dass der Wechsel ohne eine Zeile Code und ohne
+angepasste Prompts ein gleich gutes Ergebnis liefert. Gemma löst die Aufgaben, an denen Qwen
+scheitert (Kilometerpauschale aus der Richtlinie statt der gesetzlichen, Wochentag,
+Vergleichstabelle). Schwächer ist es bei der Recherche: Es sucht auch öffentliche Fragen
+zuerst in den Firmendokumenten, damit gilt das Gespräch als Gespräch mit Firmendaten und die
+Websuche ist gesperrt. Je Aufgabe braucht es länger, obwohl es pro Token schneller schreibt;
+vermutlich denkt es länger nach, einzeln gemessen ist das nicht.
+
+**Sampling gehört zum Wechsel.** Mit den von Google empfohlenen Werten (Temperatur 1,0, top_k
+64) kam Gemma auf 92 von 96, im Median 47 s, und einmal brach eine Aufgabe nach 600 s ab,
+weil sich das Modell im Denken im Kreis drehte. Mit den ruhigeren Werten, die Argus für Qwen
+nutzt, und einer Strafe für Wiederholungen ergab sich die Tabelle oben. Bei einem neuen
+Modell also beides messen.
+
+Gemma 4 einstellen (`.env`), Sampling-Werte leer lassen:
+
+```ini
+LLM_MODEL_FILE=gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+LLM_MTP_MODEL_FILE=mtp-gemma-4-26B-A4B-it.gguf
+LLM_N_CPU_MOE=14
+OAI_MODEL=gemma-4-26b-a4b
+```
+
+Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`.
 
 **Bilder im Chat:** Oberfläche und Backend können Bilder an das Modell weitergeben
 (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj) noch
@@ -573,6 +613,12 @@ bisher nur Qwen3.6-35B-A3B; die Werte unten gelten für dieses Modell auf einer 
 - `LLM_CTX_PER_SLOT=72000` – Obergrenze je Platz, damit der andere mindestens ~30k behält.
   `/props` meldet dann `n_ctx = 72000`; das Backend liest sein Budget daraus.
 - `LLM_MTP=true`, `LLM_MTP_DRAFT=3` – spekulatives Dekodieren über den MTP-Kopf des Modells.
+  Qwen3.6 trägt ihn in der Modelldatei. Bringt ein Modell ihn als eigene Datei mit (Gemma 4:
+  `mtp-gemma-4-26B-A4B-it.gguf`), steht ihr Name in `LLM_MTP_MODEL_FILE`.
+- `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `PRESENCE_PENALTY` – Sampling der Antworten.
+  Leer gelten die Werte für Qwen (0,6 mit Denken, 0,7 ohne; top_k 20; presence_penalty 1,5).
+  Für ein anderes Modell die Werte aus seiner Modellkarte eintragen, für Gemma 4 etwa
+  `1.0`, `0.95`, `64` und `0`. Kurze interne Prüfungen behalten ihre niedrige Temperatur.
 
 Messung (RTX 5070 Ti 16 GB, DDR5-6200, n-cpu-moe 25, MTP 3):
 

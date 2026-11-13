@@ -7,6 +7,11 @@ KEY="$(python3 /usr/local/bin/decrypt_secret.py /run/secrets/llm_api_key)"
 SPEC=""
 if [ "${LLM_MTP:-false}" = "true" ]; then
   SPEC="--spec-type draft-mtp --spec-draft-n-max ${LLM_MTP_DRAFT:-2}"
+  # Qwen3.6 traegt den MTP-Kopf in der Modelldatei. Andere Modelle (Gemma 4)
+  # bringen ihn als eigene Datei mit; sie liegt im selben Modellordner.
+  if [ -n "${LLM_MTP_MODEL_FILE:-}" ]; then
+    SPEC="$SPEC --spec-draft-model /models/${LLM_MTP_MODEL_FILE}"
+  fi
 fi
 
 # Obergrenze je Platz im gemeinsamen KV-Pool: Chat und Code laufen parallel,

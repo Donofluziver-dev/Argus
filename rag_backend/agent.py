@@ -2104,14 +2104,16 @@ llm_task = make_qwen_llm(temperature=0.1, top_p=0.9, max_tokens=500)  # ohne Den
 #--- Adaptive-Thinking: zwei dedizierte Instanzen. Sampling nach Qwen3-14B-AWQ
 # Model Card: Thinking 0.6/0.95/20/0, Non-Thinking 0.7/0.8/20/0;
 # presence_penalty 1.5 gegen Endlos-Wiederholungen der AWQ-Variante.
+#--- LLM_TEMPERATURE / LLM_TOP_P / LLM_TOP_K ersetzen die Werte fuer ein anderes Modell
+#--- (siehe make_qwen_llm).
 _llm_think = make_qwen_llm(
     temperature=0.6, top_p=0.95, max_tokens=25000, thinking=True,
-    presence_penalty=float(os.getenv("PRESENCE_PENALTY", 1.5)), min_p=0.0,
+    presence_penalty=float(os.getenv("PRESENCE_PENALTY", 1.5)), min_p=0.0, tunable=True,
 )
 
 _llm_fast = make_qwen_llm(
     temperature=0.7, top_p=0.8, max_tokens=8000,
-    presence_penalty=float(os.getenv("PRESENCE_PENALTY", 1.5)), min_p=0.0,
+    presence_penalty=float(os.getenv("PRESENCE_PENALTY", 1.5)), min_p=0.0, tunable=True,
 )
 
 # ---- Sub-Agenten und Artefakte (Multi-Agenten-Support)

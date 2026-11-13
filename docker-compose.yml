@@ -42,6 +42,7 @@ services:
       - LLM_THREADS=${LLM_THREADS}
       - LLM_MTP=${LLM_MTP}
       - LLM_MTP_DRAFT=${LLM_MTP_DRAFT}
+      - LLM_MTP_MODEL_FILE=${LLM_MTP_MODEL_FILE:-}
     # Argus Desktop erreicht das Modell ueber intern-proxy auf 127.0.0.1:30000,
     # mit API-Key. Port wie bisher, damit die App-Einstellung gleich bleibt.
     volumes:
