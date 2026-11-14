@@ -229,9 +229,19 @@ which locks web search for that conversation. With Google's recommended sampling
 the table uses the calmer values Argus uses for Qwen. Settings: see
 [README.de.md](README.de.md#das-modell-ist-austauschbar).
 
-Image input: interface and backend can pass images to the model (`LLM_ENABLE_MULTIMODAL`).
-The model service does not load the required projector file (mmproj) yet, so image input is
-off and untested.
+**One model for text and images.** All models in the table are multimodal (vision-language):
+they read text and images with the same weights. A scanned page, a photo of a part or a
+drawing is read by the same model that then answers the question or assesses the report. No
+separate OCR step and no second model for images are needed, and the GPU holds one model
+instead of two. For the image part the model service loads a small projector file (mmproj),
+published next to the model on Hugging Face: 0.9 GB for Qwen3.6, 1.2 GB for Gemma 4.
+
+State in Argus: interface and backend already pass images to the model
+(`LLM_ENABLE_MULTIMODAL`). The model service does not load the mmproj file yet, so image input
+is off and not measured. PDFs without a text layer (pure scans) are not indexed by document
+search today. Whether a model of this size reads poor scans, handwriting or dense tables as
+reliably as a dedicated OCR model has to be shown by a measurement with real pages, like the
+agent evaluation does for text.
 
 ## Architecture
 
@@ -316,6 +326,9 @@ These are known and not solved yet:
   stack; for an offer to third parties both should be optional or replaceable.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
 - `install.sh` is only partly tested (syntax, ShellCheck, the Python steps on Windows).
+- Image input is not switched on yet (the model service does not load the mmproj file), and
+  PDFs without a text layer (scans) are skipped when documents are indexed. The intended way
+  is the multimodal model itself, not a separate OCR.
 
 Details: [README.de.md](README.de.md#offen-für-einen-einsatz-im-unternehmen).
 
@@ -342,6 +355,13 @@ further accounts under *Monitor › Konten*. Manual setup without the installer:
 
 For a server with several users, put a TLS reverse proxy in front of port 7860 and set
 `DASHBOARD_ORIGINS`, `TRUSTED_HOSTS` and `DASHBOARD_TRACES_URL` (see README.de.md).
+
+**GPU for a server** (calculated, not measured). Offloading experts to RAM (`LLM_N_CPU_MOE`)
+is a llama.cpp feature; it is why 16 GB are enough on the PC. With vLLM the whole model sits
+in VRAM: Qwen3.6-35B-A3B needs about 35 GB in FP8 and a little over 20 GB in 4 bit, plus
+memory for the context (KV cache) and about 1 GB for the image part. A 48 GB card is enough
+for FP8, a 24 to 32 GB card for 4 bit. Gemma 4 26B-A4B needs about a quarter less. Because
+text and images are one model, this covers both.
 
 ## Measurements
 

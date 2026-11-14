@@ -307,9 +307,20 @@ OAI_MODEL=gemma-4-26b-a4b
 
 Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`.
 
-**Bilder im Chat:** Oberfläche und Backend können Bilder an das Modell weitergeben
-(`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj) noch
-nicht; Bildeingabe ist deshalb aus und nicht getestet.
+**Ein Modell für Text und Bild.** Alle Modelle in der Tabelle sind multimodal
+(Vision-Language): Sie lesen Text und Bilder mit denselben Gewichten. Eine gescannte Seite, ein
+Foto vom Prüfteil oder eine Zeichnung liest also dasselbe Modell, das danach die Frage
+beantwortet oder den Bericht bewertet. Ein eigener OCR-Schritt und ein zweites Modell nur für
+Bilder sind dafür nicht nötig, und die Karte muss nur ein Modell im Speicher halten statt
+zwei. Für den Bildteil lädt der Modell-Dienst eine kleine Zusatzdatei (mmproj), die bei
+Hugging Face neben dem Modell liegt: 0,9 GB bei Qwen3.6, 1,2 GB bei Gemma 4.
+
+Stand in Argus: Oberfläche und Backend geben Bilder schon an das Modell weiter
+(`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die mmproj-Datei noch nicht, Bildeingabe ist
+deshalb aus und nicht gemessen. PDFs ohne Textebene, also reine Scans, nimmt die
+Dokumentensuche heute nicht auf. Ob ein Modell dieser Größe schlechte Scans, Handschrift oder
+dichte Tabellen so sicher liest wie ein eigenes OCR-Modell, muss eine Messung mit echten Seiten
+zeigen, so wie die Agenten-Messung für Text.
 
 ## Was bis zum Einsatz fehlt
 
@@ -318,6 +329,9 @@ vielen Personen fehlen vor allem:
 
 - **Anmeldung über das Firmenverzeichnis (SSO)** statt eigener Konten.
 - **Rechte der Quellen:** Die Wissensbasis ist für alle Konten dieselbe.
+- **Bilder und Scans:** Die Modelle können Bilder lesen, in Argus ist das noch nicht
+  eingeschaltet. Gescannte PDFs ohne Textebene werden nicht aufgenommen
+  ([Text und Bild](#das-modell-ist-austauschbar)).
 - **Betrieb:** ein TLS-Proxy und ein Modell-Dienst für viele gleichzeitige Nutzer. Eine
   geführte Installation gibt es (siehe [Einrichten](#einrichten)).
 
@@ -499,9 +513,11 @@ sollte sie kennen.
   prüft selbst.
 - **Installation unter Linux:** `install.sh` ist nur in Teilen getestet (Syntax,
   ShellCheck, die Schritte in Python unter Windows), noch nicht auf einem Linux-Server.
-- **Bilder im Chat:** Oberfläche und Backend können Bilder an das Modell weitergeben
+- **Bilder und Scans:** Oberfläche und Backend können Bilder an das Modell weitergeben
   (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj)
-  noch nicht; Bildeingabe ist aus und nicht getestet.
+  noch nicht; Bildeingabe ist aus und nicht getestet. PDFs ohne Textebene (Scans) überspringt
+  die Aufnahme in die Dokumentensuche. Der vorgesehene Weg ist das multimodale Modell selbst,
+  kein eigenes OCR.
 - **Websuche abschalten:** Einen Schalter, der die Websuche ganz abstellt, gibt es nicht.
 - **Grenzen der Sperre:** Vom Nutzer selbst eingefügte Bilder und Texte zählen nicht als
   Firmendaten. Der Modus `allow` vergleicht nur Fingerabdrücke (Kennungen, E-Mail, IBAN,
@@ -582,6 +598,13 @@ wird. Für einen Server mit vielen gleichzeitigen Nutzern ist llama.cpp nicht di
 Das Backend spricht das Modell über eine OpenAI-kompatible Schnittstelle an (`OAI_BASE_URL`);
 ein Betrieb mit vLLM oder SGLang ist damit vorgesehen, mit diesem Stand aber nicht getestet.
 Die offenen Punkte oben gelten.
+
+**Grafikkarte für einen Server** (gerechnet, nicht gemessen). Experten in den RAM auslagern
+(`LLM_N_CPU_MOE`) kann llama.cpp; damit reichen auf dem PC 16 GB. Mit vLLM liegt das ganze
+Modell im VRAM: Qwen3.6-35B-A3B braucht in FP8 rund 35 GB, in 4 Bit gut 20 GB, dazu den
+Speicher für den Kontext (KV-Cache) und gut 1 GB für den Bildteil. Eine Karte mit 48 GB reicht
+damit für FP8, eine mit 24 bis 32 GB für 4 Bit. Gemma 4 26B-A4B braucht etwa ein Viertel
+weniger. Weil Text und Bild in einem Modell stecken, gilt das für beides.
 
 ## Dienste
 
