@@ -1,8 +1,10 @@
 import asyncio
+import ipaddress
 import logging
 import hmac
 import mimetypes
 import os
+import socket
 import uuid
 import threading
 import json
@@ -37,7 +39,7 @@ from rag_backend.memory import run_reflection_cycle
 from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
 from rag_backend import metrics
 from rag_backend.security_audit import audit_auth
-from rag_backend.utils import get_env_first
+from rag_backend.utils import cloud_enabled, get_env_first
 from rag_backend.schema_utils import (ensure_message_performance_columns, ensure_user_role_column,
                                       ensure_user_token_version_column, ensure_sensitive_session_columns)
 
@@ -87,7 +89,7 @@ class _SecretRedactingFilter(logging.Filter):
 
 
 #--- Schluessel, die das Backend selbst nach aussen oder an Nachbardienste reicht.
-_REDACTED_SECRETS = ("LLM_API_KEY", "GEMINI_API_KEY", "LANGCHAIN_API_KEY", "SERVICE_TOKEN",
+_REDACTED_SECRETS = ("LLM_API_KEY", "GEMINI_API_KEY", "SERVICE_TOKEN",
                      "JWT_SECRET", "AUDIT_HMAC_KEY", "POSTGRES_PASSWORD")
 
 
@@ -282,7 +284,7 @@ async def lifespan(app: FastAPI):
     #--- Cloud-Agenten (Setup4): Missions-Loop. Import geschuetzt, damit das
     #    Backend auch ohne Setup4-Output bootet.
     app.state.mission_task = None
-    if os.getenv("CLOUD_AGENTS_ENABLED", "true").lower() == "true":
+    if cloud_enabled():
         try:
             from rag_backend.cloud_agents.missions import mission_loop
             app.state.mission_task = asyncio.create_task(mission_loop(app))
@@ -291,6 +293,10 @@ async def lifespan(app: FastAPI):
 
     #--- Uploads-Ordner sauber halten (UPLOAD_RETENTION_HOURS, 0 = aus).
     app.state.uploads_task = asyncio.create_task(_uploads_sweeper())
+
+    #--- Sandbox-Adressen im Hintergrund aktuell halten, damit der Anfragepfad
+    #--- niemals selbst per DNS aufloesen muss.
+    app.state.sandbox_ip_task = asyncio.create_task(_sandbox_ip_watcher())
 
     yield
 
@@ -326,6 +332,13 @@ async def lifespan(app: FastAPI):
         utask.cancel()
         try:
             await utask
+        except (asyncio.CancelledError, Exception):
+            pass
+    stask = getattr(app.state, "sandbox_ip_task", None)
+    if stask and not stask.done():
+        stask.cancel()
+        try:
+            await stask
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -374,17 +387,75 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-#--- Host-Header-Gate gegen DNS-Rebinding. Die lesenden Dashboard-Endpoints
-#--- pruefen keinen Origin; die Bindung an 127.0.0.1 allein schuetzt sie nicht.
-#--- Zuletzt hinzugefuegt = aeusserste Schicht, laeuft vor CORS und allen Routen.
-#--- 'rag-backend' MUSS drinbleiben (Docker-Netzwerk / interner Service-Name),
-#--- ebenso 'localhost' (Healthcheck). Der Port ist nicht Teil des Vergleichs.
-_TRUSTED_HOSTS = [
-    h.strip() for h in os.getenv(
-        "TRUSTED_HOSTS", "127.0.0.1,localhost,rag-backend"
-    ).split(",") if h.strip()
-]
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=_TRUSTED_HOSTS)
+#--- Der Container calc-sandbox haengt im selben Docker-Netz wie das Backend,
+#--- braucht dessen API auf Port 7860 aber nie. Der Anfragepfad macht NIE eine
+#--- DNS-Aufloesung: er liest nur _SANDBOX_IPS. Die Hintergrundaufgabe
+#--- _sandbox_ip_watcher (gestartet in lifespan) loest SANDBOX_HOSTNAME
+#--- (Standard calc-sandbox) sofort und danach alle 30 Sekunden via
+#--- asyncio.to_thread(_resolve_sandbox_ips) auf. Ohne lifespan oder bei
+#--- fehlgeschlagener Aufloesung bleibt die Menge leer und nichts wird gesperrt.
+_SANDBOX_IPS: frozenset[str] = frozenset()
+_SANDBOX_REFRESH_SECONDS = 30
+
+
+def _normalize_ip_candidates(raw_ip: str) -> set[str]:
+    val = (raw_ip or "").strip().lower()
+    if not val:
+        return set()
+    out = {val}
+    try:
+        addr = ipaddress.ip_address(val)
+        out.add(addr.compressed.lower())
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            out.add(str(addr.ipv4_mapped))
+    except ValueError:
+        pass
+    return out
+
+
+def _resolve_sandbox_ips() -> frozenset[str]:
+    """Loest SANDBOX_HOSTNAME (Standard calc-sandbox) synchron per DNS auf.
+    Wird aus _sandbox_ip_watcher ueber asyncio.to_thread aufgerufen."""
+    host = (os.getenv("SANDBOX_HOSTNAME", "calc-sandbox") or "").strip()
+    if not host:
+        return frozenset()
+    infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+    ips: set[str] = set()
+    for info in infos or []:
+        sockaddr = info[4] if len(info) > 4 else None
+        if sockaddr:
+            ips.update(_normalize_ip_candidates(str(sockaddr[0])))
+    return frozenset(ips)
+
+
+async def _sandbox_ip_watcher():
+    """Haltet _SANDBOX_IPS im Hintergrund aktuell (sofort beim Start, danach alle
+    30 Sekunden). Bei einem Aufloesungsfehler bleibt die bisherige Menge stehen."""
+    global _SANDBOX_IPS
+    while True:
+        try:
+            _SANDBOX_IPS = await asyncio.to_thread(_resolve_sandbox_ips)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug(f"Sandbox-Hostname nicht aufloesbar: {e}")
+        await asyncio.sleep(_SANDBOX_REFRESH_SECONDS)
+
+
+@app.middleware("http")
+async def block_sandbox_requests(request: Request, call_next):
+    client_host = (request.client.host if request.client and request.client.host else "").strip().lower()
+    if client_host:
+        if request.url.path == "/healthz" and client_host in ("127.0.0.1", "::1", "localhost"):
+            return await call_next(request)
+        if _SANDBOX_IPS and (_normalize_ip_candidates(client_host) & _SANDBOX_IPS):
+            log.warning(f"Anfrage aus dem Sandbox-Container ({client_host}) auf {request.url.path} abgewiesen.")
+            return JSONResponse(
+                {"detail": "Zugriff aus der Sandbox ist nicht erlaubt."},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+    return await call_next(request)
+
 
 #--- Sicherheits-Header. Zweite Linie hinter escapeHtml: das Dashboard zeigt
 #--- Text an, den ein Modell geschrieben hat. Rutscht etwas durch, verhindert
@@ -440,6 +511,20 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+#--- Host-Header-Gate gegen DNS-Rebinding. Die lesenden Dashboard-Endpoints
+#--- pruefen keinen Origin; die Bindung an 127.0.0.1 allein schuetzt sie nicht.
+#--- Zuletzt hinzugefuegt = aeusserste Schicht, laeuft vor CORS, den HTTP-
+#--- Middlewares und allen Routen.
+#--- 'rag-backend' MUSS drinbleiben (Docker-Netzwerk / interner Service-Name),
+#--- ebenso 'localhost' (Healthcheck). Der Port ist nicht Teil des Vergleichs.
+_TRUSTED_HOSTS = [
+    h.strip() for h in os.getenv(
+        "TRUSTED_HOSTS", "127.0.0.1,localhost,rag-backend"
+    ).split(",") if h.strip()
+]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_TRUSTED_HOSTS)
+
+
 # ---- Browser-Oberflaeche (statische Seite, same-origin unter /dashboard/) #---
 class _DashboardStatics(StaticFiles):
     '''Liefert rag_backend/static aus und laesst den Browser jede Datei pruefen.
@@ -492,6 +577,10 @@ def strip_status_lines(text: str | None) -> str:
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        #--- Ein Sitzungs-Cookie (scope == "dashboard") darf niemals als
+        #--- API-Bearer-Token akzeptiert werden.
+        if payload.get("scope") == "dashboard":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Ungültiges Token.")
         sub = payload["sub"]
         if sub == "service":
             uid = 0
@@ -499,6 +588,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             uid = int(sub)
             if uid == 0:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Ungültiges Token.")
+    except HTTPException:
+        raise
     except (InvalidTokenError, ValueError, KeyError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Ungueltiges oder abgelaufenes Token.")
     user = db.get(User, uid)

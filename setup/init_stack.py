@@ -42,8 +42,9 @@ GENERATED = [
     ("postgres_password.txt", False, 24),
 ]
 # Optionale Schluessel des Nutzers. Leer angelegt, damit Docker die Einbindung
-# nicht als Ordner anlegt.
-OPTIONAL_PLACEHOLDERS = ["Gemini.txt", "LANGSMITH_API_KEY.txt"]
+# nicht als Ordner anlegt. Einen LangSmith-Schluessel gibt es nicht mehr: Ablaufdaten
+# gehen nur an Phoenix im eigenen Haus, das Backend laedt ihn nicht.
+OPTIONAL_PLACEHOLDERS = ["Gemini.txt"]
 
 _ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 

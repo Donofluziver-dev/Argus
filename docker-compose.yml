@@ -234,6 +234,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # SETUID: Wechsel des Dienstes (root) auf die unprivilegierten Lauf-Benutzer (runner fuer Code, calc fuer Rechnungen).
+      - SETUID
+      # SETGID: Wechsel auf die gid der Lauf-Benutzer (runner, calc) und Leeren der Zusatzgruppen.
+      - SETGID
+      # KILL: Beenden von Prozessen der Lauf-Benutzer (runner, calc) bei Zeitueberschreitung und beim Aufraeumen.
+      - KILL
     mem_limit: 512m
     cpus: "1.0"
     # Prozess-/Thread-Obergrenze gegen Fork-Bomben. 256 laesst dem
@@ -357,7 +364,6 @@ services:
       - ./API_Tokens/jwt_secret.txt:/run/secrets/jwt_secret:ro
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
       - ./API_Tokens/audit_hmac_key.txt:/run/secrets/audit_hmac_key:ro
-      - ./API_Tokens/LANGSMITH_API_KEY.txt:/run/secrets/langchain_api_key:ro
       - ./API_Tokens/Gemini.txt:/run/secrets/gemini_api_key:ro
       - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/host/argus_workspace:rw
       # Eval-Laeufe und Action-Audit-Dateien. Host-Pfad per ARGUS_EVALS_DIR (.env).

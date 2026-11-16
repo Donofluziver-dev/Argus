@@ -1,14 +1,32 @@
-FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb AS base
 WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --upgrade pip
-COPY app.py /app/app.py
 RUN pip install --no-cache-dir fastapi uvicorn sympy pandas tabulate openpyxl
-RUN useradd -m -u 1000 sandbox && chown -R sandbox:sandbox /app
+COPY app.py /app/app.py
+# Zwei getrennte unprivilegierte Benutzer ohne Login und ohne Home ausserhalb von /tmp:
+# - runner (uid/gid 10001) fuer Code-Laeufe (/execute)
+# - calc (uid/gid 10002) fuer Sympy-Rechnungen (/calculate), damit Rechnungen nicht
+#   hinter laufenden Code-Ausfuehrungen warten muessen.
+# Der Dienst selbst laeuft als root (mit cap_drop: ALL und nur SETUID, SETGID, KILL).
+RUN groupadd -g 10001 runner \
+    && useradd -M -d /tmp -s /usr/sbin/nologin -u 10001 -g 10001 runner \
+    && groupadd -g 10002 calc \
+    && useradd -M -d /tmp -s /usr/sbin/nologin -u 10002 -g 10002 calc \
+    && chown -R root:root /app \
+    && chmod -R u=rwX,go=rX /app
 # Schaltet das Aufraeumen zwischen zwei Laeufen ein (Prozesse beenden, /tmp leeren).
 # Ausserhalb dieses Abbilds bleibt es aus, siehe app.py _cleanup_sandbox.
 ENV ARGUS_SANDBOX_CONTAINER=1
-USER sandbox
+USER root
+
+FROM base AS test
+RUN pip install --no-cache-dir pytest httpx
+COPY test_app.py /app/test_app.py
+RUN chown root:root /app/test_app.py && chmod 0644 /app/test_app.py
+CMD ["python", "-B", "-m", "pytest", "/app/test_app.py", "-q", "-p", "no:cacheprovider"]
+
+FROM base AS runtime
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]

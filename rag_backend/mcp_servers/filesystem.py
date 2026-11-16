@@ -47,26 +47,36 @@ def _to_container(path_str: str) -> Path:
             f"Path '{path_str}' is outside the allowed workspace ({WORKSPACE_WIN}). "
             f"The fs_* tools only see the workspace."
         )
-    #--- Relative Pfade als Workspace-Relativ interpretieren
-    return WORKSPACE_CONTAINER / s.lstrip("/\\")
+    #--- Relative Pfade als Workspace-Relativ interpretieren (auch in Windows-Schreibweise)
+    rel = s.lstrip("/\\").replace("\\", "/")
+    return WORKSPACE_CONTAINER / rel if rel else WORKSPACE_CONTAINER
 
 
 def _is_user_isolated_path(target: Path, workspace_real: Path) -> bool:
-    """Prueft, ob ein Pfad innerhalb von users/<id>/Dateien oder users/<id>/Ergebnisse liegt.
-    Dateien und Ergebnisse sind isolierte Benutzerbereiche und fuer fs-Tools tabu.
-    Gedaechtnis (users/<id>/MEMORY.md und users/<id>/memory/) bleibt zulaessig."""
+    """Prueft, ob ein Pfad im Unterbaum users/ liegt (Dateien, Ergebnisse,
+    USER.md, MEMORY.md, Tagesgedaechtnis). Der gesamte Unterbaum users/ ist fuer
+    alle fs-Werkzeuge tabu -- Paritaet mit agent.py::_win_to_container."""
     try:
         parts = target.resolve(strict=False).relative_to(workspace_real).parts
-        if len(parts) >= 3 and parts[0].lower() == "users" and parts[2].lower() in ("dateien", "ergebnisse"):
+        if parts and parts[0].lower() == "users":
             return True
     except (ValueError, RuntimeError, OSError):
         pass
-    try:
-        parts_orig = target.relative_to(workspace_real).parts
-        if len(parts_orig) >= 3 and parts_orig[0].lower() == "users" and parts_orig[2].lower() in ("dateien", "ergebnisse"):
-            return True
-    except (ValueError, RuntimeError, OSError):
-        pass
+    ws_norm = Path(os.path.normpath(str(WORKSPACE_CONTAINER)))
+    ws_real_norm = Path(os.path.normpath(str(workspace_real)))
+    target_norm = Path(os.path.normpath(str(target)))
+    for cand, base in (
+        (target, workspace_real),
+        (target, WORKSPACE_CONTAINER),
+        (target_norm, ws_real_norm),
+        (target_norm, ws_norm),
+    ):
+        try:
+            parts_orig = cand.relative_to(base).parts
+            if parts_orig and parts_orig[0].lower() == "users":
+                return True
+        except (ValueError, RuntimeError, OSError):
+            pass
     return False
 
 
@@ -78,8 +88,9 @@ def _enforce_whitelist(path: Path) -> Path:
     das Eltern-Verzeichnis.
 
     PARITAET: agent.py::_win_to_container nutzt dieselbe resolve+relative_to-
-    Whitelist (andere Fehlersemantik: None statt Exception). Aenderungen an der
-    Pruef-Logik IMMER an beiden Stellen nachziehen.
+    Whitelist und sperrt ebenfalls den gesamten Unterbaum users/ (andere
+    Fehlersemantik: None statt Exception). Aenderungen an der Pruef-Logik
+    IMMER an beiden Stellen nachziehen.
     """
     try:
         real = path.resolve(strict=False)
@@ -94,7 +105,7 @@ def _enforce_whitelist(path: Path) -> Path:
         )
     if _is_user_isolated_path(path, workspace_real) or _is_user_isolated_path(real, workspace_real):
         raise PermissionError(
-            f"Access denied: '{path}' is inside isolated user storage (Dateien/Ergebnisse)."
+            f"Access denied: '{path}' is inside isolated user storage (users/)."
         )
     return real
 
@@ -114,7 +125,8 @@ def _enforce_writable(real: Path) -> Path:
     den System-Prompt geladen (get_prompt_from_env); waeren sie agent-schreibbar, koennte ein
     per Prompt-Injection gesteuerter Agent seinen eigenen System-Prompt umschreiben (M1/ASI06).
     Ebenso Evals/* (ausgefuehrte Skripte, Audit-Kopien) und .argus*-Dateien im Wurzelordner.
-    users/* bleibt bewusst schreibbar (Agent-gepflegtes Gedaechtnis/Reflexion)."""
+    Der gesamte Unterbaum users/* (inkl. Gedaechtnis) ist bereits in _enforce_whitelist fuer
+    alle fs-Werkzeuge gesperrt."""
     workspace_real = WORKSPACE_CONTAINER.resolve(strict=False)
     try:
         parts = real.relative_to(workspace_real).parts

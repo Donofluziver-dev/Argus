@@ -28,7 +28,7 @@ def _auto_approve() -> bool:
             return False
     except Exception:
         pass
-    return os.getenv("CLOUD_MISSION_AUTO_APPROVE", "false").lower() == "true"
+    return (os.getenv("CLOUD_MISSION_AUTO_APPROVE", "false") or "").strip().lower() == "true"
 
 
 class StartMissionInput(BaseModel):
@@ -230,7 +230,8 @@ class CloudAskTool(BaseTool):
             any_configured,
         )
         from rag_backend.cloud_agents.redactor import RedactionUnavailable
-        if os.getenv("CLOUD_AGENTS_ENABLED", "true").lower() != "true":
+        from rag_backend.utils import cloud_enabled
+        if not cloud_enabled():
             return ToolOutput(success=False, error="Cloud-Agenten sind deaktiviert (CLOUD_AGENTS_ENABLED=false).")
         if not any_configured():
             return ToolOutput(

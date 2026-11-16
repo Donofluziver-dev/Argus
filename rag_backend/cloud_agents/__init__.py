@@ -6,6 +6,9 @@ Tripwire). Missionen arbeiten im Hintergrund-Loop (missions.mission_loop).
 '''
 
 
+from rag_backend.utils import cloud_enabled
+
+
 def register_cloud_tools() -> list:
     # Liefert die LangChain-Tools der Cloud-Agenten.
     from rag_backend.action_engine.tools.cloud_missions import (

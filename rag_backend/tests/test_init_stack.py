@@ -66,10 +66,14 @@ def test_secrets_are_created_and_decryptable(init_stack, tmp_path):
 def test_placeholders_exist_as_empty_files(init_stack, tmp_path):
     #--- Fehlt die Datei, legt Docker an ihrer Stelle einen Ordner an.
     files, _ = init_stack.ensure_stack_secrets(tmp_path, restrict_acl=_no_acl)
-    for name in ("Gemini.txt", "LANGSMITH_API_KEY.txt"):
+    for name in ("Gemini.txt",):
         p = tmp_path / name
         assert p.is_file() and p.read_bytes() == b""
         assert files[name] == "Platzhalter"
+    #--- LangSmith ist kein Teil des Stapels mehr: kein Platzhalter, keine Einbindung.
+    assert not (tmp_path / "LANGSMITH_API_KEY.txt").exists()
+    compose = (_SCRIPT.parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "LANGSMITH_API_KEY" not in compose and "langchain_api_key" not in compose
 
 
 def test_placeholders_cover_every_file_the_compose_files_mount(init_stack):

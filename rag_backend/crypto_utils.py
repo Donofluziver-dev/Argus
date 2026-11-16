@@ -43,7 +43,6 @@ def load_secret(var_name: str) -> str:
                 "LLM_API_KEY": "llm_api_key.txt",
                 "SGLANG_API_KEY": "sglang_api_key.txt",
                 "AUDIT_HMAC_KEY": "audit_hmac_key.txt",
-                "LANGCHAIN_API_KEY": "LANGSMITH_API_KEY.txt",
                 "SERVICE_TOKEN": "service_token.txt",
                 "GEMINI_API_KEY": "Gemini.txt",
             }

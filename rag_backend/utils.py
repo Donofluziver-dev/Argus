@@ -83,6 +83,13 @@ def get_env_first(*names: str, default: str = "") -> str:
     return default
 
 
+def cloud_enabled() -> bool:
+    """Zentraler Schalter fuer alle Cloud-Wege: nur exakt 'true' (getrimmt,
+    klein geschrieben) schaltet ein. Ohne Eintrag gilt false."""
+    import os
+    return (os.getenv("CLOUD_AGENTS_ENABLED") or "").strip().lower() == "true"
+
+
 
 def _env_float(name: str, default: float) -> float:
     import os

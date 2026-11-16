@@ -29,7 +29,7 @@ from rag_backend.cloud_agents.providers import (
     CloudNotConfigured,
     CloudRateLimited,
 )
-from rag_backend.utils import extract_json, strip_think
+from rag_backend.utils import cloud_enabled, extract_json, strip_think
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +225,7 @@ async def launch_mission(goal: str, context: str, provider: str = "") -> tuple:
     )
     if egress_block is not None:
         return False, egress_block
-    if os.getenv("CLOUD_AGENTS_ENABLED", "true").lower() != "true":
+    if not cloud_enabled():
         return False, "Cloud-Agenten sind deaktiviert (CLOUD_AGENTS_ENABLED=false)."
     if not providers_mod.any_configured():
         return False, ("Kein Cloud-Provider konfiguriert -- API-Key in "

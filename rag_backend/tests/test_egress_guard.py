@@ -321,7 +321,11 @@ async def test_unmarked_conversation_allows_egress(monkeypatch):
     async def _fake_fetch(url: str) -> str:
         return "Öffentlicher Webseiteninhalt über Python 3.13."
 
+    async def _fake_judge(text: str) -> tuple:
+        return False, ""
+
     monkeypatch.setattr(agent, "_fetch_clean_page", _fake_fetch)
+    monkeypatch.setattr(agent, "_judge_web_injection", _fake_judge)
     res = await agent.read_webpage.ainvoke({"url": "https://example.org/python"})
     assert "Öffentlicher Webseiteninhalt" in res
     assert "gesperrt" not in res
@@ -439,7 +443,11 @@ async def test_allow_mode_content_inspection_blocks_exfiltration_and_allows_beni
     async def _fake_fetch(url: str) -> str:
         return "Harmlose Webseite gelesen."
 
+    async def _fake_judge(text: str) -> tuple:
+        return False, ""
+
     monkeypatch.setattr(agent, "_fetch_clean_page", _fake_fetch)
+    monkeypatch.setattr(agent, "_judge_web_injection", _fake_judge)
 
     # 1. Kennung >= 5 Zeichen mit Ziffern -> blockiert (auch bei Kleinschreibung)
     r_id = await agent.web_search.ainvoke({"query": "Suche nach vtr-2026-49102 Details"})

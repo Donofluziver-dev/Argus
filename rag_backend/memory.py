@@ -85,14 +85,25 @@ class EpisodicMemory:
             return 0
         async with self._reflect_lock:
             from rag_backend.agent import _llm_fast, _CHARS_PER_TOKEN
-            if _llm_fast is None:
-                return 0
             try:
                 rows, max_ts = await asyncio.to_thread(self._load_new_messages, user_id)
             except Exception as e:
                 log.warning(f"Reflektion: Laden der Nachrichten fehlgeschlagen (user={user_id}): {e}")
                 return 0
-            if not rows or max_ts is None:
+            if max_ts is None:
+                return 0
+            if not rows:
+                #--- Neue Nachrichten stammen ausschliesslich aus Gespraechen mit
+                #--- Firmendaten (oder waren nicht entschluesselbar): kein Transkript
+                #--- fuer MEMORY.md, aber das Wasserzeichen vorruecken, damit keine
+                #--- Endlosschleife entsteht und sie nicht erneut eingelesen werden.
+                if await asyncio.to_thread(self._user_exists, user_id):
+                    try:
+                        await asyncio.to_thread(self._set_watermark, user_id, max_ts)
+                    except Exception as e:
+                        log.warning(f"Reflektion: Wasserzeichen-Update fehlgeschlagen (user={user_id}): {e}")
+                return 0
+            if _llm_fast is None:
                 return 0
 
             transcript = "\n".join(f"{sender}: {text}" for sender, text in rows)
@@ -168,8 +179,12 @@ class EpisodicMemory:
         with SessionLocal() as db:
             state = db.get(ReflectionState, user_id)
             watermark = state.reflected_until if state else None
+            #--- Nachrichten aus Gespraechen mit has_sensitive_data == True gehen
+            #--- NICHT in das Transkript fuer MEMORY.md (sonst gelangten Firmendaten
+            #--- ueber den Systemprompt in neue, unmarkierte Gespraeche). Das
+            #--- Wasserzeichen laeuft trotzdem ueber alle Nachrichten weiter.
             q = (
-                db.query(Message)
+                db.query(Message, ChatSession.has_sensitive_data)
                 .join(ChatSession, Message.session_id == ChatSession.id)
                 .filter(ChatSession.user_id == user_id)
             )
@@ -177,14 +192,16 @@ class EpisodicMemory:
                 q = q.filter(Message.timestamp > watermark)
             msgs = q.order_by(Message.timestamp.asc()).all()
             rows, max_ts = [], None
-            for m in msgs:
+            for m, is_sensitive in msgs:
+                if m.timestamp is not None and (max_ts is None or m.timestamp > max_ts):
+                    max_ts = m.timestamp
+                if is_sensitive:
+                    continue
                 try:
                     text = decrypt_msg(m.content_encrypted)
                 except Exception:
                     continue
                 rows.append((m.sender, text))
-                if max_ts is None or m.timestamp > max_ts:
-                    max_ts = m.timestamp
             return rows, max_ts
 
     def _set_watermark(self, user_id: int, max_ts):

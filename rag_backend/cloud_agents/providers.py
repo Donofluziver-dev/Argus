@@ -173,7 +173,8 @@ class CloudProvider:
                 return text, tokens_in, tokens_out
             except (CloudRateLimited, Exception) as e:
                 code = getattr(e, "code", None)
-                log.warning(f"{self.name}: Fehler mit Key {idx} ({keys[idx][:10]}...): {e}")
+                #--- Keinen Teil des API-Keys ins Log schreiben; der Index genuegt.
+                log.warning(f"{self.name}: Fehler mit Key {idx}: {e}")
                 
                 if isinstance(e, CloudRateLimited) or code in (429, 400, 403) or "429" in str(e):
                     limiter.record(time.monotonic() + 3600.0)

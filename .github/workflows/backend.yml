@@ -30,10 +30,14 @@ jobs:
       # Laeufen auf (Prozesse beenden, /tmp leeren), und genau das wird mitgeprueft.
       - name: Calc-Sandbox Tests
         run: |
-          docker build -q -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
-          docker run --rm --user root -e PYTHONDONTWRITEBYTECODE=1 \
-            -v "$PWD/calc_sandbox:/src" -w /src --entrypoint sh argus-sandbox-test \
-            -c "pip install -q pytest httpx && exec python -m pytest test_app.py -q -p no:cacheprovider"
+          docker build -q --target test -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:size=256m,noexec \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --memory 512m --cpus 1.0 --pids-limit 256 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            argus-sandbox-test
       # Die Oberflaeche hat keinen Build-Schritt: ein Tippfehler in einem Skript
       # fiele sonst erst im Browser auf.
       - name: Oberflaeche (JavaScript-Syntax)

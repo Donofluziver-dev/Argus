@@ -611,12 +611,12 @@ def test_fs_mcp_blocks_user_dateien_and_ergebnisse_but_allows_memory(tmp_path, m
     with pytest.raises(PermissionError):
         fs.fs_mkdir("users/2/Dateien/subdir")
 
-    # Gedaechtnis bleibt erlaubt (wie bisher)
-    read_mem = fs.fs_read_file("users/2/MEMORY.md")
-    assert "Langzeitgedaechtnis User 2" in read_mem
-    write_res = fs.fs_write_file("users/2/MEMORY.md", "Aktualisiertes Gedaechtnis")
-    assert "OK written" in write_res
-    assert u2_mem.read_text(encoding="utf-8") == "Aktualisiertes Gedaechtnis"
+    # Gedaechtnis (und der gesamte Unterbaum users/) ist fuer fs-Werkzeuge ebenfalls tabu
+    with pytest.raises(PermissionError):
+        fs.fs_read_file("users/2/MEMORY.md")
+    with pytest.raises(PermissionError):
+        fs.fs_write_file("users/2/MEMORY.md", "Aktualisiertes Gedaechtnis")
+    assert u2_mem.read_text(encoding="utf-8") == "Langzeitgedaechtnis User 2"
 
 
 def test_coll_upload_button_in_index_html_opens_argus_files():

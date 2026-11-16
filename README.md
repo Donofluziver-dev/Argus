@@ -65,7 +65,7 @@ an audit log that can go to the company's SIEM ([Why Argus is secure](#why-argus
   in the account's own area, Argus reads it and works with it. A conversation with an attached
   file counts as a conversation with company data from the start. Every account sees only its
   own files; administrators do not see other accounts' files either.
-- **Calculation and analysis** in a sandbox without network access that receives only the
+- **Calculation and analysis** in a sandbox without internet access that receives only the
   account's own files.
 - **Downloading results:** reports, tables and other files Argus creates are offered for
   download above the answer and under *Meine Dateien*. Files are deleted after seven days;
@@ -99,7 +99,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 327 for the backend, 36 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 339 for the backend, 46 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -114,7 +114,7 @@ model:
 | the model cannot send anything out | It runs in a network without egress; only the backend and the own search instance reach the internet. | `setup/check_networks.py`, in CI on every change |
 | company data and the internet never meet in one conversation | Once a conversation has read company data or received a file, every outbound path in it is blocked. | tests, agent measurement (security group) |
 | everyone sees only their own | Roles are checked at every backend route. Files are kept per account; the code sandbox receives only the account's own files. | tests (`test_user_files.py`) |
-| the model cannot run anything on a machine | No access to machines, no credentials in the containers. Code runs only in a sandbox without network that removes everything after each run. | compose file, sandbox tests |
+| the model cannot run anything on a machine | No access to machines, no credentials in the containers. Code runs only in a sandbox without internet access, under its own unprivileged user; everything is removed after each run. | compose file, sandbox tests |
 | foreign content counts as data, not as instructions | Web pages and documents pass an injection check; canary tokens raise an alarm when something protected tries to leave. | agent measurement (injection in document and web page) |
 | everything can be traced | Signed audit log, optionally forwarded to the company's SIEM ([below](#who-did-what-audit-log-and-siem)). | `GET /v1/dashboard/audit/verify`, the SIEM |
 | you do not have to take it on trust | Open source; tests and measurements are in the repository and can be repeated. | this repository |
@@ -284,8 +284,9 @@ model behaving well.
 - **Lock after company data:** once a conversation has read documents, files or sandbox
   output, or had a file attached, every outbound path in that conversation is blocked (`EGRESS_AFTER_SENSITIVE=block`),
   so a prepared web page cannot make the agent leak data through a search query.
-- **Foreign content** from web search and page fetches passes an injection check; page fetches
-  refuse internal addresses, including after redirects.
+- **Foreign content** from web search and page fetches passes an injection check; content
+  that cannot be checked is not used. Page fetches refuse internal addresses, including after
+  redirects.
 - **No way onto a machine:** Argus cannot execute anything on a computer. There is no admin
   account, no host credential in any container and no switch that changes this.
 - **Roles** are enforced at every backend route. Users get no cloud or sub-agent tools and
@@ -293,9 +294,14 @@ model behaving well.
 - **One area per account:** uploads and results live under `users/<id>/Dateien` and
   `users/<id>/Ergebnisse`. Every access goes through one module (`rag_backend/user_files.py`)
   that cleans names, pins the path to exactly that folder and rejects links. Administrators'
-  tools cannot reach other accounts' areas either. The code sandbox no longer mounts the
-  workspace: the backend sends it only the account's files, runs execute one at a time and
-  everything, including leftover processes, is removed afterwards.
+  tools cannot reach other accounts' areas either: the whole `users/` folder, including the
+  per-account memory, is closed to the file tools.
+- **Code sandbox:** it does not mount the workspace; the backend sends it only the account's
+  files. Code runs under its own unprivileged user, separate from the sandbox service, and
+  calculations under a second one. Runs execute one at a time. Before and after each run the
+  sandbox ends every process of that user, verifies that none is left and empties `/tmp`; if
+  that cannot be confirmed it stops executing. The backend rejects requests coming from the
+  sandbox.
 - **Login:** HttpOnly session cookie, Argon2, no self-registration, lockout after five failed
   attempts. The first administrator account requires the installation's setup token.
 - **Audit:** an HMAC-chained log records tool calls that write, locks after company data,
@@ -306,8 +312,12 @@ model behaving well.
 - **UI:** loads nothing from other hosts, Content-Security-Policy, host and origin checks
   against DNS rebinding and CSRF.
 - **Containers:** ports on `127.0.0.1` only, `cap_drop: ALL`, `no-new-privileges`, memory and
-  process limits, base images pinned by digest.
-- **Cloud module, off by default:** cloud models receive redacted text only.
+  process limits, base images pinned by digest. The sandbox service keeps only the
+  capabilities for switching users and ending processes (`SETUID`, `SETGID`, `KILL`).
+- **Cloud module, off by default:** nothing reaches a cloud model unless
+  `CLOUD_AGENTS_ENABLED=true`; a stored key alone enables nothing. Cloud models receive
+  redacted text only. The helper paths without a confirmation card (research plan, plan
+  review, debugging help) run only with `CLOUD_MISSION_AUTO_APPROVE=true`.
 
 ### Known gaps for multi-user use
 
@@ -318,7 +328,11 @@ These are known and not solved yet:
 - No source-level permissions in document search, no SSO (OIDC).
 - With the cloud module enabled, the router starts an administrator's background mission
   without a confirmation card.
-- Long-term memory is currently not updated during normal chat.
+- Long-term memory is currently not updated during normal chat. Conversations with company
+  data never enter it, and the file tools cannot write it.
+- Runs of different accounts share one sandbox container and one sandbox user; they are
+  separated by the cleanup between runs. A container per run would be the stronger
+  separation.
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); entries the SIEM does not receive are not re-sent.
 - No TLS proxy in the stack; behind a proxy all users share one rate limit.
@@ -378,8 +392,8 @@ python -m pytest rag_backend/tests -q
 ```
 
 Run them in a folder without a `.env` (it would override the test values). The sandbox tests
-run inside the sandbox image, the only place where it cleans up between runs (see
-README.de.md). CI runs both, validates the compose files, checks the network isolation and
+run inside the sandbox image (stage `test`) with the same restrictions as the service in the
+compose file (see README.de.md). CI runs both, validates the compose files, checks the network isolation and
 runs ShellCheck on the installer on every push to `main`.
 
 ## License

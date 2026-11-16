@@ -87,7 +87,7 @@ kann ([Warum Argus sicher ist](#warum-argus-sicher-ist)).
   landet im eigenen Bereich des Kontos, Argus liest es und arbeitet damit. Ein Gespräch mit
   beigelegter Datei gilt sofort als Gespräch mit Firmendaten. Jedes Konto sieht nur seine
   eigenen Dateien, auch Administratoren sehen die Dateien anderer nicht.
-- **Rechnen und Auswerten** in einer abgeschotteten Sandbox ohne Netz (Python, Tabellen). Sie
+- **Rechnen und Auswerten** in einer abgeschotteten Sandbox ohne Internet (Python, Tabellen). Sie
   bekommt nur die Dateien des eigenen Kontos.
 - **Ergebnisse herunterladen:** Berichte, Tabellen und andere Dateien, die Argus erzeugt,
   stehen über der Antwort zum Herunterladen bereit und unter *Meine Dateien*. Dateien und
@@ -124,7 +124,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 327 für das Backend, 36 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 339 für das Backend, 46 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -143,7 +143,7 @@ kein Schaden entsteht. Die Schutzmaßnahmen sitzen außerhalb des Modells:
 | das Modell nichts hinausschicken kann | Es läuft in einem Netz ohne Ausgang. Ins Internet kommen nur das Backend und die eigene Suchinstanz. | `setup/check_networks.py`, bei jeder Änderung im CI |
 | Firmendaten und Internet nie im selben Gespräch zusammenkommen | Hat ein Gespräch Firmendaten gelesen oder eine Datei bekommen, ist darin jeder Weg nach außen gesperrt. | Tests, Agenten-Messung (Gruppe Sicherheit) |
 | jede Person nur ihr Eigenes sieht | Rollen werden an jeder Route im Backend geprüft. Dateien liegen je Konto getrennt, die Code-Sandbox bekommt nur die Dateien des eigenen Kontos. | Tests (`test_user_files.py`) |
-| das Modell auf keinem Rechner etwas ausführen kann | Kein Zugang zu Rechnern, keine Zugangsdaten in den Containern. Code läuft nur in einer Sandbox ohne Netz, die nach jedem Lauf alles löscht. | Compose-Datei, Tests der Sandbox |
+| das Modell auf keinem Rechner etwas ausführen kann | Kein Zugang zu Rechnern, keine Zugangsdaten in den Containern. Code läuft nur in einer Sandbox ohne Internet, unter einem eigenen Benutzer ohne Rechte; nach jedem Lauf wird alles gelöscht. | Compose-Datei, Tests der Sandbox |
 | fremde Inhalte als Daten gelten, nicht als Anweisung | Webseiten und Dokumente laufen durch eine Prüfung auf eingeschleuste Anweisungen. Köder-Schlüssel schlagen Alarm, wenn etwas Geschütztes hinaus will. | Agenten-Messung (Injection in Dokument und Webseite) |
 | sich alles nachvollziehen lässt | Signiertes Auditprotokoll, auf Wunsch weitergegeben an das SIEM der Firma ([unten](#wer-hat-was-getan-auditprotokoll-und-siem)). | `GET /v1/dashboard/audit/verify`, das SIEM |
 | man es nicht glauben muss | Quelltext offen, Tests und Messungen liegen im Repo und lassen sich wiederholen. | dieses Repo |
@@ -399,7 +399,7 @@ Freigaben und Abschottung, nicht daran, dass sich das Modell richtig verhält.
 
 **Kein Weg auf einen Rechner.** Argus kann nichts auf einem Computer ausführen: Es gibt
 kein Admin-Konto, keine Zugangsdaten für einen Host in einem Container und keinen Schalter,
-der das ändert. Code läuft nur in der Sandbox ohne Netz.
+der das ändert. Code läuft nur in der Sandbox ohne Internet.
 
 **Zwei Rollen:**
 
@@ -435,8 +435,9 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   Neustart bestehen. Jede Sperre landet im Audit, ohne Inhalte. Für eine
   Recherche beginnt man ein neues Gespräch.
 - **Fremde Inhalte:** Websuche und Seitenabruf laufen durch eine Injection-Prüfung
-  (`WEB_INJECTION_GUARD`). Der Seitenabruf sperrt interne Adressen, auch nach Weiterleitungen,
-  und liest höchstens 3 MB je Seite (`WEBPAGE_MAX_BYTES`).
+  (`WEB_INJECTION_GUARD`). Lässt sich ein Inhalt nicht prüfen, etwa weil der Prüfaufruf
+  scheitert, wird er nicht übernommen. Der Seitenabruf sperrt interne Adressen, auch nach
+  Weiterleitungen, und liest höchstens 3 MB je Seite (`WEBPAGE_MAX_BYTES`).
 - **Rollen:** Geprüft wird an jeder Route im Backend, nicht in der Oberfläche. Benutzer
   bekommen die Werkzeuge für Cloud, Unteragenten und die Wissensbasis gar nicht erst
   angeboten, und der Prompt beschreibt sie ihnen nicht.
@@ -444,10 +445,14 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   `users/<Konto>/Dateien` und `users/<Konto>/Ergebnisse` im Arbeitsordner. Jeder Zugriff
   (Oberfläche, Download, Werkzeuge) läuft über eine Stelle (`rag_backend/user_files.py`), die
   Namen bereinigt, den Pfad auf genau diesen Ordner festlegt und Verknüpfungen ablehnt. Auch
-  Administratoren erreichen über ihre Werkzeuge keine fremden Bereiche. Die Code-Sandbox
-  bindet den Arbeitsordner nicht mehr ein: Das Backend schickt ihr nur die Dateien des Kontos,
-  sie führt die Läufe nacheinander aus und löscht danach alles, auch zurückgebliebene
-  Prozesse.
+  Administratoren erreichen über ihre Werkzeuge keine fremden Bereiche: Der ganze Ordner
+  `users/` ist für die Datei-Werkzeuge gesperrt, auch das Gedächtnis je Konto.
+- **Code-Sandbox:** Sie bindet den Arbeitsordner nicht ein. Das Backend schickt ihr nur die
+  Dateien des Kontos. Der Code läuft unter einem eigenen Benutzer ohne Rechte, getrennt vom
+  Dienst der Sandbox; Rechnungen laufen unter einem zweiten. Die Läufe folgen nacheinander.
+  Vor und nach jedem Lauf beendet die Sandbox alle Prozesse dieses Benutzers, prüft, dass
+  keiner übrig ist, und leert `/tmp`. Lässt sich das nicht bestätigen, führt sie nichts mehr
+  aus. Anfragen aus der Sandbox weist das Backend ab.
 - **Freigaben:** Mit dem Cloud-Modul fragt eine Mission vor dem Versand per Karte im Chat
   nach. Freigeben kann nur das Konto, das sie ausgelöst hat.
 - **Anmeldung:** Sitzung als HttpOnly-Cookie, Passwörter mit Argon2, keine
@@ -474,10 +479,14 @@ der das ändert. Code läuft nur in der Sandbox ohne Netz.
   Scheitert die Schwärzung, wird nichts gesendet.
 - **Cloud-Modelle** sind aus (`CLOUD_AGENTS_ENABLED=false`). Eingeschaltet bekommen sie nur
   geschwärzte Texte, ein PII-Stopp blockiert, wenn die Schwärzung nicht greift, und ohne
-  `CLOUD_MISSION_AUTO_APPROVE=true` fragt jeder Versand nach.
+  `CLOUD_MISSION_AUTO_APPROVE=true` fragt jeder Versand nach. Die Hilfswege ohne Karte im
+  Chat (Recherche-Plan, Plan-Prüfung, Fehlersuche beim Programmieren) laufen nur mit diesem
+  Schalter; ohne ihn rechnet Argus dort lokal. Ein hinterlegter Schlüssel allein schaltet
+  nichts ein.
 - **Container:** Ports nur auf `127.0.0.1`, `cap_drop: ALL`, `no-new-privileges`, Speicher- und
   Prozessgrenzen (das Modell bewusst ohne Speichergrenze, siehe Compose). Die Code-Ausführung
-  hat keine Einbindung des Arbeitsordners und keine Geheimnisse. Basis-Images sind per Digest festgelegt, Migrationen
+  hat keine Einbindung des Arbeitsordners und keine Geheimnisse; ihr Dienst behält nur die
+  Rechte für den Benutzerwechsel und das Beenden von Prozessen (`SETUID`, `SETGID`, `KILL`). Basis-Images sind per Digest festgelegt, Migrationen
   schreibgeschützt eingebunden.
 - **Geheimnisse** liegen nie im Repo, sondern in `API_Tokens/` mit Rechten nur für den Besitzer.
 
@@ -496,7 +505,11 @@ sollte sie kennen.
   Hintergrund-Auftrag, startet er die Mission ohne Karte im Chat (Schwärzung und PII-Stopp
   laufen trotzdem). Betrifft nur Installationen mit Cloud-Modul.
 - **Langzeitgedächtnis:** Die Zusammenfassung je Konto wird im normalen Chat derzeit nicht
-  fortgeschrieben.
+  fortgeschrieben. Gespräche mit Firmendaten gehen nie hinein, und die Datei-Werkzeuge können
+  sie nicht schreiben.
+- **Sandbox:** Läufe verschiedener Konten teilen sich einen Container und einen Benutzer der
+  Sandbox. Getrennt werden sie durch das Aufräumen zwischen den Läufen. Ein Container je Lauf
+  wäre die stärkere Trennung.
 - **Name in der Anrede:** Er leitet sich aus dem Kontonamen ab; mit SSO käme er aus dem
   Verzeichnis.
 - **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
@@ -725,7 +738,7 @@ Alle per `.env` änderbar:
 | `DASHBOARD_ORIGINS`, `TRUSTED_HOSTS` | `127.0.0.1`, `localhost` | Adressen, unter denen die Oberfläche aufgerufen werden darf (CSRF, DNS-Rebinding). |
 | `DASHBOARD_TRACES_URL` | `http://127.0.0.1:6006` | Adresse von Phoenix für den Reiter *Traces*; nur diese Adresse darf die Seite einbetten. Leer = der Reiter zeigt nur einen Hinweis. |
 | `EGRESS_AFTER_SENSITIVE` | `block` | Weg nach außen, nachdem ein Gespräch Firmendaten gelesen hat. `block` sperrt ihn. `allow` lässt ihn offen und sperrt nur Anfragen mit Bestandteilen der gelesenen Daten; fehlen die Fingerabdrücke (nach einem Neustart), wirkt auch `allow` wie `block`. |
-| `WEB_INJECTION_GUARD` | `true` | Prüft Websuche und Seitenabruf auf eingeschleuste Anweisungen: der ganze Text in Abschnitten von 16.000 Zeichen; mehr als sechs Abschnitte gelten als verdächtig. |
+| `WEB_INJECTION_GUARD` | `true` | Prüft Websuche und Seitenabruf auf eingeschleuste Anweisungen: der ganze Text in Abschnitten von 16.000 Zeichen; mehr als sechs Abschnitte gelten als verdächtig. Ist die Prüfung nicht möglich, wird der Inhalt nicht übernommen. |
 | `TRACE_CONTENT` | `redacted` | Was Phoenix sieht: `redacted` (Inhalte mit geschwärzten Schlüsseln und PII) oder `metadata` (nur Ablauf, Dauer, Token-Zahlen, Werkzeugnamen). Einen Klartext-Modus gibt es nicht. |
 | `CANARY_TOKENS` | von `init_stack.py` erzeugt | Köder-Schlüssel (Komma-getrennt, je ab 12 Zeichen). Taucht einer in einer Cloud-Anfrage, Websuche, URL oder in Werkzeug-Parametern auf, wird blockiert, als Fehler protokolliert und im Audit vermerkt. |
 | `SEARXNG_SECRET` | von `init_stack.py` erzeugt | HMAC-Schlüssel für SearXNG. |
@@ -741,8 +754,8 @@ Die Weitergabe ans SIEM blockiert keine Anfrage: Einträge gehen über eine Wart
 nicht nachgeliefert, sondern gezählt und höchstens einmal je Minute gewarnt. Maßgeblich
 bleibt das Protokoll in der Datenbank. Jeder weitergegebene Eintrag trägt seine
 HMAC-Signatur, so lässt er sich dort wiederfinden.
-| `CLOUD_AGENTS_ENABLED` | `false` | Cloud-Modelle (Gemini) als Helfer. |
-| `CLOUD_MISSION_AUTO_APPROVE` | `false` | Mit `true` gehen Cloud-Anfragen ohne Rückfrage raus; Schwärzung, PII-Stopp und Köder-Prüfung laufen trotzdem. In einem Gespräch mit Firmendaten nie ohne Rückfrage. |
+| `CLOUD_AGENTS_ENABLED` | `false` | Cloud-Modelle (Gemini) als Helfer. Ohne `true` geht nichts an ein Cloud-Modell, auch wenn ein Schlüssel hinterlegt ist. |
+| `CLOUD_MISSION_AUTO_APPROVE` | `false` | Mit `true` gehen Cloud-Anfragen ohne Rückfrage raus; Schwärzung, PII-Stopp und Köder-Prüfung laufen trotzdem. In einem Gespräch mit Firmendaten nie ohne Rückfrage. Die Hilfswege ohne Karte (Recherche-Plan, Plan-Prüfung, Fehlersuche) laufen nur mit `true`. |
 | `API_DOCS` | `false` | Mit `true` ist die API-Beschreibung unter `/docs` erreichbar, ohne Anmeldung. |
 | `AUDIT_ANCHOR_PATH` | `/app/data/audit_anchor.json` | Anker der Audit-Kette: Löschen am Ende fällt bei der Prüfung auf. |
 
@@ -771,12 +784,13 @@ Die Tests brauchen keine laufenden Container (SQLite, Test-Schlüssel). Sie lauf
 Ordner ohne `.env`, etwa in einem frischen Klon: Eine vorhandene `.env` überschreibt die
 Testwerte. Lokal überspringen sie vier Tests, die nur im CI laufen.
 
-Die Tests der Sandbox laufen in ihrem eigenen Abbild, denn nur dort räumt sie zwischen zwei
-Läufen auf (Prozesse beenden, `/tmp` leeren):
+Die Tests der Sandbox laufen in ihrem eigenen Abbild (Stufe `test`) und mit denselben
+Einschränkungen wie der Dienst in der Compose-Datei, denn nur so prüfen sie die Trennung
+zwischen Dienst und ausgeführtem Code:
 
 ```powershell
-docker build -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
-docker run --rm --user root -v "${PWD}/calc_sandbox:/src" -w /src --entrypoint sh argus-sandbox-test -c "pip install -q pytest httpx && exec python -m pytest test_app.py -q"
+docker build --target test -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
+docker run --rm --network none --read-only --tmpfs /tmp:size=256m,noexec --security-opt no-new-privileges:true --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL --memory 512m --cpus 1.0 --pids-limit 256 argus-sandbox-test
 ```
 
 Im CI laufen beide bei jedem Push auf `main`, dazu die Prüfung der Compose-Dateien, der

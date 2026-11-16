@@ -40,6 +40,31 @@ roles, administrator and user.
 
 ### Security
 
+- **`CLOUD_AGENTS_ENABLED` now closes every path to a cloud model.** Two helper paths
+  (research plan and plan review, debugging help in the coding loop) only checked whether a
+  key was stored and sent redacted text without a confirmation card. They now require
+  `CLOUD_AGENTS_ENABLED=true`, `CLOUD_MISSION_AUTO_APPROVE=true` and an administrator's turn;
+  otherwise Argus works locally. The switch defaults to off in the code as well; before, a
+  missing `.env` entry meant on.
+- **The per-account memory could carry company data past the lock.** The file tools could
+  write `users/<id>/MEMORY.md`, which is loaded into the system prompt of every new
+  conversation, including other accounts' memory. The whole `users/` folder is now closed to
+  the file tools, and the reflection skips conversations that hold company data.
+- **Sandbox: code no longer runs as the same user as the sandbox service.** Code runs as
+  `runner`, calculations as `calc`, both without capabilities; the service keeps `SETUID`,
+  `SETGID` and `KILL` only. Between runs the sandbox ends every process of the run user and
+  verifies that none is left, instead of one pass over the process list; if that cannot be
+  confirmed, or the service was started without these rights, it refuses to execute.
+  `calculate` runs in its own process with a hard time limit; before, the calculation went on
+  in a thread after the timeout.
+- The backend rejects requests coming from the sandbox container, which shares a Docker
+  network with it.
+- **Injection check:** on by default in the code (`WEB_INJECTION_GUARD`), and content that
+  cannot be checked is not used. Before, a failed check let the content through.
+- A session cookie is no longer accepted as an API bearer token.
+- **LangSmith is gone.** The key is no longer mounted or loaded and tracing to LangSmith is
+  forced off; traces go to Phoenix inside the stack only.
+- The cloud provider no longer writes the first characters of an API key to the log.
 - **The code sandbox no longer mounts the workspace.** It used to see the files of every
   account read-only. Now the backend sends it only the files of the requesting account, runs
   are executed one at a time, and before and after each run all leftover processes and
