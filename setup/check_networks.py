@@ -32,6 +32,9 @@ EDGE_ALLOWED = {"caddy", "rag-backend"}
 # Diese haengen ausschliesslich im Netz 'intern'.
 INTERN_ONLY = {"llm", "embed", "rerank", "postgres", "qdrant", "phoenix",
                "tts-service", "stt-service"}
+# Optionale Dienste (Profile 'voice' und 'tracing'): fehlen sie, kein Fehler;
+# sind sie aktiv, gelten die Regeln fuer INTERN_ONLY.
+OPTIONAL_INTERN_ONLY = {"phoenix", "tts-service", "stt-service"}
 REQUIRED_INTERNAL_NETWORKS = {"intern", "sandbox"}
 
 
@@ -87,7 +90,7 @@ def check(cfg: dict) -> list[str]:
     if edge_others:
         errors.append(f"Netz 'edge' wird von unerlaubten Diensten benutzt: {sorted(edge_others)}")
 
-    for name in sorted(INTERN_ONLY - services.keys()):
+    for name in sorted((INTERN_ONLY - OPTIONAL_INTERN_ONLY) - services.keys()):
         errors.append(f"Dienst '{name}' fehlt (umbenannt? Regeln anpassen)")
     for name in sorted(EXCLUSIVE_EGRESS & services.keys()):
         nets = set(services[name].get("networks") or ())

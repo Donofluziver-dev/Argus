@@ -374,6 +374,11 @@ def main(argv: list[str] | None = None) -> int:
     template = template_path.read_bytes().decode("utf-8")
     current = parse_env(env_path.read_bytes().decode("utf-8") if env_path.exists() else template)
     values = {k: v for k, v in generate_env_secrets().items() if not current.get(k)}
+    # Bestehende Installationen bekommen beim Update die bisherigen Dienste als
+    # Profile eingetragen, falls der Schluessel noch fehlt; ein vorhandener Wert
+    # (auch ein leerer) bleibt unangetastet.
+    if "COMPOSE_PROFILES" not in current:
+        values["COMPOSE_PROFILES"] = "voice,tracing"
     if os.name != "nt":
         uid, gid = resolve_linux_ugid()
         if not current.get("ARGUS_UID"):

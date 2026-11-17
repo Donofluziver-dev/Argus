@@ -170,7 +170,18 @@ sglang_metrics = llm_metrics
 
 _TTS_METRICS_URL = os.getenv("TTS_METRICS_URL", "http://tts-service:8002/v1/tts/metrics")
 
+
+def _voice_available() -> bool:
+    try:
+        from rag_backend.main import is_voice_available
+        return is_voice_available()
+    except Exception:
+        return True
+
+
 async def tts_metrics():
+    if not _voice_available():
+        return {"status": "aus"}
     out = {}
     try:
         from rag_backend.crypto_utils import load_llm_api_key

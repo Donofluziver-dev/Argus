@@ -123,12 +123,24 @@ VALID_TLS_MODES = ("internal", "acme", "files")
 DEFAULT_EDGE_SUBNET = "172.31.250.0/29"
 
 
-def _merge_compose_profiles(existing: str, add_profile: str = "proxy") -> str:
-    """Fuegt ein Compose-Profil hinzu, ohne vorhandene Profile zu verlieren."""
-    profiles = [p.strip() for p in (existing or "").split(",") if p.strip()]
-    if add_profile not in profiles:
-        profiles.append(add_profile)
-    return ",".join(profiles)
+def _merge_compose_profiles(existing: str, add=(), remove=()) -> str:
+    """Setzt Compose-Profile: 'add' kommt hinzu, 'remove' faellt weg, alle anderen
+    (etwa 'proxy') bleiben in ihrer Reihenfolge. 'add' darf auch {profil: an/aus} sein.
+    Profile duerfen als Liste oder als Komma-Text kommen."""
+    def _liste(v) -> list[str]:
+        if isinstance(v, str):
+            v = v.split(",")
+        return [p.strip() for p in v if p and p.strip()]
+
+    if isinstance(add, dict):
+        remove = _liste(remove) + [p for p, an in add.items() if not an]
+        add = [p for p, an in add.items() if an]
+    weg = set(_liste(remove))
+    out: list[str] = []
+    for p in _liste(existing) + _liste(add):
+        if p not in weg and p not in out:
+            out.append(p)
+    return ",".join(out)
 
 
 def compute_server_env(
@@ -736,6 +748,31 @@ def update_server_env(
     return server_values
 
 
+def update_compose_profiles(
+    repo_root: Path,
+    *,
+    use_voice: bool = True,
+    use_tracing: bool = True,
+) -> str:
+    """Setzt die Profile 'voice' und 'tracing' in COMPOSE_PROFILES der .env und
+    behaelt andere Profile (etwa 'proxy') bei."""
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    template_path = repo_root / ".env.example"
+    template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
+    existing_env = (
+        init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+        if env_path.exists()
+        else init_mod.parse_env(template_text)
+    )
+    merged = _merge_compose_profiles(
+        existing_env.get("COMPOSE_PROFILES", ""),
+        {"voice": use_voice, "tracing": use_tracing},
+    )
+    init_mod.write_env_file(env_path, template_text, {"COMPOSE_PROFILES": merged})
+    return merged
+
+
 # =============================================================================
 # Container-Stapel starten und Status pruefen
 # =============================================================================
@@ -1169,8 +1206,74 @@ def doctor_check_networks(repo_root: Path) -> DoctorResult:
             temp_env.unlink(missing_ok=True)
 
 
-def doctor_check_stack(repo_root: Path, healthz_url: str = "http://127.0.0.1:7860/healthz") -> DoctorResult:
+PROFILE_SERVICES: dict[str, tuple[str, ...]] = {
+    "voice": ("stt-service", "tts-service"),
+    "tracing": ("phoenix",),
+    "proxy": ("caddy",),
+}
+
+
+def doctor_check_profiles(
+    repo_root_or_env: Path | dict[str, str],
+    env_data: dict[str, str] | None = None,
+) -> DoctorResult:
+    """Prueft COMPOSE_PROFILES in der .env und meldet die aktiven Profile."""
+    if isinstance(repo_root_or_env, dict):
+        env_data = repo_root_or_env
+    else:
+        repo_root = Path(repo_root_or_env)
+        if env_data is None:
+            init_mod = _load_init_stack_module(repo_root)
+            env_path = repo_root / ".env"
+            env_data = (
+                init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+                if env_path.exists()
+                else {}
+            )
+
+    if "COMPOSE_PROFILES" not in env_data:
+        return DoctorResult(
+            "WARNUNG",
+            "Profile",
+            "COMPOSE_PROFILES fehlt in der .env (Sprache und Ablaufverfolgung sind damit aus). "
+            "Naechster Schritt: python setup/init_stack.py ausfuehren oder COMPOSE_PROFILES in der .env setzen.",
+        )
+
+    profiles = [p.strip() for p in (env_data.get("COMPOSE_PROFILES") or "").split(",") if p.strip()]
+    if not profiles:
+        return DoctorResult("OK", "Profile", "Keine optionalen Profile aktiv (nur Kerndienste).")
+    return DoctorResult("OK", "Profile", f"Aktive Profile: {', '.join(profiles)}.")
+
+
+def doctor_check_stack(
+    repo_root: Path,
+    healthz_url: str = "http://127.0.0.1:7860/healthz",
+    env_data: dict[str, str] | None = None,
+) -> DoctorResult:
     """Prueft den Laufzustand der Container (docker compose ps) und /healthz auf 127.0.0.1:7860."""
+    if env_data is None:
+        env_path = repo_root / ".env"
+        if env_path.exists():
+            try:
+                init_mod = _load_init_stack_module(repo_root)
+                env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+            except Exception:
+                env_data = {}
+        else:
+            env_data = {}
+
+    active_profiles = {
+        p.strip() for p in (env_data.get("COMPOSE_PROFILES") or "").split(",") if p.strip()
+    }
+    inactive_optional: set[str] = set()
+    expected_optional: list[str] = []
+    for prof, svcs in PROFILE_SERVICES.items():
+        if prof in active_profiles:
+            if prof in ("voice", "tracing"):
+                expected_optional.extend(svcs)
+        else:
+            inactive_optional.update(svcs)
+
     try:
         res = subprocess.run(
             ["docker", "compose", "ps", "--format", "json"],
@@ -1192,6 +1295,16 @@ def doctor_check_stack(repo_root: Path, healthz_url: str = "http://127.0.0.1:786
         except Exception:
             items = []
 
+    # Optionale Container eines abgeschalteten Profils nicht als Fehler werten,
+    # falls sie gestoppt in 'docker compose ps' stehen oder fehlen.
+    items = [
+        it for it in items
+        if not (
+            (it.get("Service") or it.get("Name", "")) in inactive_optional
+            and it.get("State", "").lower() != "running"
+        )
+    ]
+
     healthy = check_healthz(healthz_url)
     if not items:
         if healthy:
@@ -1202,6 +1315,8 @@ def doctor_check_stack(repo_root: Path, healthz_url: str = "http://127.0.0.1:786
             "Container-Stapel laeuft derzeit nicht. Naechster Schritt: docker compose up -d.",
         )
 
+    present_services = {(it.get("Service") or it.get("Name", "")) for it in items}
+    missing_optional = [s for s in expected_optional if s not in present_services]
     not_running = [
         (it.get("Service") or it.get("Name", "dienst"))
         for it in items
@@ -1212,8 +1327,10 @@ def doctor_check_stack(repo_root: Path, healthz_url: str = "http://127.0.0.1:786
         for it in items
         if it.get("Health", "").lower() == "unhealthy"
     ]
-    if not_running or unhealthy:
+    if missing_optional or not_running or unhealthy:
         problems = []
+        if missing_optional:
+            problems.append(f"fehlend: {', '.join(missing_optional)}")
         if not_running:
             problems.append(f"nicht laufend: {', '.join(not_running)}")
         if unhealthy:
@@ -1555,11 +1672,12 @@ def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[
         doctor_check_ram(),
         doctor_check_disk_space(models_dir, models_spec_path),
         doctor_check_env(repo_root),
+        doctor_check_profiles(repo_root, env_data),
         doctor_check_secrets_and_dirs(repo_root),
         doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models),
         doctor_check_networks(repo_root),
         doctor_check_proxy(repo_root, env_data),
-        doctor_check_stack(repo_root),
+        doctor_check_stack(repo_root, env_data=env_data),
     ]
     results.extend(doctor_check_switches(env_data))
     if os.name != "nt":
@@ -1628,6 +1746,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Mitgelieferten TLS-Proxy nicht aktivieren.")
     parser.add_argument("--tls-mode", type=str, default=None,
                         help="TLS-Modus fuer den Proxy (internal, acme, files; Standard: internal).")
+    parser.add_argument("--voice", dest="use_voice", action="store_true", default=None,
+                        help="Spracheingabe und Vorlesen (Profil 'voice') aktivieren.")
+    parser.add_argument("--no-voice", dest="use_voice", action="store_false", default=None,
+                        help="Spracheingabe und Vorlesen (Profil 'voice') abschalten.")
+    parser.add_argument("--tracing", dest="use_tracing", action="store_true", default=None,
+                        help="Ablaufverfolgung mit Phoenix (Profil 'tracing') aktivieren.")
+    parser.add_argument("--no-tracing", dest="use_tracing", action="store_false", default=None,
+                        help="Ablaufverfolgung mit Phoenix (Profil 'tracing') abschalten.")
     parser.add_argument("--no-models", action="store_true", help="Modelle nicht laden.")
     parser.add_argument("--no-start", action="store_true", help="Stapel nicht starten.")
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
@@ -1757,6 +1883,24 @@ def main(argv: list[str] | None = None) -> int:
                     default="internal",
                     non_interactive=args.yes,
                 )
+
+    if args.use_voice is not None:
+        use_voice = args.use_voice
+    else:
+        use_voice = prompt_bool(
+            "Spracheingabe und Vorlesen? Der erste Bau laedt dafuer 4,4 GB.",
+            default=True,
+            non_interactive=args.yes,
+        )
+
+    if args.use_tracing is not None:
+        use_tracing = args.use_tracing
+    else:
+        use_tracing = prompt_bool(
+            "Ablaufverfolgung mit Phoenix, nur lokal?",
+            default=True,
+            non_interactive=args.yes,
+        )
     print("")
 
     # -------------------------------------------------------------------------
@@ -1769,6 +1913,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if server_url:
         update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
+    update_compose_profiles(repo_root, use_voice=use_voice, use_tracing=use_tracing)
     if selinux_enforcing():
         configure_selinux_label(repo_root, non_interactive=args.yes)
     print("")
@@ -1792,7 +1937,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_start:
         print("  Start des Stapels uebersprungen (--no-start).\n")
     else:
-        print("Hinweis: Der erste Bau dauert etwas, der Sprachdienst laedt dabei 4,4 GB.")
+        if use_voice:
+            print("Hinweis: Der erste Bau dauert etwas, der Sprachdienst laedt dabei 4,4 GB.")
+        else:
+            print("Hinweis: Der erste Bau dauert etwas.")
         if not modelle_ok:
             print("Achtung: Es fehlen Modelldateien. Ohne sie starten Sprachmodell und")
             print("Dokumentensuche nicht. Erst die Modelle laden: install.cmd --models-only")

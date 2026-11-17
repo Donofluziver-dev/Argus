@@ -300,6 +300,9 @@ async def lifespan(app: FastAPI):
     #--- niemals selbst per DNS aufloesen muss.
     app.state.sandbox_ip_task = asyncio.create_task(_sandbox_ip_watcher())
 
+    #--- Optionale Profile (voice, tracing) im Hintergrund per DNS pruefen.
+    app.state.optional_services_task = asyncio.create_task(_optional_services_watcher())
+
     yield
 
     if getattr(app.state, "mcp_started", False):
@@ -343,15 +346,57 @@ async def lifespan(app: FastAPI):
             await stask
         except (asyncio.CancelledError, Exception):
             pass
+    otask = getattr(app.state, "optional_services_task", None)
+    if otask and not otask.done():
+        otask.cancel()
+        try:
+            await otask
+        except (asyncio.CancelledError, Exception):
+            pass
 
-def _init_tracing() -> None:
+
+def _service_hostname(url_or_host: str, default: str = "") -> str:
+    raw = (url_or_host or "").strip() or default
+    if not raw:
+        return ""
+    if "://" in raw:
+        from urllib.parse import urlsplit
+        return (urlsplit(raw).hostname or "").strip()
+    return raw.split("/")[0].split(":")[0].strip()
+
+
+def _host_resolvable(host: str) -> bool:
+    h = (host or "").strip()
+    if not h:
+        return False
+    try:
+        return bool(socket.getaddrinfo(h, None, 0, socket.SOCK_STREAM))
+    except OSError:
+        return False
+
+
+_TRACING_ACTIVE = False
+
+
+def _init_tracing() -> bool:
     #--- Lokales Tracing nach Phoenix. FAIL-OPEN: laeuft der Container nicht,
     #--- startet das Backend trotzdem. Observability ist Beiwerk. Die Inhalte
     #--- werden vor dem Versand geschwaerzt (TRACE_CONTENT, trace_redaction.py).
+    #--- Ist Phoenix beim Start nicht da (Profil tracing aus oder noch nicht
+    #--- gestartet), holt _optional_services_watcher das nach, sobald es auftaucht.
+    global _TRACING_ACTIVE
+    if _TRACING_ACTIVE:
+        return True
     endpoint = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "").strip()
     if not endpoint:
         log.info("Tracing: kein PHOENIX_COLLECTOR_ENDPOINT gesetzt -- deaktiviert.")
-        return
+        return False
+    host = _service_hostname(endpoint)
+    if not _host_resolvable(host):
+        log.info(
+            f"Ablaufverfolgung aus: Host '{host}' nicht aufloesbar (Profil tracing nicht aktiv)."
+        )
+        return False
     try:
         from openinference.instrumentation.langchain import LangChainInstrumentor
         from rag_backend.trace_redaction import build_phoenix_tracer_provider, trace_mode
@@ -359,9 +404,12 @@ def _init_tracing() -> None:
         tracer_provider = build_phoenix_tracer_provider(
             endpoint, os.getenv("PHOENIX_PROJECT_NAME", "argus"), mode)
         LangChainInstrumentor().instrument(tracer_provider=tracer_provider, skip_dep_check=True)
+        _TRACING_ACTIVE = True
         log.info(f"Tracing aktiv: Phoenix unter {endpoint}, Inhalte: {mode}")
+        return True
     except Exception as e:
         log.warning(f"Tracing konnte nicht gestartet werden ({type(e).__name__}: {e}) -- laeuft ohne.")
+        return False
 
 
 _init_tracing()
@@ -487,6 +535,74 @@ async def _sandbox_ip_watcher():
         except Exception as e:
             log.debug(f"Sandbox-Hostname nicht aufloesbar: {e}")
         await asyncio.sleep(_SANDBOX_REFRESH_SECONDS)
+
+
+#--- Optionale Dienste (Profile voice und tracing): Der Anfragepfad loest NIE
+#--- selbst per DNS auf. Solange die Hintergrundaufgabe noch nicht geprueft hat
+#--- (z. B. in Tests ohne lifespan), gilt "vorhanden" -- das heutige Verhalten.
+_OPTIONAL_SERVICES: dict[str, bool] = {"voice": True, "tracing": True}
+_OPTIONAL_SERVICES_REFRESH_SECONDS = 30
+
+
+async def _can_resolve_host(host: str) -> bool:
+    h = (host or "").strip()
+    if not h:
+        return False
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, h, None, 0, socket.SOCK_STREAM)
+        return bool(infos)
+    except OSError:
+        return False
+
+
+async def _check_optional_services_once() -> dict[str, bool]:
+    stt_host = _service_hostname(os.getenv("STT_SERVICE_URL", "http://stt-service:8003"), "stt-service")
+    tts_host = _service_hostname(os.getenv("TTS_SERVICE_URL", "http://tts-service:8002"), "tts-service")
+    phoenix_ep = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://phoenix:6006").strip()
+    phoenix_host = _service_hostname(phoenix_ep) if phoenix_ep else ""
+    #--- Parallel: Ein Name, den es nicht gibt, kostet bei Dockers DNS rund 4 s.
+    stt_ok, tts_ok, tracing_ok = await asyncio.gather(
+        _can_resolve_host(stt_host),
+        _can_resolve_host(tts_host),
+        _can_resolve_host(phoenix_host),
+    )
+    return {
+        "voice": stt_ok and tts_ok,
+        "tracing": tracing_ok,
+    }
+
+
+async def _optional_services_watcher():
+    """Prueft alle 30 Sekunden im Hintergrund per DNS, ob stt-service, tts-service
+    und der Phoenix-Host aufloesbar sind."""
+    global _OPTIONAL_SERVICES
+    while True:
+        try:
+            _OPTIONAL_SERVICES = await _check_optional_services_once()
+            #--- Phoenix kam nach dem Start dazu (Profil spaeter eingeschaltet):
+            #--- Ablaufverfolgung jetzt einrichten statt erst beim naechsten Neustart.
+            if _OPTIONAL_SERVICES.get("tracing") and not _TRACING_ACTIVE:
+                await asyncio.to_thread(_init_tracing)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug(f"Optionale Dienste nicht pruefbar: {e}")
+        await asyncio.sleep(_OPTIONAL_SERVICES_REFRESH_SECONDS)
+
+
+def is_voice_available() -> bool:
+    return bool(_OPTIONAL_SERVICES.get("voice", True))
+
+
+def is_tracing_available() -> bool:
+    return bool(_OPTIONAL_SERVICES.get("tracing", True))
+
+
+def _current_features() -> dict[str, bool]:
+    return {
+        "voice": is_voice_available(),
+        "tracing": is_tracing_available(),
+    }
 
 
 #--- Registriert wird sie weiter unten als aeusserste Schicht (nach
@@ -863,7 +979,8 @@ def dashboard_auth_state(request: Request, db: Session = Depends(get_db)):
     #--- Anlegen des ersten Administrators an.
     accounts = _login_accounts(db)
     out = {"needs_setup": not accounts, "authenticated": False,
-           "allow_register": bool(accounts) and _register_allowed()}
+           "allow_register": bool(accounts) and _register_allowed(),
+           "features": _current_features()}
     if not accounts:
         #--- Nur OB ein Einrichtungs-Schluessel verlangt wird, nie sein Wert: die
         #--- Oberflaeche zeigt dann ein Feld dafuer.
@@ -1351,7 +1468,8 @@ def _dashboard_config() -> dict:
         "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "192")),
         "max_upload_mb": _MAX_UPLOAD_BYTES // (1024 * 1024),
         #--- Adresse der Ablaufverfolgung fuer den Monitor-Reiter, leer = aus.
-        "traces_url": _TRACES_URL,
+        "traces_url": _TRACES_URL if is_tracing_available() else "",
+        "features": _current_features(),
     }
 
 
@@ -2303,6 +2421,11 @@ async def dashboard_stt(request: Request, file: UploadFile = File(...),
                         user: User = Depends(dashboard_user),
                         csrf = Depends(check_dashboard_csrf)):
     # Browser nimmt Audio auf (MediaRecorder) -> rag-backend -> stt-service.
+    if not is_voice_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sprache ist auf diesem Server nicht eingerichtet.",
+        )
     import httpx
     url = os.getenv("STT_SERVICE_URL", "http://stt-service:8003").rstrip("/") + "/v1/audio/transcriptions"
     #--- Stueckweise lesen und frueh abbrechen: Starlette begrenzt Datei-Parts
@@ -2346,6 +2469,11 @@ async def dashboard_tts(body: DashboardTtsIn, request: Request,
                         user: User = Depends(dashboard_user),
                         csrf = Depends(check_dashboard_csrf)):
     # Antwort-Text -> tts-service (intern) -> Audio-Bytes, vom Frontend abgespielt.
+    if not is_voice_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sprache ist auf diesem Server nicht eingerichtet.",
+        )
     import httpx
     url = os.getenv("TTS_SERVICE_URL", "http://tts-service:8002").rstrip("/") + "/v1/audio/speech"
     payload = {"model": os.getenv("AUDIO_TTS_MODEL", "tts-1"), "input": body.input,

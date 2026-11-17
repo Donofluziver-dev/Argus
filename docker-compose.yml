@@ -275,6 +275,7 @@ services:
     build:
       context: ./tts_service
       dockerfile: Dockerfile.tts
+    profiles: ["voice"]
     restart: unless-stopped
     networks:
       - intern
@@ -323,6 +324,7 @@ services:
     build:
       context: ./stt_service
       dockerfile: Dockerfile.stt
+    profiles: ["voice"]
     restart: unless-stopped
     networks:
       - intern
@@ -415,6 +417,15 @@ services:
         condition: service_healthy
       rerank:
         condition: service_healthy
+      stt-service:
+        condition: service_healthy
+        required: false
+      tts-service:
+        condition: service_healthy
+        required: false
+      phoenix:
+        condition: service_started
+        required: false
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7860/healthz || exit 1"]
       interval: 60s
@@ -426,6 +437,7 @@ services:
   # Anfrage. Version UND Digest gepinnt.
   phoenix:
     image: arizephoenix/phoenix:version-21.0.0@sha256:1f9a144a5357b4973e93a15718f050247cb7a4ee7b7c6c06ecb91b5eed3fbaad
+    profiles: ["tracing"]
     restart: unless-stopped
     networks:
       - intern

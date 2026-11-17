@@ -69,6 +69,9 @@ function chatAddFiles(files) {
 async function chatCheckMultimodal() {
   try {
     const s = await api('/v1/dashboard/config');
+    if (s.config && s.config.features && window.argusApplyFeatures) {
+      window.argusApplyFeatures(s.config.features);
+    }
     chatMultimodal = !!(s.config && s.config.multimodal);
     // Der Kopf der Unterhaltung zeigt das Modell -- die Angabe kommt nur hierher.
     window.argusModell = (s.model || '').split('/').pop();
@@ -448,11 +451,15 @@ function chatBuildActions(msg, role) {
     copyToClipboard(msg.bubble.textContent);
   });
 
-  // Vorlesen ueber denselben Weg wie die Live-Ansicht.
+  // Vorlesen ueber denselben Weg wie die Live-Ansicht. Ohne Sprache ausgeblendet.
   if (role !== 'user') {
-    knopf(window.argusIcon('laut', 13) + 'VORLESEN', 'Antwort vorlesen', function () {
+    const ttsBtn = knopf(window.argusIcon('laut', 13) + 'VORLESEN', 'Antwort vorlesen', function () {
       if (window.argusSprich) window.argusSprich(msg.bubble.textContent);
     });
+    ttsBtn.classList.add('chat-action-tts');
+    const voiceOn = !window.argusFeatures || window.argusFeatures.voice !== false;
+    ttsBtn.hidden = !voiceOn;
+    ttsBtn.style.display = voiceOn ? '' : 'none';
   }
 
   knopf(window.argusIcon('trash', 13), 'Diese Nachricht loeschen', async function () {

@@ -107,6 +107,15 @@ roles, administrator and user.
 
 ### Added
 
+- **Speech and tracing are compose profiles** (`voice`: `stt-service`, `tts-service`;
+  `tracing`: `phoenix`), set in `COMPOSE_PROFILES`, default `voice,tracing`. A server can do
+  without the 4.4 GB speech build or without Phoenix (Elastic License). The backend detects
+  over DNS which services run: without speech the interface hides microphone and read-aloud
+  and `/stt`, `/tts` answer 503 "not set up"; without Phoenix no trace exporter is set up, and
+  one that appears later is picked up. The installer asks for both (`--voice`, `--no-voice`,
+  `--tracing`, `--no-tracing`), `doctor` reports the profiles. **Update note:** an older
+  `.env` without the key gets `voice,tracing` the next time the installer or
+  `setup/init_stack.py` runs; until then speech and tracing are off and `doctor` warns.
 - **TLS proxy for a server** (compose profile `proxy`, off by default): Caddy in front of
   `rag-backend`, with its own CA (`internal`), the company's certificate (`files`) or Let's
   Encrypt (`acme`). It runs as `ARGUS_UID` without capabilities and with a read-only file

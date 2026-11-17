@@ -117,6 +117,9 @@ async function tick(force) {
     const eng = s.engine || {};
     const be = s.backend || {};
     const tts = s.tts || {};
+    if (s.config && s.config.features && window.argusApplyFeatures) {
+      window.argusApplyFeatures(s.config.features);
+    }
 
     // Echte Konfig-Werte + Live-Status statt Platzhalter
     systemPanel(s);
@@ -364,7 +367,10 @@ function kacheln(be, eng, tts, kvPct, verlauf) {
   if (cb) cb.style.width = (treffer || 0) + "%";
   //--- Der tts-service misst RTF und Latenz selbst; solange nichts gesprochen
   //--- wurde, sind beide 0 und die Zeile bleibt leer statt Nullen zu zeigen.
-  const rtf = tts && tts.avg_rtf, lat = tts && tts.avg_latency_s;
+  //--- Ohne Sprache (Profil voice aus) bleibt die Zeile leer.
+  const voiceOff = (window.argusFeatures && window.argusFeatures.voice === false)
+    || (tts && tts.status === "aus");
+  const rtf = !voiceOff && tts && tts.avg_rtf, lat = !voiceOff && tts && tts.avg_latency_s;
   setz("k-tts-sub", rtf ? "TTS RTF " + deZahl(rtf, 2)
                         + (lat ? " \u00b7 LATENZ " + Math.round(lat * 1000) + " MS" : "") : "");
 }
@@ -392,10 +398,18 @@ function systemPanel(s) {
     + (cfg.web_timeout_ms ? " \u00b7 Limit " + kvZahl(cfg.web_timeout_ms) + " ms" : ""),
     online ? "sys-gruen" : "sys-magenta");
 
-  //--- Die Stimme meldet der tts-service mit seinen Kennzahlen; RTF erst, wenn
-  //--- wirklich gesprochen wurde -- sonst stuende dort eine Null ohne Messung.
-  const stimme = tts.voice ? ("Qwen3 \u00b7 " + tts.voice + (tts.lang ? " \u00b7 " + tts.lang : "")) : "Qwen3-TTS";
-  setz("sys-tts", stimme + (tts.avg_rtf ? " \u00b7 RTF " + deZahl(tts.avg_rtf, 2) : ""));
+  //--- Ohne Sprache (Profil voice aus) zeigen die Sprach-Kennzahlen "aus".
+  //--- Sonst meldet der tts-service die Stimme mit seinen Kennzahlen; RTF erst,
+  //--- wenn wirklich gesprochen wurde.
+  const voiceOff = (cfg.features && cfg.features.voice === false)
+    || (window.argusFeatures && window.argusFeatures.voice === false)
+    || tts.status === "aus";
+  if (voiceOff) {
+    setz("sys-tts", "aus");
+  } else {
+    const stimme = tts.voice ? ("Qwen3 \u00b7 " + tts.voice + (tts.lang ? " \u00b7 " + tts.lang : "")) : "Qwen3-TTS";
+    setz("sys-tts", stimme + (tts.avg_rtf ? " \u00b7 RTF " + deZahl(tts.avg_rtf, 2) : ""));
+  }
 }
 
 // Kopfzeile: Prozent, Balken und "7x - 14:18" (wie oft verdichtet, wann zuletzt).
@@ -639,28 +653,43 @@ let tracesUrl = null;
 async function ensureTracesLoaded() {
   const f = $("traces-frame");
   if (!f) return;
+  let tracingEnabled = !(window.argusFeatures && window.argusFeatures.tracing === false);
   if (tracesUrl === null) {
     try {
       const cfg = await api("/v1/dashboard/config");
+      if (cfg && cfg.config && cfg.config.features) {
+        if (window.argusApplyFeatures) window.argusApplyFeatures(cfg.config.features);
+        tracingEnabled = cfg.config.features.tracing !== false;
+      }
       tracesUrl = (cfg && cfg.config && cfg.config.traces_url) || "";
     } catch (e) {
       return;  // naechster Besuch des Reiters versucht es erneut
     }
-    const adresse = $("traces-adresse");
-    const extern = $("traces-extern");
-    const hint = $("traces-hint");
-    if (tracesUrl) {
-      if (adresse) adresse.textContent = "PHOENIX · " + tracesUrl.replace(/^https?:\/\//, "").toUpperCase();
-      if (extern) extern.href = tracesUrl;
-      f.dataset.src = tracesUrl + "/projects";
-    } else {
-      if (adresse) adresse.textContent = "NICHT EINGEBUNDEN";
-      if (extern) extern.style.display = "none";
-      f.style.display = "none";
-      if (hint) hint.textContent = "Die Ablaufverfolgung ist in dieser Installation nicht eingebunden (DASHBOARD_TRACES_URL ist leer).";
+  }
+  const adresse = $("traces-adresse");
+  const extern = $("traces-extern");
+  const reloadBtn = $("btnTracesReload");
+  const hint = $("traces-hint");
+  if (tracesUrl && tracingEnabled) {
+    if (adresse) adresse.textContent = "PHOENIX · " + tracesUrl.replace(/^https?:\/\//, "").toUpperCase();
+    if (extern) { extern.href = tracesUrl; extern.style.display = ""; }
+    if (reloadBtn) reloadBtn.style.display = "";
+    f.style.display = "";
+    f.dataset.src = tracesUrl + "/projects";
+    if (!f.src && f.dataset.src) f.src = f.dataset.src;
+  } else {
+    if (adresse) adresse.textContent = tracingEnabled ? "NICHT EINGEBUNDEN" : "AUS";
+    if (extern) extern.style.display = "none";
+    if (reloadBtn) reloadBtn.style.display = "none";
+    f.style.display = "none";
+    f.removeAttribute("src");
+    delete f.dataset.src;
+    if (hint) {
+      hint.textContent = tracingEnabled
+        ? "Die Ablaufverfolgung ist in dieser Installation nicht eingebunden (DASHBOARD_TRACES_URL ist leer)."
+        : "Die Ablaufverfolgung (Phoenix, Profil tracing) ist auf diesem Server nicht eingerichtet.";
     }
   }
-  if (!f.src && f.dataset.src) f.src = f.dataset.src;
 }
 window.argusTraces = { ensureLoaded: ensureTracesLoaded };
 

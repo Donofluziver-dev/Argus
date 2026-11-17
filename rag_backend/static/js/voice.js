@@ -239,7 +239,8 @@ window.argusAudioLevel = (function () {
     function setBusy(on) {
       busy = on;
       micBtn.classList.toggle('is-stop', on);
-      if (hint) hint.textContent = on ? 'Esc bricht ab' : 'Leertaste zum Sprechen · Esc bricht ab';
+      const voiceOn = !window.argusFeatures || window.argusFeatures.voice !== false;
+      if (hint) hint.textContent = (on || !voiceOn) ? 'Esc bricht ab' : 'Leertaste zum Sprechen · Esc bricht ab';
     }
 
     function stopAudio() {
@@ -302,7 +303,8 @@ window.argusAudioLevel = (function () {
     }
 
     async function speak(text) {
-      if (!ttsOn || !text) { setState('idle'); return; }
+      const voiceOn = !window.argusFeatures || window.argusFeatures.voice !== false;
+      if (!ttsOn || !voiceOn || !text) { setState('idle'); return; }
       try {
         setState('speaking');
         const url = URL.createObjectURL(await ttsBlob(text));
@@ -391,7 +393,8 @@ window.argusAudioLevel = (function () {
       if (!live || !live.classList.contains('active')) return;
       const tag = (document.activeElement && document.activeElement.tagName) || '';
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.code === 'Space') { e.preventDefault(); micBtn.click(); }
+      const voiceOn = !window.argusFeatures || window.argusFeatures.voice !== false;
+      if (e.code === 'Space' && voiceOn && !micBtn.hidden) { e.preventDefault(); micBtn.click(); }
       if (e.key === 'Escape' && busy) { e.preventDefault(); window.argusChatStop(); stopAudio(); setState('idle'); }
     });
 

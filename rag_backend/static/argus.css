@@ -540,7 +540,10 @@
     align-items: center;
     width: min(620px, 84%);
   }
-  .live-typebar[hidden] { display: none; }
+  .live-typebar[hidden],
+  .live-mic[hidden],
+  .live-btn[hidden],
+  .chat-action[hidden] { display: none; }
   #vc-text {
     flex: 1;
     padding: 12px 16px;

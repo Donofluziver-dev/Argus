@@ -3,6 +3,7 @@
 // eingeschleustes Skript kann sie also nicht auslesen. Der Zustand hier ist nur
 // eine Kopie fuer die Anzeige -- entschieden wird serverseitig an jeder Route.
 window.argusSession = { authenticated: false, username: null, role: null, userId: null };
+window.argusFeatures = { voice: true, tracing: true };
 
 (function () {
   let mode = 'login';            // 'login' | 'setup' (erstes Konto) | 'register'
@@ -11,6 +12,36 @@ window.argusSession = { authenticated: false, username: null, role: null, userId
   let setupTokenRequired = false;   // Erstlauf verlangt DASHBOARD_SETUP_TOKEN
 
   function el(id) { return document.getElementById(id); }
+
+  function applyFeatures(features) {
+    if (!features || typeof features !== 'object') return;
+    const voice = features.voice !== false;
+    const tracing = features.tracing !== false;
+    window.argusFeatures = { voice: voice, tracing: tracing };
+    document.body.classList.toggle('no-voice', !voice);
+    document.body.classList.toggle('no-tracing', !tracing);
+
+    ['vc-mic', 'vc-tts'].forEach(function (id) {
+      const btn = el(id);
+      if (btn) {
+        btn.hidden = !voice;
+        btn.style.display = voice ? '' : 'none';
+      }
+    });
+    document.querySelectorAll('.chat-action-tts').forEach(function (btn) {
+      btn.hidden = !voice;
+      btn.style.display = voice ? '' : 'none';
+    });
+    const hint = el('vc-hint');
+    if (hint && !voice) {
+      hint.textContent = 'Esc bricht ab';
+    }
+    const typebar = el('vc-typebar');
+    if (typebar && !voice) {
+      typebar.hidden = false;
+    }
+  }
+  window.argusApplyFeatures = applyFeatures;
 
   function setMessage(text, ok) {
     const box = el('auth-msg');
@@ -252,6 +283,7 @@ window.argusSession = { authenticated: false, username: null, role: null, userId
     try {
       const state = await api('/v1/dashboard/auth/state');
       dienst(true);
+      if (state.features) applyFeatures(state.features);
       if (state.authenticated) { applySession(state); openApp(); return; }
       allowRegister = !!state.allow_register;
       setupTokenRequired = !!state.setup_token_required;

@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 416 for the backend, 73 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 430 for the backend, 73 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -343,8 +343,9 @@ These are known and not solved yet:
   to the SIEM); entries the SIEM does not receive are not re-sent.
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
   yet with Let's Encrypt.
-- Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) are fixed parts of the
-  stack; for an offer to third parties both should be optional or replaceable.
+- Tracing (Phoenix, Elastic License) can be switched off (profile `tracing`). Web search
+  (SearXNG, AGPL) is a fixed part of the stack; for an offer to third parties it should be
+  optional or replaceable.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the
@@ -374,9 +375,16 @@ whether this is a single machine or a server, creates the secrets and `.env`, do
 models listed in `setup/models.json` (pinned to a Hugging Face revision, verified by SHA-256,
 resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
 running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
-`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--no-models`, `--no-start`,
-`--models-only`. `install.cmd` is plain batch without PowerShell;
-there is deliberately no EXE.
+`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
+`--tracing` / `--no-tracing`, `--no-models`, `--no-start`, `--models-only`. `install.cmd` is
+plain batch without PowerShell; there is deliberately no EXE.
+
+Optional parts are compose profiles, set in `COMPOSE_PROFILES` in `.env` (default
+`voice,tracing`): `voice` (speech input and read-aloud, `stt-service`/`tts-service`, 4.4 GB
+on the first build), `tracing` (Phoenix) and `proxy` (Caddy). The backend detects what runs;
+without `voice` the interface hides microphone and read-aloud. An older `.env` without the key
+gets `voice,tracing` on the next run of the installer or `setup/init_stack.py`; until then
+both are off and `doctor` warns.
 
 The same script checks and maintains an installation: `install.cmd doctor` (or `./install.sh
 doctor`) only reads and reports Docker, GPU, `.env`, secrets and folder permissions, models
