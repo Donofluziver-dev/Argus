@@ -31,7 +31,10 @@ roles, administrator and user.
 - **Rejected steps are shown as rejected.** A tool call refused by the lock after company
   data carries a lock symbol and "gesperrt" in the chat instead of a check mark.
 - Relative paths in the file tools resolve against the workspace (`Uploads/report.pdf`); the
-  note inserted when a file is dropped into the chat no longer names a Windows path.
+  note inserted when a file is dropped into the chat no longer names a Windows path. The
+  file tools also answer with such paths, error messages and the tool guide name none, and the
+  monitor shows the evals folder as it is on the host (`ARGUS_EVALS_DIR`) instead of a fixed
+  `C:\Argus_Workspace`. Windows paths from older conversations are still accepted.
 - **EPUB files are read by Argus' own code.** The package EbookLib (AGPL) is no longer a
   dependency; no Python package of the backend is under GPL or AGPL.
 - **Document search** is hybrid: bge-m3 vectors plus BM25, fused in Qdrant, reranked in a
@@ -77,6 +80,10 @@ roles, administrator and user.
   account read-only. Now the backend sends it only the files of the requesting account, runs
   are executed one at a time, and before and after each run all leftover processes and
   everything in `/tmp` are removed. PowerShell is no longer part of the sandbox image.
+- **No SysV IPC in the sandbox.** Shared memory segments, message queues and semaphores
+  survived the cleanup between runs, and all runs are the same user, so a later run of
+  another account could read them. The sandbox container now gets its own IPC namespace
+  with all SysV limits at zero; `multiprocessing` keeps working on POSIX semaphores.
 - Administrators' file tools (`read_document`, `ingest_document`, `fs_*`) cannot reach
   the areas of other accounts.
 - **Code execution through `calculate`.** The expression evaluator in the sandbox passed
@@ -107,6 +114,11 @@ roles, administrator and user.
   sets HSTS and does not buffer the chat stream. The installer asks for it in server mode
   (`--proxy`, `--no-proxy`, `--tls-mode`); `doctor` checks name, origins, data folder and
   whether `ARGUS_UID` can read the certificate.
+- **Linux setup without surprises:** the installer tells a missing `docker` group apart
+  from a stopped Docker service, warns when it runs under `sudo` and then takes the user
+  behind `sudo` as `ARGUS_UID` instead of a fixed 1000. With SELinux enforcing it offers the
+  `:z` label for every bind mount (`ARGUS_MOUNT_LABEL=,z`) and refuses it for system folders
+  and whole home directories; `doctor` checks both.
 - **`install.cmd doctor` / `./install.sh doctor`** checks an installation without changing
   anything: Docker and GPU, memory and disk space, `.env` against `.env.example`, secrets and
   folder permissions, models (`--verify-models` adds SHA-256), network isolation, the state of

@@ -194,6 +194,7 @@ async function tick(force) {
     if (force || tickNum % 5 === 0) {
       // Evals Runs
       const ev = await api("/v1/dashboard/evals");
+      evalHostDirSetzen(ev.host_dir);
       const evRows = ev.evals || [];
       $("evalsEmpty").style.display = evRows.length ? "none" : "block";
       $("evals").innerHTML = evRows.map(function (r) {
@@ -740,13 +741,30 @@ function bindCopyPath(id) {
     btn.dataset.titel = titel;
     const ok = await copyToClipboard(path);
     btn.innerHTML = icon(ok ? "haken" : "strich", 13) + escapeHtml(path);
-    btn.title = ok ? "Kopiert -- im Explorer mit Strg+V in die Adresszeile"
-                   : "Kopieren nicht moeglich -- Pfad von Hand markieren";
+    btn.title = ok ? "Kopiert" : "Kopieren nicht moeglich -- Pfad von Hand markieren";
     setTimeout(function () { btn.innerHTML = label; btn.title = titel; }, 4000);
   });
 }
 bindCopyPath("btnCopyEvalPath");
 bindCopyPath("btnCopyAuditPath");
+
+// Host-Pfad des Evals-Ordners (ARGUS_EVALS_DIR) kommt mit /v1/dashboard/evals.
+// Unter Windows mit Backslash (fuer den Explorer), sonst mit Schraegstrich.
+function evalHostDirSetzen(hostDir) {
+  const basis = String(hostDir || "").replace(/[\\/]+$/, "");
+  if (!basis) return;
+  const windows = /^[A-Za-z]:[\\/]/.test(basis);
+  const sep = windows ? "\\" : "/";
+  const norm = windows ? basis.replace(/\//g, "\\") : basis;
+  [["btnCopyEvalPath", "evalHostDir"], ["btnCopyAuditPath", "auditHostDir"]].forEach(function (p) {
+    const btn = $(p[0]);
+    if (!btn) return;
+    const pfad = norm + sep + (btn.dataset.unterordner || "");
+    btn.dataset.path = pfad;
+    const anzeige = $(p[1]);
+    if (anzeige) anzeige.textContent = pfad;
+  });
+}
 
 $("btnClearMissions").addEventListener("click", async (e) => {
   e.stopPropagation();

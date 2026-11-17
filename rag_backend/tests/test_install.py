@@ -1050,3 +1050,96 @@ def test_update_server_env_with_proxy_creates_dirs_and_port(installer, tmp_path)
     assert r.status == "FEHLER" and "cert.pem" in r.message
     assert "TRUSTED_HOSTS" not in r.message and "DASHBOARD_ORIGINS" not in r.message
     assert "Datenordner" not in r.message
+
+
+# ==============================================================================
+# Linux: Gruppe docker, sudo, SELinux
+# ==============================================================================
+
+
+def test_docker_permission_hint_only_for_socket_permission(installer):
+    err = ("permission denied while trying to connect to the Docker daemon socket at "
+           "unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/info\"")
+    hint = installer.docker_permission_hint(err)
+    assert hint and "usermod -aG docker" in hint
+    assert installer.docker_permission_hint("Cannot connect to the Docker daemon. Is it running?") is None
+    assert installer.docker_permission_hint("") is None
+
+
+def test_warn_if_sudo(installer, monkeypatch, capsys):
+    sudo_env = {"SUDO_USER": "anna", "SUDO_UID": "1234"}
+    assert installer.warn_if_sudo(env={}, euid=0) is True
+    assert installer.warn_if_sudo(env=sudo_env, euid=1000) is True
+    assert capsys.readouterr().out == ""
+    #--- --yes: Hinweis, aber weiter
+    assert installer.warn_if_sudo(non_interactive=True, env=sudo_env, euid=0) is True
+    assert "Gruppe docker" in capsys.readouterr().out
+    #--- interaktiv: Vorgabe ist Abbruch
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    assert installer.warn_if_sudo(env=sudo_env, euid=0) is False
+    monkeypatch.setattr("builtins.input", lambda prompt="": "j")
+    assert installer.warn_if_sudo(env=sudo_env, euid=0) is True
+
+
+def test_resolve_linux_ugid_prefers_sudo_user(installer, monkeypatch):
+    init_mod = installer._load_init_stack_module(_SCRIPT.parent.parent)
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.delenv("SUDO_GID", raising=False)
+    assert init_mod.resolve_linux_ugid(0, 0) == (1000, 1000)
+    monkeypatch.setenv("SUDO_UID", "1234")
+    monkeypatch.setenv("SUDO_GID", "1235")
+    assert init_mod.resolve_linux_ugid(0, 0) == (1234, 1235)
+    assert init_mod.resolve_linux_ugid(1500, 1501) == (1500, 1501)
+    monkeypatch.setenv("SUDO_UID", "0")
+    assert init_mod.resolve_linux_ugid(0, 0) == (1000, 1000)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux-Pfade")
+def test_selinux_label_refuses_system_and_home_dirs(installer, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = Path("/home/anna")
+    sicher = {
+        "ARGUS_WORKSPACE_DIR": "/home/anna/argus/workspace",
+        "ARGUS_EVALS_DIR": "/home/anna/argus/workspace/Evals",
+        "ARGUS_MODELS_DIR": "/srv/argus/models",
+    }
+    assert installer.relabel_blockers(repo, sicher, home=home) == []
+    for key, bad in (("ARGUS_WORKSPACE_DIR", "/home/anna"), ("ARGUS_MODELS_DIR", "/srv"),
+                     ("ARGUS_EVALS_DIR", "/home/bernd"), ("ARGUS_WORKSPACE_DIR", "/")):
+        blockers = installer.relabel_blockers(repo, dict(sicher, **{key: bad}), home=home)
+        assert blockers and blockers[0].startswith(key), (key, bad, blockers)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SELinux gibt es nur unter Linux")
+def test_doctor_and_installer_selinux_label(installer, tmp_path, monkeypatch):
+    enforce_f = tmp_path / "enforce"
+    enforce_f.write_text("1\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+    shutil.copy2(_SCRIPT.parent.parent / ".env.example", repo / ".env.example")
+    dirs = {
+        "ARGUS_WORKSPACE_DIR": str(tmp_path / "ws"),
+        "ARGUS_EVALS_DIR": str(tmp_path / "ws" / "Evals"),
+        "ARGUS_MODELS_DIR": str(tmp_path / "models"),
+    }
+
+    r = installer.doctor_check_selinux(enforce_f, repo, dirs)
+    assert r.status == "WARNUNG" and "ARGUS_MOUNT_LABEL" in r.message
+    labelled = dict(dirs, ARGUS_MOUNT_LABEL=",z")
+    assert installer.doctor_check_selinux(enforce_f, repo, labelled).status == "OK"
+    r_bad = installer.doctor_check_selinux(enforce_f, repo, dict(labelled, ARGUS_WORKSPACE_DIR="/home"))
+    assert r_bad.status == "FEHLER" and "ARGUS_WORKSPACE_DIR=/home" in r_bad.message
+
+    init_mod = installer._load_init_stack_module(repo)
+    init_mod.write_env_file(repo / ".env", (repo / ".env.example").read_text(encoding="utf-8"), dirs)
+    assert installer.configure_selinux_label(repo, non_interactive=True) is True
+    parsed = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert parsed["ARGUS_MOUNT_LABEL"] == ",z"
+    #--- Ein Home-Verzeichnis als Arbeitsordner: kein Label, Hinweis auf Unterordner.
+    (repo / ".env").unlink()
+    init_mod.write_env_file(repo / ".env", (repo / ".env.example").read_text(encoding="utf-8"),
+                            dict(dirs, ARGUS_WORKSPACE_DIR=str(Path.home())))
+    assert installer.configure_selinux_label(repo, non_interactive=True) is False
+    assert "ARGUS_MOUNT_LABEL" not in init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))

@@ -35,6 +35,8 @@ jobs:
             --tmpfs /tmp:size=256m,noexec \
             --security-opt no-new-privileges:true \
             --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --ipc private --sysctl kernel.shmmni=0 --sysctl kernel.shmall=0 \
+            --sysctl kernel.msgmni=0 --sysctl "kernel.sem=0 0 0 0" \
             --memory 512m --cpus 1.0 --pids-limit 256 \
             -e PYTHONDONTWRITEBYTECODE=1 \
             argus-sandbox-test

@@ -419,10 +419,10 @@
       </div>
       <div class="panel-content collapsed" id="audit-panel">
         <div class="panel-toolbar">
-          <button id="btnCopyAuditPath" class="eval-btn eval-btn-blue" data-path="C:\Argus_Workspace\Evals\Action_Audit"
-                  title="Pfad in die Zwischenablage -- im Explorer mit Strg+V in die Adresszeile"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
+          <button id="btnCopyAuditPath" class="eval-btn eval-btn-blue" data-path="" data-unterordner="Action_Audit"
+                  title="Pfad in die Zwischenablage"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
           <button id="btnClearAudit" class="eval-btn eval-btn-magenta"><i data-icon="trash" data-icon-groesse="13"></i>Audit-DB leeren</button>
-          <span class="muted" style="font-size: 0.78rem;">JSONL-Dateien bleiben in C:\Argus_Workspace\Evals\Action_Audit\ erhalten</span>
+          <span class="muted" style="font-size: 0.78rem;">JSONL-Dateien bleiben in <span id="auditHostDir">Evals-Ordner/Action_Audit</span> erhalten</span>
         </div>
         <table class="audit-tabelle"><thead><tr><th>ZEIT</th><th>WERKZEUG</th><th>KLASSE</th><th>STATUS</th><th>LATENZ</th></tr></thead><tbody id="audit"></tbody></table>
         <div class="muted" id="auditEmpty" style="margin-top:10px;">Auditprotokoll leer.</div>
@@ -438,10 +438,10 @@
       <div class="panel-content collapsed" id="evals-panel">
         <div class="panel-toolbar">
           <button id="btnOpenFolder" class="eval-btn eval-btn-blue"><i data-icon="folder" data-icon-groesse="13"></i>Run-Logs anzeigen</button>
-          <button id="btnCopyEvalPath" class="eval-btn eval-btn-blue" data-path="C:\Argus_Workspace\Evals\Run_Logs"
-                  title="Pfad in die Zwischenablage -- im Explorer mit Strg+V in die Adresszeile"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
+          <button id="btnCopyEvalPath" class="eval-btn eval-btn-blue" data-path="" data-unterordner="Run_Logs"
+                  title="Pfad in die Zwischenablage"><i data-icon="copy" data-icon-groesse="13"></i>Ordnerpfad kopieren</button>
           <button id="btnClearEvals" class="eval-btn eval-btn-magenta"><i data-icon="trash" data-icon-groesse="13"></i>Verlauf l&ouml;schen</button>
-          <span class="muted" style="font-size: 0.78rem; margin-left: 8px;">C:\Argus_Workspace\Evals\Run_Logs\</span>
+          <span class="muted" style="font-size: 0.78rem; margin-left: 8px;" id="evalHostDir">Evals-Ordner/Run_Logs</span>
         </div>
         <table><thead><tr><th>Zeitstempel</th><th>Suite</th><th>Konfiguration</th><th>Metrik</th><th>Wert</th></tr></thead><tbody id="evals"></tbody></table>
         <div class="muted" id="evalsEmpty" style="margin-top:10px;">Keine Eval-Datens&auml;tze gefunden.</div>

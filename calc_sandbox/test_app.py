@@ -198,6 +198,25 @@ def test_two_consecutive_runs_isolate_files_and_tmp():
 
 
 @nur_im_container
+def test_sysv_ipc_is_disabled_but_multiprocessing_works():
+    """SysV-Objekte (shmget, msgget, semget) ueberlebten das Aufraeumen zwischen zwei
+    Laeufen und gehoerten alle dem Benutzer runner. Die sysctls aus compose schalten sie
+    ab; multiprocessing nutzt POSIX-Semaphoren und laeuft weiter."""
+    code = (
+        "import ctypes, ctypes.util, multiprocessing as mp\n"
+        "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+        "shm = libc.shmget(0, ctypes.c_size_t(4096), 0o1600)\n"
+        "msg = libc.msgget(0, 0o1600)\n"
+        "sem = libc.semget(0, 1, 0o1600)\n"
+        "q = mp.Queue(); q.put(7)\n"
+        "print(f'SHM:{shm},MSG:{msg},SEM:{sem},MP:{q.get(timeout=5)}')\n"
+    )
+    res = _exec_code(code, "python", timeout=10.0, files=[])
+    assert "error" not in res, res
+    assert "SHM:-1,MSG:-1,SEM:-1,MP:7" in res.get("result", "")
+
+
+@nur_im_container
 def test_forked_background_process_is_killed():
     if not hasattr(os, "fork") or not os.path.exists("/proc"):
         pytest.skip("Test erfordert os.fork und /proc (Linux-Sandbox)")

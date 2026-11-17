@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 408 for the backend, 72 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 416 for the backend, 73 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -337,8 +337,8 @@ These are known and not solved yet:
 - Long-term memory is currently not updated during normal chat. Conversations with company
   data never enter it, and the file tools cannot write it.
 - Runs of different accounts share one sandbox container and one sandbox user; they are
-  separated by the cleanup between runs. A container per run would be the stronger
-  separation.
+  separated by the cleanup between runs (processes, `/tmp`, `/dev/shm`; SysV IPC is switched
+  off). A container per run would be the stronger separation.
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); entries the SIEM does not receive are not re-sent.
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
@@ -347,8 +347,8 @@ These are known and not solved yet:
   stack; for an offer to third parties both should be optional or replaceable.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
-  the stack has not yet been started on a real Linux server. With SELinux enforcing, the bind
-  mounts need labels (`:z`); `doctor` warns about it.
+  the stack has not yet been started on a real Linux server. With SELinux enforcing the
+  installer sets `ARGUS_MOUNT_LABEL=,z`; this has not been tried on a real SELinux system.
 - Image input is not switched on yet (the model service does not load the mmproj file), and
   PDFs without a text layer (scans) are skipped when documents are indexed. The intended way
   is the multimodal model itself, not a separate OCR.
@@ -361,7 +361,10 @@ Tested on Windows 11 with Docker Desktop (WSL2). Linux with Docker Engine and th
 Container Toolkit is intended but not yet tested on real hardware. On Linux the installer
 writes the installing user's ids as `ARGUS_UID`/`ARGUS_GID` to `.env`, so the backend can write
 to the workspace, and gives `API_Tokens/` mode `0700` with `0644` files, so containers can read
-the mounted secrets while other users of the machine cannot. Requirements: an NVIDIA GPU
+the mounted secrets while other users of the machine cannot. Install without `sudo`, as a
+member of the `docker` group; the installer says so when the group is missing and warns when
+it runs under `sudo`. With SELinux enforcing it offers the `:z` label for all bind mounts
+(`ARGUS_MOUNT_LABEL=,z`) and refuses it for system folders or a whole home directory. Requirements: an NVIDIA GPU
 (measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models.
 
 **Guided setup:** run `install.cmd` on Windows (double-click) or `./install.sh` on Linux. It

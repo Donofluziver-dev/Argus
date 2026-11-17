@@ -1726,7 +1726,7 @@ async def _store_text_in_qdrant(filename: str, content: str, source: str) -> str
 async def ingest_document(path: str) -> str:
     """Reads a file or an entire directory from the given path and permanently stores the
     contents in the knowledge base (Qdrant). Supports PDF, DOCX, EPUB, HTML, TXT/MD/code etc.
-    'path' must lie inside the Argus workspace."""
+    'path' must lie inside the Argus workspace, given relative to it (e.g. 'Uploads/bericht.pdf')."""
     try:
         from rag_backend.ingest import load_file
         cpath = _win_to_container(path)
@@ -1738,8 +1738,9 @@ async def ingest_document(path: str) -> str:
             elif not cpath.is_file():
                 return f"ERROR: Path does not exist or is invalid: {path}"
         else:
-            return (f"ERROR: '{path}' is outside {_WORKSPACE_WIN}. Only files inside the "
-                    f"workspace can be ingested -- upload the file first.")
+            return (f"ERROR: '{path}' is outside the workspace. Only files inside the "
+                    f"workspace can be ingested (paths relative to it, e.g. 'Uploads/bericht.pdf') "
+                    f"-- upload the file first.")
 
         if is_dir:
             # Ordner-Ingest
@@ -1824,8 +1825,9 @@ async def read_document(path: str) -> str:
             # Administrator oder Hintergrund/Test ohne Kontext: zusaetzlich Zugriff auf den Arbeitsordner
             cpath = _win_to_container(path)
             if cpath is None:
-                return (f"ERROR: '{path}' is outside {_WORKSPACE_WIN}. Reading stays inside the "
-                        f"workspace -- upload the file first.")
+                return (f"ERROR: '{path}' is outside the workspace. Reading stays inside the "
+                        f"workspace (paths relative to it, e.g. 'Uploads/bericht.pdf') -- upload "
+                        f"the file first.")
         else:
             # Fuer die Rolle 'user' ist NUR der eigene Bereich erlaubt (ein blosser Dateiname heisst Dateien/...)
             if not user_id:

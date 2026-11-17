@@ -388,3 +388,44 @@ def test_readable_extensions_single_source():
     for ext in ingest.READABLE_EXTENSIONS:
         assert f'"{ext}"' in quelle, f"{ext} hat keinen Zweig in load_file"
     assert _INGESTABLE_EXTENSIONS <= ingest.READABLE_EXTENSIONS
+
+
+# ==============================================================================
+# Pfade ohne Windows: was das Modell und der Monitor zu sehen bekommen
+# ==============================================================================
+
+
+def test_fs_tools_answer_with_workspace_relative_paths(tmp_path, monkeypatch):
+    from rag_backend.mcp_servers import filesystem as fs_mcp
+    monkeypatch.setattr(fs_mcp, "WORKSPACE_CONTAINER", tmp_path)
+    monkeypatch.setattr(fs_mcp, "_audit", lambda *a, **k: None)
+    monkeypatch.setattr(fs_mcp, "_central_audit", lambda *a, **k: None)
+    #--- Lesen markiert sonst das Test-Gespraech als sensibel, und die Sperre
+    #--- traefe spaetere Tests (cloud_ask).
+    monkeypatch.setattr("rag_backend.egress_guard.mark_sensitive_source", lambda *a, **k: None)
+    (tmp_path / "Uploads").mkdir()
+    (tmp_path / "Uploads" / "a.txt").write_text("x", encoding="utf-8")
+
+    assert fs_mcp.fs_list_directory() == "Uploads/"
+    assert fs_mcp.fs_list_directory("Uploads", recursive=True) == "Uploads/a.txt"
+    assert fs_mcp.fs_write_file("Notizen/n.txt", "hallo").startswith("OK written: Notizen/n.txt (")
+    assert fs_mcp.fs_mkdir("Neu/Unter") == "OK created: Neu/Unter"
+    #--- Windows-Pfade aus frueheren Gespraechen gelten als Eingabe weiter.
+    assert fs_mcp.fs_read_file(r"C:\Argus_Workspace\Uploads\a.txt") == "x"
+    with pytest.raises(PermissionError, match="relative to it") as exc:
+        fs_mcp.fs_read_file("/etc/passwd")
+    assert "C:\\" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_read_document_outside_workspace_names_no_windows_path():
+    res = await agent.read_document.ainvoke({"path": "/etc/passwd"})
+    assert res.startswith("ERROR") and "C:\\" not in res and "Argus_Workspace" not in res
+
+
+def test_evals_endpoint_reports_host_dir(client, monkeypatch):
+    monkeypatch.setenv("ARGUS_EVALS_DIR_HOST", "/srv/argus/evals")
+    _make_account(client, "admin_evals", "einLangesPasswort", "admin")
+    r = client.get("/v1/dashboard/evals", headers=DASH_ORIGIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["host_dir"] == "/srv/argus/evals"

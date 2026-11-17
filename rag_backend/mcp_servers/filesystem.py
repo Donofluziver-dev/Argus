@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Argus MCP-Filesystem-Server.
 
-Path-Whitelist: C:\\Argus_Workspace (Container-Mount: /host/argus_workspace).
+Path-Whitelist: der Arbeitsordner (Container-Mount: /host/argus_workspace).
+Pfade gelten relativ zum Arbeitsordner ("Uploads/bericht.pdf") und werden so auch
+ausgegeben; C:\\Argus_Workspace\\... aus aelteren Gespraechen wird weiter angenommen.
 Tools: fs_read_file, fs_write_file, fs_list_directory, fs_mkdir.
 fs_delete bewusst weggelassen: Loeschen gibt es ueber diese Werkzeuge nicht.
 """
@@ -44,8 +46,8 @@ def _to_container(path_str: str) -> Path:
     _is_drive = len(s) >= 2 and s[1] == ":" and s[0].isalpha()
     if _is_drive or s.startswith("/"):
         raise PermissionError(
-            f"Path '{path_str}' is outside the allowed workspace ({WORKSPACE_WIN}). "
-            f"The fs_* tools only see the workspace."
+            f"Path '{path_str}' is outside the workspace. The fs_* tools only see the "
+            f"workspace; give paths relative to it, e.g. 'Uploads/bericht.pdf'."
         )
     #--- Relative Pfade als Workspace-Relativ interpretieren (auch in Windows-Schreibweise)
     rel = s.lstrip("/\\").replace("\\", "/")
@@ -101,7 +103,7 @@ def _enforce_whitelist(path: Path) -> Path:
         real.relative_to(workspace_real)
     except ValueError:
         raise PermissionError(
-            f"Path outside workspace whitelist ({WORKSPACE_WIN}): {path}"
+            f"Path outside the workspace: {path}"
         )
     if _is_user_isolated_path(path, workspace_real) or _is_user_isolated_path(real, workspace_real):
         raise PermissionError(
@@ -131,7 +133,7 @@ def _enforce_writable(real: Path) -> Path:
     try:
         parts = real.relative_to(workspace_real).parts
     except ValueError:
-        raise PermissionError(f"Path outside workspace whitelist ({WORKSPACE_WIN}): {real}")
+        raise PermissionError(f"Path outside the workspace: {real}")
     if parts and parts[0].lower() in _READONLY_SUBDIRS:
         raise PermissionError(
             f"Write access denied: '{parts[0]}/' is read-only (prompt files, evaluation "
@@ -144,17 +146,17 @@ def _enforce_writable(real: Path) -> Path:
     return real
 
 
-def _to_windows(real_path: Path) -> str:
-    """Konvertiert Container-Pfad zurueck zu Windows-Pfad fuer Output."""
+def _to_display(real_path: Path) -> str:
+    """Container-Pfad -> Pfad relativ zum Arbeitsordner fuer Ausgabe und Audit
+    ("Uploads/bericht.pdf", der Arbeitsordner selbst ist "."). Kein Windows-Pfad:
+    Auf einem Linux-Server gibt es ihn nicht."""
     workspace_real = WORKSPACE_CONTAINER.resolve(strict=False)
     try:
         rel = real_path.relative_to(workspace_real)
     except ValueError:
         return str(real_path)
-    rel_str = str(rel).replace("/", "\\")
-    if rel_str in (".", ""):
-        return WORKSPACE_WIN
-    return f"{WORKSPACE_WIN}\\{rel_str}"
+    rel_str = rel.as_posix()
+    return rel_str if rel_str not in ("", ".") else "."
 
 
 def _audit(op: str, path: str, content: Optional[str] = None) -> None:
@@ -183,7 +185,7 @@ def _central_audit(tool: str, op: str, path: str, content: Optional[str] = None)
 
 @mcp.tool()
 def fs_read_file(path: str) -> str:
-    """Reads a file in the Argus workspace. Path as a Windows path (e.g. C:\\Argus_Workspace\\Temp\\foo.py) or relative to the workspace.
+    """Reads a file in the Argus workspace. Path relative to the workspace (e.g. Uploads/bericht.txt).
 
     Returns: complete file content as a string. Raises PermissionError if the
     path is outside the whitelist. Raises FileNotFoundError if the file does
@@ -197,7 +199,7 @@ def fs_read_file(path: str) -> str:
     _max = int(os.getenv("FS_READ_MAX_CHARS", "20000"))
     if len(content) > _max:
         content = content[:_max] + f"\n... [file truncated after {_max} chars -- read on selectively]"
-    _audit("read", _to_windows(p))
+    _audit("read", _to_display(p))
     if content:
         try:
             from rag_backend.egress_guard import mark_sensitive_source
@@ -222,23 +224,23 @@ def fs_write_file(path: str, content: str) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup = p.with_name(p.name + f".bak.{ts}")
         shutil.copy2(p, backup)
-        backup_info = f" (Backup: {_to_windows(backup)})"
-        _audit("backup", _to_windows(backup))
+        backup_info = f" (Backup: {_to_display(backup)})"
+        _audit("backup", _to_display(backup))
     p.write_text(content, encoding="utf-8")
-    _audit("write", _to_windows(p), content)
-    _central_audit("fs_write_file", "write", _to_windows(p), content)
-    return f"OK written: {_to_windows(p)} ({len(content)} chars){backup_info}"
+    _audit("write", _to_display(p), content)
+    _central_audit("fs_write_file", "write", _to_display(p), content)
+    return f"OK written: {_to_display(p)} ({len(content)} chars){backup_info}"
 
 
 @mcp.tool()
-def fs_list_directory(path: str = "C:\\Argus_Workspace", recursive: bool = False) -> str:
+def fs_list_directory(path: str = ".", recursive: bool = False) -> str:
     """Lists files and subdirectories in the Argus workspace. Default path is the workspace root.
 
     Args:
-        path: directory (Windows path or relative).
+        path: directory relative to the workspace ('.' is the workspace root).
         recursive: if True, list all files in subfolders recursively.
 
-    Returns: newline-separated list of paths (directories with a trailing backslash).
+    Returns: newline-separated list of paths relative to the workspace (directories with a trailing slash).
     """
     p = _enforce_whitelist(_to_container(path))
     if not p.is_dir():
@@ -249,15 +251,15 @@ def fs_list_directory(path: str = "C:\\Argus_Workspace", recursive: bool = False
         for f in sorted(p.rglob("*")):
             if _is_user_isolated_path(f, workspace_real):
                 continue
-            suffix = "\\" if f.is_dir() else ""
-            items.append(f"{_to_windows(f)}{suffix}")
+            suffix = "/" if f.is_dir() else ""
+            items.append(f"{_to_display(f)}{suffix}")
     else:
         for f in sorted(p.iterdir()):
             if _is_user_isolated_path(f, workspace_real):
                 continue
-            suffix = "\\" if f.is_dir() else ""
-            items.append(f"{_to_windows(f)}{suffix}")
-    _audit("list", _to_windows(p))
+            suffix = "/" if f.is_dir() else ""
+            items.append(f"{_to_display(f)}{suffix}")
+    _audit("list", _to_display(p))
     if items:
         try:
             from rag_backend.egress_guard import mark_sensitive_source
@@ -276,16 +278,16 @@ def fs_mkdir(path: str) -> str:
     p = _enforce_whitelist(_to_container(path))
     _enforce_writable(p)
     p.mkdir(parents=True, exist_ok=True)
-    _audit("mkdir", _to_windows(p))
-    _central_audit("fs_mkdir", "mkdir", _to_windows(p), None)
-    return f"OK created: {_to_windows(p)}"
+    _audit("mkdir", _to_display(p))
+    _central_audit("fs_mkdir", "mkdir", _to_display(p), None)
+    return f"OK created: {_to_display(p)}"
 
 
 def main():
     if not WORKSPACE_CONTAINER.exists():
         log.warning("Workspace-Mount %s nicht vorhanden -- docker-compose Bind-Mount pruefen.", WORKSPACE_CONTAINER)
     else:
-        log.info("Workspace-Whitelist: %s -> %s", WORKSPACE_WIN, WORKSPACE_CONTAINER)
+        log.info("Workspace-Whitelist: %s", WORKSPACE_CONTAINER)
     mcp.run()
 
 

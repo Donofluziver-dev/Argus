@@ -1637,7 +1637,9 @@ async def dashboard_evals(admin: User = Depends(dashboard_admin)):
         rows.sort(key=lambda r: (r["ts"] or ""), reverse=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Konnte Eval-Logs nicht lesen: {e}")
-    return {"evals": rows}
+    #--- Host-Pfad nur zur Anzeige (Knopf "Ordnerpfad kopieren"); setzt compose aus
+    #--- ARGUS_EVALS_DIR. Unter Linux ist das kein C:\-Pfad.
+    return {"evals": rows, "host_dir": os.getenv("ARGUS_EVALS_DIR_HOST", "")}
 
 
 @app.delete("/v1/dashboard/evals", tags=["Dashboard"])
@@ -2617,7 +2619,7 @@ async def dashboard_upload_ingest(name: str, admin: User = Depends(dashboard_adm
                                 "message": "Kein Text lesbar (Bild-PDF oder leeres Dokument?)."})
                 continue
             msg = await _store_text_in_qdrant(
-                label, text, source=f"C:\\Argus_Workspace\\Uploads\\{name}")
+                label, text, source=f"Uploads/{name}")
             failed = msg.startswith("ERROR")
             results.append({"file": label, "status": "fehler" if failed else "ok",
                             "message": msg})

@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 408 für das Backend, 72 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 416 für das Backend, 73 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -519,8 +519,9 @@ sollte sie kennen.
   fortgeschrieben. Gespräche mit Firmendaten gehen nie hinein, und die Datei-Werkzeuge können
   sie nicht schreiben.
 - **Sandbox:** Läufe verschiedener Konten teilen sich einen Container und einen Benutzer der
-  Sandbox. Getrennt werden sie durch das Aufräumen zwischen den Läufen. Ein Container je Lauf
-  wäre die stärkere Trennung.
+  Sandbox. Getrennt werden sie durch das Aufräumen zwischen den Läufen (Prozesse, `/tmp`,
+  `/dev/shm`; SysV-IPC ist ganz abgeschaltet). Ein Container je Lauf wäre die stärkere
+  Trennung.
 - **Name in der Anrede:** Er leitet sich aus dem Kontonamen ab; mit SSO käme er aus dem
   Verzeichnis.
 - **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
@@ -537,9 +538,9 @@ sollte sie kennen.
   prüft selbst.
 - **Installation unter Linux:** Rechte für Geheimnisse und Arbeitsordner sind unter Linux
   nachgestellt und getestet, der Stapel ist aber noch nicht auf einem echten Linux-Server
-  gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) brauchen die
-  Einbindungen Labels (`:z`); `doctor` warnt davor. Wer nicht in der Gruppe `docker` ist,
-  sollte nicht mit `sudo` installieren, sondern sich in die Gruppe aufnehmen lassen.
+  gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) setzt die
+  Installation `ARGUS_MOUNT_LABEL=,z`; auf einem echten SELinux-System ist das noch nicht
+  ausprobiert.
 - **Bilder und Scans:** Oberfläche und Backend können Bilder an das Modell weitergeben
   (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj)
   noch nicht; Bildeingabe ist aus und nicht getestet. PDFs ohne Textebene (Scans) überspringt
@@ -557,6 +558,13 @@ Getestet unter Windows 11 mit Docker Desktop (WSL2). Linux mit Docker Engine und
 Container Toolkit ist vorgesehen, aber noch nicht auf echter Hardware durchgetestet. Unter
 Linux trägt die Installation die Nutzerkennung dessen, der installiert, als `ARGUS_UID` und
 `ARGUS_GID` in die `.env` ein; das Backend läuft damit und kann in den Arbeitsordner schreiben.
+Installiert wird ohne `sudo`, als Mitglied der Gruppe `docker` (`sudo usermod -aG docker
+$USER`, danach neu anmelden). Fehlt die Gruppe, sagt die Installation das, statt einen
+stehenden Docker-Dienst zu melden. Läuft sie doch über `sudo`, warnt sie und nimmt den Nutzer
+hinter `sudo` als `ARGUS_UID`. Mit SELinux im Modus `enforcing` fragt sie, ob die
+Einbindungen das Label `:z` bekommen (`ARGUS_MOUNT_LABEL=,z`). Für System- oder ganze
+Home-Ordner (etwa `/home/anna` als Arbeitsordner) lehnt sie das ab, weil Docker sonst auch
+`~/.ssh` umbeschriften würde.
 
 **Voraussetzungen:** eine NVIDIA-Karte (gemessen mit 16 GB), 32 GB Arbeitsspeicher, rund
 30 GB Platz für die Modelle.
@@ -594,8 +602,8 @@ unter Linux):
 - `doctor` prüft nur, ändert nichts: Docker und GPU, Arbeitsspeicher und Platz, `.env` gegen
   `.env.example`, Geheimnisse und Ordnerrechte, Modelle (mit `--verify-models` auch per
   SHA-256), Netz-Abschottung, den TLS-Proxy (Name in `TRUSTED_HOSTS` und
-  `DASHBOARD_ORIGINS`, Datenordner, Zertifikat für `ARGUS_UID` lesbar), Zustand des Stapels
-  und riskante Schalter wie `CLOUD_MISSION_AUTO_APPROVE=true`. Werte von Geheimnissen gibt es
+  `DASHBOARD_ORIGINS`, Datenordner, Zertifikat für `ARGUS_UID` lesbar), Zustand des Stapels,
+  unter Linux SELinux samt Label und riskante Schalter wie `CLOUD_MISSION_AUTO_APPROVE=true`. Werte von Geheimnissen gibt es
   nie aus.
 - `reset-password <konto>` setzt das Passwort eines Kontos zurück, auch des letzten
   Administrators. Es fragt das neue Passwort verdeckt ab, beendet alle Sitzungen des Kontos und

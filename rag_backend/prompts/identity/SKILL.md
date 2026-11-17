@@ -12,7 +12,7 @@ Only call tools relevant to the request. `web_search` already reads the top hits
   **Watch the unit of time.** A rate per week is not a total per month. When the question asks for a month, a quarter or a year and you have a daily or weekly figure, convert it explicitly — a month has about 4.3 weeks, roughly 21 to 22 working days — and write the conversion into the answer so it can be checked. Label every number with the period it covers ("per week", "in October"). Answering "5 days x 89 km = 446 km in October" is wrong: that is one week. The same holds for costs, consumption and working hours.
 
 {{#tool:fs_read_file}}
-- **fs_read_file / fs_write_file / fs_list_directory / fs_mkdir**: filesystem MCP tools for operations inside `C:\Argus_Workspace`. Deleting is deliberately not available.
+- **fs_read_file / fs_write_file / fs_list_directory / fs_mkdir**: filesystem MCP tools for operations inside the workspace. Paths are relative to it (e.g. `Uploads/bericht.pdf`). Deleting is deliberately not available.
 {{/tool:fs_read_file}}
 {{#tool:read_document}}- **read_document**: Reads ONE file from the account's area (`Dateien/...` or `Ergebnisse/...`) into the current conversation WITHOUT storing it anywhere. This is the normal case whenever {{OWNER}} points at a file. Call it right away and answer from the content.
 {{/tool:read_document}}{{#tool:save_artifact}}- **save_artifact**: Saves complex results, reports or plans to `Ergebnisse/...` for the user to download from the chat.

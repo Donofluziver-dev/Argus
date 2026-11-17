@@ -189,12 +189,17 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
 
 def resolve_linux_ugid(euid: int | None = None, egid: int | None = None) -> tuple[int, int]:
     """Ermittelt (ARGUS_UID, ARGUS_GID) unter Linux.
-    Laeuft die Installation als root (UID 0), wird 1000:1000 verwendet."""
+    Laeuft die Installation als root (UID 0), gilt der Nutzer hinter sudo (SUDO_UID,
+    SUDO_GID); ohne sudo 1000:1000. 1000 kann auf einem Server jemand anderem gehoeren."""
     if euid is None:
         euid = os.geteuid() if hasattr(os, "geteuid") else 1000
     if egid is None:
         egid = os.getegid() if hasattr(os, "getegid") else 1000
     if euid == 0:
+        sudo_uid = (os.environ.get("SUDO_UID") or "").strip()
+        sudo_gid = (os.environ.get("SUDO_GID") or "").strip()
+        if sudo_uid.isdigit() and int(sudo_uid) > 0:
+            return int(sudo_uid), int(sudo_gid) if sudo_gid.isdigit() else int(sudo_uid)
         return 1000, 1000
     return int(euid), int(egid)
 

@@ -250,6 +250,36 @@ def run_command(cmd: list[str]) -> tuple[int, str, str]:
         return 1, "", str(exc)
 
 
+def docker_permission_hint(stderr: str) -> str | None:
+    """Unter Linux: 'permission denied' am Docker-Socket heisst, der Benutzer ist nicht
+    in der Gruppe docker -- nicht, dass der Dienst steht."""
+    low = (stderr or "").lower()
+    if "permission denied" in low and "docker" in low:
+        return ("Ihr Benutzer darf Docker nicht ansprechen. Naechster Schritt: "
+                "sudo usermod -aG docker $USER, danach ab- und wieder anmelden "
+                "(oder newgrp docker) und ./install.sh ohne sudo erneut starten.")
+    return None
+
+
+def warn_if_sudo(non_interactive: bool = False, env: dict[str, str] | None = None,
+                 euid: int | None = None) -> bool:
+    """Warnt, wenn die Installation unter Linux ueber sudo laeuft. Dann gehoeren .env
+    und API_Tokens/ root, und jeder spaetere docker-compose-Aufruf braucht ebenfalls
+    sudo. Gibt False zurueck, wenn abgebrochen werden soll."""
+    env = os.environ if env is None else env
+    if euid is None:
+        euid = os.geteuid() if hasattr(os, "geteuid") else 1000
+    if os.name == "nt" or euid != 0 or not env.get("SUDO_USER"):
+        return True
+    print("Hinweis: Die Installation laeuft ueber sudo. Dann gehoeren .env und API_Tokens/")
+    print("root, und auch spaetere Aufrufe von docker compose brauchen sudo. Empfohlen ist,")
+    print("den Benutzer in die Gruppe docker aufzunehmen und ./install.sh ohne sudo zu starten:")
+    print("  sudo usermod -aG docker $USER   (danach ab- und wieder anmelden)")
+    if non_interactive:
+        return True
+    return prompt_bool("Trotzdem mit sudo fortfahren?", default=False)
+
+
 def check_docker_environment(non_interactive: bool = False) -> None:
     """Prueft Docker, Docker Compose und NVIDIA Container Toolkit."""
     rc_ver, _, _ = run_command(["docker", "version"])
@@ -332,10 +362,14 @@ def check_docker_environment(non_interactive: bool = False) -> None:
             print("  https://docs.docker.com/engine/install/")
             sys.exit(1)
 
-        rc_info, info_out, _ = run_command(["docker", "info"])
+        rc_info, info_out, info_err = run_command(["docker", "info"])
         if rc_info != 0:
-            print("\nDocker-Dienst laeuft nicht (docker info fehlgeschlagen).")
-            print("Bitte starten Sie den Docker-Dienst: sudo systemctl start docker")
+            hint = docker_permission_hint(info_err)
+            if hint:
+                print(f"\n{hint}")
+            else:
+                print("\nDocker-Dienst laeuft nicht (docker info fehlgeschlagen).")
+                print("Bitte starten Sie den Docker-Dienst: sudo systemctl start docker")
             sys.exit(1)
 
         # NVIDIA Container Toolkit pruefen
@@ -782,8 +816,11 @@ def doctor_check_docker() -> DoctorResult:
             "Docker oder Docker Compose v2 fehlt. Naechster Schritt: Docker installieren (https://docs.docker.com/engine/install/).",
         )
 
-    rc_info, info_out, _ = run_command(["docker", "info"])
+    rc_info, info_out, info_err = run_command(["docker", "info"])
     if rc_info != 0:
+        perm = docker_permission_hint(info_err) if os.name != "nt" else None
+        if perm:
+            return DoctorResult("FEHLER", "Docker", perm)
         hint = "Docker Desktop starten" if os.name == "nt" else "sudo systemctl start docker"
         return DoctorResult(
             "FEHLER",
@@ -1259,30 +1296,110 @@ def doctor_check_switches(env_data: dict[str, str]) -> list[DoctorResult]:
     return warnings
 
 
-def doctor_check_selinux(enforce_file: Path = Path("/sys/fs/selinux/enforce")) -> DoctorResult:
-    """Prueft unter Linux, ob SELinux im Modus enforcing laeuft."""
+def selinux_enforcing(enforce_file: Path = Path("/sys/fs/selinux/enforce")) -> bool:
+    """True, wenn SELinux unter Linux im Modus enforcing laeuft."""
     if os.name == "nt":
-        return DoctorResult("OK", "SELinux", "Unter Windows nicht zutreffend.")
-
-    enforcing = False
+        return False
     try:
         if enforce_file.exists() and enforce_file.read_text(encoding="utf-8").strip() == "1":
-            enforcing = True
+            return True
     except OSError:
         pass
-
-    if not enforcing and shutil.which("getenforce"):
+    if shutil.which("getenforce"):
         rc, out, _ = run_command(["getenforce"])
         if rc == 0 and out.strip().lower() == "enforcing":
-            enforcing = True
+            return True
+    return False
 
-    if enforcing:
+
+#--- Mit :z beschriftet Docker den eingebundenen Ordner samt Inhalt um. Fuer System-
+#--- ordner oder ein ganzes Home-Verzeichnis waere das schaedlich: ~/.ssh verloere sein
+#--- Label, und sshd laese die Schluessel nicht mehr.
+_RELABEL_FORBIDDEN = {
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt",
+    "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+}
+
+
+def relabel_blockers(repo_root: Path, env_data: dict[str, str],
+                     home: Path | None = None) -> list[str]:
+    """Eingebundene Ordner, die :z nicht umbeschriften darf (Systemordner, ein ganzes
+    Home-Verzeichnis). Leer = unbedenklich."""
+    home = (home or Path.home()).resolve(strict=False)
+    data_dir, tls_dir = proxy_dirs(repo_root, env_data)
+    candidates = [
+        ("ARGUS_WORKSPACE_DIR", _effective_dir(repo_root, env_data, "ARGUS_WORKSPACE_DIR")[0]),
+        ("ARGUS_EVALS_DIR", _effective_dir(repo_root, env_data, "ARGUS_EVALS_DIR")[0]),
+        ("ARGUS_MODELS_DIR", _effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]),
+        ("ARGUS_PROXY_DATA_DIR", str(data_dir)),
+        ("ARGUS_TLS_DIR", str(tls_dir)),
+    ]
+    out = []
+    for key, raw in candidates:
+        if not raw:
+            continue
+        p = Path(raw).resolve(strict=False)
+        posix = p.as_posix()
+        if posix in _RELABEL_FORBIDDEN or p == home or p.parent.as_posix() == "/home":
+            out.append(f"{key}={posix}")
+    return out
+
+
+def configure_selinux_label(repo_root: Path, non_interactive: bool = False) -> bool:
+    """Setzt unter SELinux (enforcing) ARGUS_MOUNT_LABEL=,z in der .env, damit die
+    Container die eingebundenen Ordner lesen duerfen. Verweigert das fuer System- und
+    ganze Home-Ordner."""
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+    if "z" in (env_data.get("ARGUS_MOUNT_LABEL") or "").lower():
+        return True
+    print("SELinux laeuft im Modus enforcing. Ohne Label duerfen die Container die")
+    print("eingebundenen Ordner nicht lesen.")
+    blockers = relabel_blockers(repo_root, env_data)
+    if blockers:
+        print("  Das Label :z wuerde ganze System- oder Home-Ordner umbeschriften:")
+        for b in blockers:
+            print(f"    {b}")
+        print("  Bitte Unterordner waehlen (etwa ~/argus/workspace) und die Installation erneut starten.")
+        return False
+    if not prompt_bool("Sollen die Einbindungen das SELinux-Label :z bekommen (empfohlen)?",
+                       default=True, non_interactive=non_interactive):
+        print("  Ohne Label starten die Dienste nicht; spaeter ARGUS_MOUNT_LABEL=,z in die .env eintragen.")
+        return False
+    template_path = repo_root / ".env.example"
+    template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
+    init_mod.write_env_file(env_path, template_text, {"ARGUS_MOUNT_LABEL": ",z"})
+    print("  ARGUS_MOUNT_LABEL=,z gesetzt.")
+    return True
+
+
+def doctor_check_selinux(enforce_file: Path = Path("/sys/fs/selinux/enforce"),
+                         repo_root: Path | None = None,
+                         env_data: dict[str, str] | None = None) -> DoctorResult:
+    """Prueft unter Linux SELinux und, wenn es erzwingt, das Label der Einbindungen."""
+    if os.name == "nt":
+        return DoctorResult("OK", "SELinux", "Unter Windows nicht zutreffend.")
+    if not selinux_enforcing(enforce_file):
+        return DoctorResult("OK", "SELinux", "SELinux ist nicht im Modus enforcing.")
+
+    env_data = env_data or {}
+    if "z" not in (env_data.get("ARGUS_MOUNT_LABEL") or "").lower():
         return DoctorResult(
             "WARNUNG",
             "SELinux",
-            "SELinux ist im Modus 'enforcing' aktiv: Bind-Mounts in Docker brauchen dann Labels (:z oder :Z).",
+            "SELinux erzwingt, die Einbindungen haben kein Label. Naechster Schritt: "
+            "ARGUS_MOUNT_LABEL=,z in die .env (./install.sh fragt danach).",
         )
-    return DoctorResult("OK", "SELinux", "SELinux ist nicht im Modus enforcing.")
+    blockers = relabel_blockers(repo_root, env_data) if repo_root is not None else []
+    if blockers:
+        return DoctorResult(
+            "FEHLER",
+            "SELinux",
+            "ARGUS_MOUNT_LABEL=,z wuerde System- oder ganze Home-Ordner umbeschriften: "
+            + ", ".join(blockers) + ". Naechster Schritt: Unterordner waehlen.",
+        )
+    return DoctorResult("OK", "SELinux", "SELinux erzwingt, die Einbindungen tragen das Label :z.")
 
 
 def proxy_dirs(repo_root: Path, env_data: dict[str, str]) -> tuple[Path, Path]:
@@ -1446,7 +1563,7 @@ def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[
     ]
     results.extend(doctor_check_switches(env_data))
     if os.name != "nt":
-        results.append(doctor_check_selinux())
+        results.append(doctor_check_selinux(repo_root=repo_root, env_data=env_data))
 
     for r in results:
         print(r.format_line())
@@ -1563,6 +1680,9 @@ def main(argv: list[str] | None = None) -> int:
     # Schritt 1: Docker pruefen
     # -------------------------------------------------------------------------
     print("[1/7] Pruefe Docker-Umgebung...")
+    if not warn_if_sudo(non_interactive=args.yes):
+        print("Abgebrochen.")
+        return 1
     check_docker_environment(non_interactive=args.yes)
     print("  Docker und Docker Compose v2 sind verfuegbar.\n")
 
@@ -1649,6 +1769,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if server_url:
         update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
+    if selinux_enforcing():
+        configure_selinux_label(repo_root, non_interactive=args.yes)
     print("")
 
     # -------------------------------------------------------------------------

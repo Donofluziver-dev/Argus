@@ -52,9 +52,9 @@ services:
     # Argus Desktop erreicht das Modell ueber intern-proxy auf 127.0.0.1:30000,
     # mit API-Key. Port wie bisher, damit die App-Einstellung gleich bleibt.
     volumes:
-      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     deploy:
       resources:
         reservations:
@@ -93,9 +93,9 @@ services:
       - EMBED_ALIAS=bge-m3
       - EMBED_THREADS=6
     volumes:
-      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -124,9 +124,9 @@ services:
       # er laeuft, waehrend das LLM auf das Werkzeug wartet.
       - EMBED_THREADS=8
     volumes:
-      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -151,7 +151,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
     volumes:
       - pg_data:/var/lib/postgresql
-      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro
+      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -217,7 +217,7 @@ services:
     volumes:
       # Nur settings.yml schreibgeschuetzt einbinden, damit der Container
       # unter Linux nicht Besitzer oder Inhalt des Repo-Ordners aendert.
-      - ./searxng_config/settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng_config/settings.yml:/etc/searxng/settings.yml:ro${ARGUS_MOUNT_LABEL:-}
     # Argus Desktop sucht direkt ueber 127.0.0.1:8888. Den Port veroeffentlicht
     # local-proxy, der den Host-Header prueft (Schutz gegen DNS-Rebinding).
     restart: unless-stopped
@@ -249,10 +249,19 @@ services:
       - SETGID
       # KILL: Beenden von Prozessen der Lauf-Benutzer (runner, calc) bei Zeitueberschreitung und beim Aufraeumen.
       - KILL
+    # Kein SysV-IPC (shmget, msgget, semget): Solche Objekte ueberleben das Aufraeumen
+    # zwischen zwei Laeufen, und alle Laeufe sind derselbe Benutzer runner -- ein Lauf
+    # eines anderen Kontos koennte sie lesen. multiprocessing nutzt POSIX-Semaphoren in
+    # /dev/shm, die die Sandbox nach jedem Lauf leert.
+    ipc: private
+    sysctls:
+      - kernel.shmmni=0
+      - kernel.shmall=0
+      - kernel.msgmni=0
+      - kernel.sem=0 0 0 0
     mem_limit: 512m
     cpus: "1.0"
-    # Prozess-/Thread-Obergrenze gegen Fork-Bomben. 256 laesst dem
-    # .NET-Threadpool von pwsh Luft.
+    # Prozess-/Thread-Obergrenze gegen Fork-Bomben.
     pids_limit: 256
     healthcheck:
       # Python statt wget: das schlanke Abbild hat seit dem Wegfall von PowerShell kein wget mehr.
@@ -293,9 +302,9 @@ services:
     # Argus Desktop erreicht TTS ueber intern-proxy (127.0.0.1:8002), mit dem LLM-API-Key.
     volumes:
       # Referenzstimme aus dem Repo (read-only) -> mit den Setup-Dateien versionier-/sicherbar.
-      - ./voice_ref:/app/voice_ref:ro
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ./voice_ref:/app/voice_ref:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -333,9 +342,9 @@ services:
     cpus: "4.0"
     # Argus Desktop erreicht STT ueber intern-proxy (127.0.0.1:8003), mit dem LLM-API-Key.
     volumes:
-      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
+      - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8003/healthz || exit 1"]
       interval: 30s
@@ -364,23 +373,25 @@ services:
     cpus: "6.0"
     volumes:
       - rag_data:/app/data
-      - ./documents_to_ingest:/app/documents_to_ingest
+      - ./documents_to_ingest:/app/documents_to_ingest:rw${ARGUS_MOUNT_LABEL:-}
       # Migrationen laufen beim Start als Code. Schreibgeschuetzt, damit ein
       # kompromittierter Prozess im Container sie nicht fuer den naechsten Start
       # umschreiben kann.
-      - ./alembic:/app/alembic:ro
-      - ./alembic.ini:/app/alembic.ini:ro
-      - ./API_Tokens/fernet_key.txt:/app/fernet_key.txt:ro
-      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro
-      - ./API_Tokens/jwt_secret.txt:/run/secrets/jwt_secret:ro
-      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro
-      - ./API_Tokens/audit_hmac_key.txt:/run/secrets/audit_hmac_key:ro
-      - ./API_Tokens/Gemini.txt:/run/secrets/gemini_api_key:ro
-      - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/host/argus_workspace:rw
+      - ./alembic:/app/alembic:ro${ARGUS_MOUNT_LABEL:-}
+      - ./alembic.ini:/app/alembic.ini:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/fernet_key.txt:/app/fernet_key.txt:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/jwt_secret.txt:/run/secrets/jwt_secret:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/audit_hmac_key.txt:/run/secrets/audit_hmac_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ./API_Tokens/Gemini.txt:/run/secrets/gemini_api_key:ro${ARGUS_MOUNT_LABEL:-}
+      - ${ARGUS_WORKSPACE_DIR:-C:/Argus_Workspace}:/host/argus_workspace:rw${ARGUS_MOUNT_LABEL:-}
       # Eval-Laeufe und Action-Audit-Dateien. Host-Pfad per ARGUS_EVALS_DIR (.env).
-      - ${ARGUS_EVALS_DIR:-C:/Argus_Workspace/Evals}:/app/evals:rw
+      - ${ARGUS_EVALS_DIR:-C:/Argus_Workspace/Evals}:/app/evals:rw${ARGUS_MOUNT_LABEL:-}
     environment:
       - PYTHONPATH=/app
+      # Nur zur Anzeige im Monitor: wo die Eval- und Audit-Dateien auf dem Host liegen.
+      - ARGUS_EVALS_DIR_HOST=${ARGUS_EVALS_DIR:-C:/Argus_Workspace/Evals}
     # Haertung wie bei tts/stt/calc-sandbox. Laeuft unter Linux mit ARGUS_UID/ARGUS_GID
     # des installierenden Nutzers, damit Arbeits- und Evals-Ordner beschreibbar sind.
     security_opt:
@@ -457,7 +468,7 @@ services:
     tmpfs:
       - /tmp:size=16m,noexec
     volumes:
-      - ./local_proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./local_proxy/nginx.conf:/etc/nginx/nginx.conf:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -491,7 +502,7 @@ services:
     tmpfs:
       - /tmp:size=16m,noexec
     volumes:
-      - ./local_proxy/intern.conf:/etc/nginx/nginx.conf:ro
+      - ./local_proxy/intern.conf:/etc/nginx/nginx.conf:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -528,10 +539,10 @@ services:
       # autosave.json; Caddy liest seine Konfiguration bei jedem Start aus dem Caddyfile.
       - /config:size=4m,noexec,mode=1777
     volumes:
-      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro${ARGUS_MOUNT_LABEL:-}
       # Zertifikate, ACME-Konto und die eigene CA (pki/authorities/local/root.crt).
-      - ${ARGUS_PROXY_DATA_DIR:-./proxy/data}:/data
-      - ${ARGUS_TLS_DIR:-./proxy/certs}:/certs:ro
+      - ${ARGUS_PROXY_DATA_DIR:-./proxy/data}:/data:rw${ARGUS_MOUNT_LABEL:-}
+      - ${ARGUS_TLS_DIR:-./proxy/certs}:/certs:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:
