@@ -209,7 +209,9 @@ services:
     mem_limit: 1g
     pids_limit: 128
     volumes:
-      - ./searxng_config:/etc/searxng
+      # Nur settings.yml schreibgeschuetzt einbinden, damit der Container
+      # unter Linux nicht Besitzer oder Inhalt des Repo-Ordners aendert.
+      - ./searxng_config/settings.yml:/etc/searxng/settings.yml:ro
     # Argus Desktop sucht direkt ueber 127.0.0.1:8888. Den Port veroeffentlicht
     # local-proxy, der den Host-Header prueft (Schutz gegen DNS-Rebinding).
     restart: unless-stopped
@@ -340,6 +342,7 @@ services:
       context: ./rag_backend
       dockerfile: Dockerfile.api
     env_file: .env
+    user: "${ARGUS_UID:-1000}:${ARGUS_GID:-1000}"
     restart: unless-stopped
     # Einziger Dienst in allen drei Netzen: Er braucht das Internet (Websuche,
     # Seitenabruf, Cloud) und spricht Modell, Datenbanken und Sandbox an.
@@ -370,8 +373,8 @@ services:
       - ${ARGUS_EVALS_DIR:-C:/Argus_Workspace/Evals}:/app/evals:rw
     environment:
       - PYTHONPATH=/app
-    # Haertung wie bei tts/stt/calc-sandbox. Kein read_only: uvicorn und
-    # alembic schreiben nach /app.
+    # Haertung wie bei tts/stt/calc-sandbox. Laeuft unter Linux mit ARGUS_UID/ARGUS_GID
+    # des installierenden Nutzers, damit Arbeits- und Evals-Ordner beschreibbar sind.
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -460,3 +460,365 @@ def test_compose_status_parsing(installer, tmp_path, monkeypatch):
     status2 = installer.get_compose_status(tmp_path)
     assert "postgres: running" in status2
     assert "searxng: starting" in status2
+
+
+# =============================================================================
+# 7. Laufzeitordner, Doctor-Pruefungen und Unterbefehle
+# =============================================================================
+
+def test_ensure_installation_dirs_creates_workspace_uploads_evals_and_models(installer, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "init_stack_copy.py")
+    (repo / "setup").mkdir()
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+
+    ws = tmp_path / "ws"
+    evals = tmp_path / "custom_evals"
+    models = tmp_path / "models"
+    (repo / ".env").write_text(f"ARGUS_EVALS_DIR={evals.as_posix()}\n", encoding="utf-8")
+
+    created = installer.ensure_installation_dirs(repo, str(ws), str(models))
+    assert ws.is_dir()
+    assert (ws / "Uploads").is_dir()
+    assert evals.is_dir()
+    assert models.is_dir()
+    assert len(created) == 4
+
+
+def test_doctor_check_docker_and_gpu_and_ram(installer, monkeypatch):
+    import os
+
+    # 1. Docker fehlt
+    monkeypatch.setattr(installer, "run_command", lambda cmd: (127, "", "not found"))
+    r1 = installer.doctor_check_docker()
+    assert r1.status == "FEHLER"
+
+    # 2. Docker da, aber Daemon steht
+    monkeypatch.setattr(
+        installer,
+        "run_command",
+        lambda cmd: (0, "ok", "") if cmd[:2] in (["docker", "version"], ["docker", "compose"]) else (1, "", "down"),
+    )
+    r2 = installer.doctor_check_docker()
+    assert r2.status == "FEHLER"
+
+    # 3. Unter Linux: NVIDIA Container Toolkit fehlt -> FEHLER; mit nvidia -> OK
+    if os.name != "nt":
+        monkeypatch.setattr(installer, "run_command", lambda cmd: (0, "Runtimes: runc", ""))
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert installer.doctor_check_docker().status == "FEHLER"
+
+        monkeypatch.setattr(installer, "run_command", lambda cmd: (0, "Runtimes: io.containerd.runc.v2 nvidia", ""))
+        assert installer.doctor_check_docker().status == "OK"
+
+    # 4. GPU & RAM
+    monkeypatch.setattr(installer, "check_gpu", lambda: (False, "", 0))
+    assert installer.doctor_check_gpu().status == "FEHLER"
+
+    monkeypatch.setattr(installer, "check_gpu", lambda: (True, "RTX 4060", 8192))
+    assert installer.doctor_check_gpu().status == "WARNUNG"
+
+    monkeypatch.setattr(installer, "check_gpu", lambda: (True, "RTX 5070 Ti", 16376))
+    assert installer.doctor_check_gpu().status == "OK"
+
+    monkeypatch.setattr(installer, "check_ram_bytes", lambda: 16 * 1024**3)
+    assert installer.doctor_check_ram().status == "WARNUNG"
+
+    monkeypatch.setattr(installer, "check_ram_bytes", lambda: 64 * 1024**3)
+    assert installer.doctor_check_ram().status == "OK"
+
+
+def test_doctor_check_disk_space_is_read_only(installer, tmp_path, monkeypatch):
+    Usage = collections.namedtuple("usage", ["total", "used", "free"])
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(100 * 1024**3, 20 * 1024**3, 80 * 1024**3))
+
+    non_existent_models = tmp_path / "noch_nicht_angelegt" / "models"
+    res = installer.doctor_check_disk_space(non_existent_models)
+    assert res.status == "OK"
+    # doctor darf den fehlenden Ordner NICHT anlegen
+    assert not non_existent_models.exists()
+
+
+def test_doctor_check_env_and_switches(installer, tmp_path):
+    import os
+
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+
+    # 1. .env fehlt
+    assert installer.doctor_check_env(repo).status == "FEHLER"
+
+    ws = tmp_path / "ws"
+    evals = tmp_path / "ws" / "Evals"
+    models = tmp_path / "models"
+    ws.mkdir()
+    evals.mkdir()
+    models.mkdir()
+
+    (repo / ".env.example").write_text(
+        "ARGUS_MODELS_DIR=C:/Argus_Models\n"
+        "ARGUS_WORKSPACE_DIR=C:/Argus_Workspace\n"
+        "ARGUS_EVALS_DIR=C:/Argus_Workspace/Evals\n"
+        "SEARXNG_LANGUAGE=de-DE\n"
+        "EXTRA_KEY=1\n",
+        encoding="utf-8",
+    )
+
+    # 2. Fehlender Schluessel EXTRA_KEY -> WARNUNG (nur Name, kein Wert)
+    (repo / ".env").write_text(
+        f"ARGUS_MODELS_DIR={models.as_posix()}\n"
+        f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
+        f"ARGUS_EVALS_DIR={evals.as_posix()}\n"
+        "SEARXNG_LANGUAGE=de-DE\n",
+        encoding="utf-8",
+    )
+    r_warn = installer.doctor_check_env(repo)
+    assert r_warn.status == "WARNUNG"
+    assert "EXTRA_KEY" in r_warn.message
+
+    # 3. Alle Schluessel da -> OK
+    (repo / ".env").write_text(
+        (repo / ".env").read_text(encoding="utf-8") + "EXTRA_KEY=geheimer_wert_xyz\n",
+        encoding="utf-8",
+    )
+    r_ok = installer.doctor_check_env(repo)
+    assert r_ok.status == "OK"
+    assert "geheimer_wert_xyz" not in r_ok.message
+
+    # 4. Unter Linux: Windows-Pfad in ARGUS_*_DIR -> FEHLER
+    if os.name != "nt":
+        (repo / ".env").write_text(
+            "ARGUS_MODELS_DIR=C:/Argus_Models\n"
+            f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
+            f"ARGUS_EVALS_DIR={evals.as_posix()}\n"
+            "SEARXNG_LANGUAGE=de-DE\n"
+            "EXTRA_KEY=1\n",
+            encoding="utf-8",
+        )
+        r_win = installer.doctor_check_env(repo)
+        assert r_win.status == "FEHLER"
+        assert "ARGUS_MODELS_DIR" in r_win.message
+
+    # 5. Sicherheitsschalter pruefen
+    safe_env = {
+        "CLOUD_AGENTS_ENABLED": "false",
+        "CLOUD_MISSION_AUTO_APPROVE": "false",
+        "DASHBOARD_SETUP_TOKEN": "geheimer-setup-token-wert",
+        "EGRESS_AFTER_SENSITIVE": "block",
+        "WEB_INJECTION_GUARD": "true",
+        "API_DOCS": "false",
+    }
+    sw_ok = installer.doctor_check_switches(safe_env)
+    assert len(sw_ok) == 1 and sw_ok[0].status == "OK"
+    assert "geheimer-setup-token-wert" not in sw_ok[0].message
+
+    risky_env = {
+        "CLOUD_AGENTS_ENABLED": "true",
+        "CLOUD_MISSION_AUTO_APPROVE": "true",
+        "DASHBOARD_SETUP_TOKEN": "",
+        "EGRESS_AFTER_SENSITIVE": "allow",
+        "WEB_INJECTION_GUARD": "false",
+        "API_DOCS": "true",
+    }
+    sw_warn = installer.doctor_check_switches(risky_env)
+    assert len(sw_warn) == 6
+    assert all(w.status == "WARNUNG" for w in sw_warn)
+    combined = " ".join(w.message for w in sw_warn)
+    for expected_name in (
+        "CLOUD_AGENTS_ENABLED",
+        "CLOUD_MISSION_AUTO_APPROVE",
+        "DASHBOARD_SETUP_TOKEN",
+        "EGRESS_AFTER_SENSITIVE",
+        "WEB_INJECTION_GUARD",
+        "API_DOCS",
+    ):
+        assert expected_name in combined
+
+
+def test_doctor_check_secrets_and_dirs_permissions_and_no_secret_leak(installer, tmp_path):
+    import os
+
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+    shutil.copy2(_SCRIPT.parent.parent / "docker-compose.yml", repo / "docker-compose.yml")
+    shutil.copy2(_SCRIPT.parent.parent / ".env.example", repo / ".env.example")
+
+    ws = tmp_path / "ws"
+    models = tmp_path / "models"
+    init_mod = installer._load_init_stack_module(repo)
+    assert init_mod.main(["--stack", str(repo), "--workspace", str(ws), "--models", str(models), "--ohne-naechste-schritte"]) == 0
+
+    res = installer.doctor_check_secrets_and_dirs(repo)
+    assert res.status == "OK", res.message
+
+    # Keine Geheimniswerte im Ergebnis
+    for p in (repo / "API_Tokens").iterdir():
+        val = p.read_text(encoding="utf-8").strip()
+        if val:
+            assert val not in res.message
+
+    if os.name != "nt":
+        # Falsche Dateirechte (0600 statt 0644) -> FEHLER
+        os.chmod(repo / "API_Tokens" / "fernet_key.txt", 0o600)
+        res_bad_file = installer.doctor_check_secrets_and_dirs(repo)
+        assert res_bad_file.status == "FEHLER"
+        assert "fernet_key.txt" in res_bad_file.message
+        os.chmod(repo / "API_Tokens" / "fernet_key.txt", 0o644)
+
+        # Falsche Ordnerrechte auf API_Tokens/ (0755 statt 0700) -> FEHLER
+        os.chmod(repo / "API_Tokens", 0o755)
+        res_bad_dir = installer.doctor_check_secrets_and_dirs(repo)
+        assert res_bad_dir.status == "FEHLER"
+        assert "API_Tokens/" in res_bad_dir.message
+        os.chmod(repo / "API_Tokens", 0o700)
+
+        # Fremde ARGUS_UID ohne Schreibrecht auf Arbeitsordner (0755) -> FEHLER
+        os.chmod(ws, 0o755)
+        env_text = (repo / ".env").read_text(encoding="utf-8")
+        (repo / ".env").write_text(
+            init_mod.set_env_values(env_text, {"ARGUS_UID": "4242", "ARGUS_GID": "4242"}),
+            encoding="utf-8",
+        )
+        res_unwritable = installer.doctor_check_secrets_and_dirs(repo)
+        assert res_unwritable.status == "FEHLER"
+        assert "4242" in res_unwritable.message
+
+
+def test_doctor_check_models_size_and_verify_sha256(installer, tmp_path):
+    data = b"Testmodell-Inhalt" * 50
+    sha = hashlib.sha256(data).hexdigest()
+    spec_path = tmp_path / "models.json"
+    spec_path.write_text(json.dumps({
+        "models": [{
+            "id": "m1",
+            "title": "Test",
+            "repo": "org/m1",
+            "revision": "a" * 40,
+            "files": [{"path": "m1.gguf", "target": "m1.gguf", "size": len(data), "sha256": sha}],
+        }]
+    }), encoding="utf-8")
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    target = models_dir / "m1.gguf"
+
+    # 1. Datei fehlt
+    assert installer.doctor_check_models(models_dir, spec_path, verify_sha256=False).status == "FEHLER"
+
+    # 2. Richtige Groesse, aber korrupter Inhalt: ohne --verify-models OK, mit --verify-models FEHLER
+    target.write_bytes(b"X" * len(data))
+    assert installer.doctor_check_models(models_dir, spec_path, verify_sha256=False).status == "OK"
+    assert installer.doctor_check_models(models_dir, spec_path, verify_sha256=True).status == "FEHLER"
+
+    # 3. Richtiger Inhalt -> auch mit --verify-models OK
+    target.write_bytes(data)
+    assert installer.doctor_check_models(models_dir, spec_path, verify_sha256=True).status == "OK"
+
+
+def test_doctor_check_selinux_and_stack(installer, tmp_path, monkeypatch):
+    import os
+
+    if os.name != "nt":
+        enforce_f = tmp_path / "enforce"
+        enforce_f.write_text("1\n", encoding="utf-8")
+        assert installer.doctor_check_selinux(enforce_f).status == "WARNUNG"
+
+        enforce_f.write_text("0\n", encoding="utf-8")
+        monkeypatch.setattr(shutil, "which", lambda _: None)
+        assert installer.doctor_check_selinux(enforce_f).status == "OK"
+
+    # Stack-Pruefung: laeuft und /healthz antwortet -> OK
+    class FakeProc:
+        returncode = 0
+        stdout = '[{"Service": "rag-backend", "State": "running", "Health": "healthy"}]'
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(installer, "check_healthz", lambda url="": True)
+    assert installer.doctor_check_stack(tmp_path).status == "OK"
+
+    # Container exited -> FEHLER
+    class FakeProcExited:
+        returncode = 0
+        stdout = '[{"Service": "rag-backend", "State": "exited", "Health": ""}]'
+        stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeProcExited())
+    assert installer.doctor_check_stack(tmp_path).status == "FEHLER"
+
+
+def test_subcommand_reset_password_passes_via_stdin(installer, monkeypatch, capsys):
+    import getpass
+
+    recorded: list[tuple[list[str], str]] = []
+
+    class FakeExecResult:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        recorded.append((list(cmd), kwargs.get("input", "")))
+        return FakeExecResult()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # 1. Nicht uebereinstimmende Passwoerter -> Fehler 1, kein docker compose exec
+    inputs = iter(["PasswortEins123!", "PasswortZwei123!"])
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
+    assert installer.main(["reset-password", "admin"]) == 1
+    assert recorded == []
+    assert "stimmen nicht ueberein" in capsys.readouterr().err
+
+    # 2. Zu kurzes Passwort -> Fehler 1, kein docker compose exec
+    inputs_short = iter(["kurz", "kurz"])
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs_short))
+    assert installer.main(["reset-password", "admin"]) == 1
+    assert recorded == []
+    assert "8 Zeichen" in capsys.readouterr().err
+
+    # 3. Gueltiges Passwort -> Aufruf von docker compose exec -T rag-backend python -m rag_backend.admin_cli reset-password admin
+    inputs_ok = iter(["SicheresPasswort99!", "SicheresPasswort99!"])
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs_ok))
+    assert installer.main(["reset-password", "admin"]) == 0
+    assert len(recorded) == 1
+    cmd, stdin_data = recorded[0]
+    assert cmd == [
+        "docker", "compose", "exec", "-T", "rag-backend",
+        "python", "-m", "rag_backend.admin_cli", "reset-password", "admin",
+    ]
+    assert stdin_data == "SicheresPasswort99!\n"
+    assert "SicheresPasswort99!" not in str(cmd)
+
+
+def test_subcommand_doctor_cli_exit_code(installer, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        installer,
+        "run_doctor",
+        lambda root, verify_models=False: (
+            0,
+            [installer.DoctorResult("OK", "Test", f"verify={verify_models}")],
+        ),
+    )
+    rc = installer.main(["doctor", "--verify-models", "--stack", str(tmp_path)])
+    assert rc == 0
+
+
+
+def test_doctor_uses_compose_defaults_for_missing_dirs_only_on_windows(installer, tmp_path):
+    #--- Aeltere .env ohne ARGUS_MODELS_DIR: Compose nimmt dann seinen Standardwert.
+    #--- doctor darf das unter Windows nicht als FEHLER melden (der Stapel laeuft so),
+    #--- unter Linux taugt der Windows-Standard nicht.
+    root = _SCRIPT.parent.parent
+    defaults = installer._compose_dir_defaults(root)
+    assert defaults["ARGUS_MODELS_DIR"] == "C:/Argus_Models"
+    assert defaults["ARGUS_WORKSPACE_DIR"] == "C:/Argus_Workspace"
+    assert defaults["ARGUS_EVALS_DIR"] == "C:/Argus_Workspace/Evals"
+
+    env = {"ARGUS_EVALS_DIR": "/srv/argus/evals"}
+    assert installer._effective_dir(root, env, "ARGUS_EVALS_DIR", windows=True) == ("/srv/argus/evals", False)
+    assert installer._effective_dir(root, env, "ARGUS_MODELS_DIR", windows=True) == ("C:/Argus_Models", True)
+    assert installer._effective_dir(root, env, "ARGUS_MODELS_DIR", windows=False) == ("", False)
+    # Ohne Compose-Datei gibt es keinen Standard.
+    assert installer._effective_dir(tmp_path, env, "ARGUS_MODELS_DIR", windows=True) == ("", False)

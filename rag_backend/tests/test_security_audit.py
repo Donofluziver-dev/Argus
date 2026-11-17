@@ -368,9 +368,16 @@ def test_siem_off_sends_nothing(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_clean_page_content_length_limit(monkeypatch):
     '''Eine Seite mit Content-Length ueber der Grenze wird abgelehnt.'''
+    import ipaddress
     from rag_backend import agent
 
     monkeypatch.setenv("WEBPAGE_MAX_BYTES", "1000")
+    #--- DNS-Aufloesung ohne Netz durch oeffentliche IP ersetzen; die SSRF-Pruefung bleibt aktiv.
+    monkeypatch.setattr(
+        agent,
+        "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")] if host == "example.com" else [],
+    )
 
     class MockStreamResponse:
         def __init__(self):
@@ -403,9 +410,16 @@ async def test_fetch_clean_page_content_length_limit(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_clean_page_stream_truncation(monkeypatch):
     '''Antworten ueber der Grenze werden abgeschnitten und nie ganz gelesen.'''
+    import ipaddress
     from rag_backend import agent
 
     monkeypatch.setenv("WEBPAGE_MAX_BYTES", "500")
+    #--- DNS-Aufloesung ohne Netz durch oeffentliche IP ersetzen; die SSRF-Pruefung bleibt aktiv.
+    monkeypatch.setattr(
+        agent,
+        "_resolve_host_ips",
+        lambda host: [ipaddress.ip_address("93.184.216.34")] if host == "example.com" else [],
+    )
 
     read_chunks = []
 

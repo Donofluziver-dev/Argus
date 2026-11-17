@@ -202,3 +202,93 @@ def test_main_refuses_a_folder_that_is_not_an_installation(init_stack, tmp_path,
     assert init_stack.main(["--stack", str(tmp_path)]) == 1
     assert not (tmp_path / "API_Tokens").exists()
     assert "kein Argus-Ordner" in capsys.readouterr().err
+
+
+# ---- Linux-Rechte, ARGUS_UID/GID und Laufzeit-Ordner ------------------------
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX-Dateirechte gelten nur unter Nicht-Windows")
+def test_posix_permissions_api_tokens_0700_files_0644_env_0600(init_stack, tmp_path, capsys, monkeypatch):
+    import os
+    import stat
+
+    stack = _stack(tmp_path)
+    ws = tmp_path / "arbeit"
+    models = tmp_path / "modelle"
+    # Auch mit fremder UID darf kein Hinweis 'sudo chown -R 1000 API_Tokens' mehr erscheinen
+    monkeypatch.setattr(os, "geteuid", lambda: 2000)
+    monkeypatch.setattr(os, "getegid", lambda: 2000)
+
+    rc = init_stack.main(["--stack", str(stack), "--workspace", str(ws), "--models", str(models)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sudo chown" not in out
+
+    tokens_dir = stack / "API_Tokens"
+    assert stat.S_IMODE(tokens_dir.stat().st_mode) == 0o700
+    for f in tokens_dir.iterdir():
+        assert f.is_file()
+        assert stat.S_IMODE(f.stat().st_mode) == 0o644, f"{f.name} hat nicht 0644"
+
+    env_path = stack / ".env"
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+    # Verstellte Rechte (z. B. 0755 auf Ordner, 0600 auf Dateien, 0644 auf .env)
+    # werden beim zweiten Lauf korrigiert.
+    os.chmod(tokens_dir, 0o755)
+    for f in tokens_dir.iterdir():
+        os.chmod(f, 0o600)
+    os.chmod(env_path, 0o644)
+
+    rc2 = init_stack.main(["--stack", str(stack), "--workspace", str(ws), "--models", str(models)])
+    assert rc2 == 0
+    assert stat.S_IMODE(tokens_dir.stat().st_mode) == 0o700
+    for f in tokens_dir.iterdir():
+        assert stat.S_IMODE(f.stat().st_mode) == 0o644
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+def test_argus_uid_gid_and_runtime_dirs_on_linux_and_root(init_stack, tmp_path, monkeypatch):
+    import os
+
+    # 1. Normaler Nutzer unter Linux (z. B. 1500:1501)
+    if os.name != "nt":
+        monkeypatch.setattr(os, "geteuid", lambda: 1500)
+        monkeypatch.setattr(os, "getegid", lambda: 1501)
+        user_stack_dir = tmp_path / "user_stack"
+        user_stack_dir.mkdir()
+        stack = _stack(user_stack_dir)
+        ws = tmp_path / "user_ws"
+        models = tmp_path / "user_models"
+        assert init_stack.main(["--stack", str(stack), "--workspace", str(ws), "--models", str(models)]) == 0
+        env = init_stack.parse_env((stack / ".env").read_bytes().decode("utf-8"))
+        assert env["ARGUS_UID"] == "1500"
+        assert env["ARGUS_GID"] == "1501"
+        assert ws.is_dir()
+        assert (ws / "Uploads").is_dir()
+        assert (ws / "Evals").is_dir()
+        assert models.is_dir()
+
+    # 2. Installation als root (UID 0) -> 1000:1000 und chown auf angelegte Ordner
+    chown_calls: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g: chown_calls.append((str(p), u, g)), raising=False)
+    assert init_stack.resolve_linux_ugid(0, 0) == (1000, 1000)
+    assert init_stack.resolve_linux_ugid(1002, 1003) == (1002, 1003)
+
+    if os.name != "nt":
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "getegid", lambda: 0)
+        root_stack_dir = tmp_path / "root_stack"
+        root_stack_dir.mkdir()
+        root_stack = _stack(root_stack_dir)
+        root_ws = tmp_path / "root_ws"
+        root_models = tmp_path / "root_models"
+        assert init_stack.main(["--stack", str(root_stack), "--workspace", str(root_ws), "--models", str(root_models)]) == 0
+        root_env = init_stack.parse_env((root_stack / ".env").read_bytes().decode("utf-8"))
+        assert root_env["ARGUS_UID"] == "1000"
+        assert root_env["ARGUS_GID"] == "1000"
+        chowned_paths = {c[0] for c in chown_calls if c[1:] == (1000, 1000)}
+        assert str(root_ws) in chowned_paths
+        assert str(root_ws / "Uploads") in chowned_paths
+        assert str(root_ws / "Evals") in chowned_paths
+        assert str(root_models) in chowned_paths
+

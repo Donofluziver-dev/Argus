@@ -1,5 +1,8 @@
 # Container-Skripte laufen unter Linux: immer LF, auch bei Windows-Checkout.
+# Windows-Stapeldateien (cmd.exe) brauchen CRLF, sonst versagen Sprungmarken.
 * text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
 *.wav binary
 *.png binary
 *.gguf binary

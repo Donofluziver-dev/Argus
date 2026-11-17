@@ -75,7 +75,8 @@ kann ([Warum Argus sicher ist](#warum-argus-sicher-ist)).
 
 ## Was heute geht
 
-- **Fragen an eigene Dokumente:** PDF, Word, Excel, PowerPoint, EPUB, HTML, Text. Das Modell
+- **Fragen an eigene Dokumente:** PDF, Word (`.docx`), OpenDocument-Text (`.odt`), Excel,
+  PowerPoint, EPUB, HTML, Text. Dateinamen behalten Umlaute. Das Modell
   antwortet aus den gefundenen Textstellen und nicht aus dem Gedächtnis (oft „RAG“ genannt).
   Die Suche kombiniert Bedeutung (bge-m3) und Stichworte (BM25) und bewertet die Treffer mit
   einem Reranker. Kennungen wie `RK-2025-0041` oder Teilenummern trifft sie wörtlich.
@@ -124,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 339 für das Backend, 46 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 394 für das Backend, 72 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -488,7 +489,10 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
   hat keine Einbindung des Arbeitsordners und keine Geheimnisse; ihr Dienst behält nur die
   Rechte für den Benutzerwechsel und das Beenden von Prozessen (`SETUID`, `SETGID`, `KILL`). Basis-Images sind per Digest festgelegt, Migrationen
   schreibgeschützt eingebunden.
-- **Geheimnisse** liegen nie im Repo, sondern in `API_Tokens/` mit Rechten nur für den Besitzer.
+- **Geheimnisse** liegen nie im Repo, sondern in `API_Tokens/`. Unter Windows darf nur der
+  Besitzer den Ordner öffnen. Unter Linux hat der Ordner `0700` und die Dateien darin `0644`:
+  Andere Nutzer des Rechners kommen nicht hinein, die Container lesen die einzeln
+  eingebundenen Dateien trotzdem, auch ohne Root-Rechte.
 
 ### Offen für einen Einsatz im Unternehmen
 
@@ -524,8 +528,11 @@ sollte sie kennen.
 - **Lieferkette:** Python-Pakete haben keine Lock-Datei, drei Images installieren Pakete ohne
   feste Version. Die Modelle prüft die Installation per SHA-256, wer sie von Hand ablegt,
   prüft selbst.
-- **Installation unter Linux:** `install.sh` ist nur in Teilen getestet (Syntax,
-  ShellCheck, die Schritte in Python unter Windows), noch nicht auf einem Linux-Server.
+- **Installation unter Linux:** Rechte für Geheimnisse und Arbeitsordner sind unter Linux
+  nachgestellt und getestet, der Stapel ist aber noch nicht auf einem echten Linux-Server
+  gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) brauchen die
+  Einbindungen Labels (`:z`); `doctor` warnt davor. Wer nicht in der Gruppe `docker` ist,
+  sollte nicht mit `sudo` installieren, sondern sich in die Gruppe aufnehmen lassen.
 - **Bilder und Scans:** Oberfläche und Backend können Bilder an das Modell weitergeben
   (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj)
   noch nicht; Bildeingabe ist aus und nicht getestet. PDFs ohne Textebene (Scans) überspringt
@@ -540,7 +547,9 @@ sollte sie kennen.
 ## Einrichten
 
 Getestet unter Windows 11 mit Docker Desktop (WSL2). Linux mit Docker Engine und dem NVIDIA
-Container Toolkit ist vorgesehen, aber noch nicht auf echter Hardware durchgetestet.
+Container Toolkit ist vorgesehen, aber noch nicht auf echter Hardware durchgetestet. Unter
+Linux trägt die Installation die Nutzerkennung dessen, der installiert, als `ARGUS_UID` und
+`ARGUS_GID` in die `.env` ein; das Backend läuft damit und kann in den Arbeitsordner schreiben.
 
 **Voraussetzungen:** eine NVIDIA-Karte (gemessen mit 16 GB), 32 GB Arbeitsspeicher, rund
 30 GB Platz für die Modelle.
@@ -569,6 +578,17 @@ Installation führt durch diese Schritte:
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
 Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
 `--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen und laden).
+
+**Prüfen und Pflege** mit demselben Skript (`install.cmd …` unter Windows, `./install.sh …`
+unter Linux):
+
+- `doctor` prüft nur, ändert nichts: Docker und GPU, Arbeitsspeicher und Platz, `.env` gegen
+  `.env.example`, Geheimnisse und Ordnerrechte, Modelle (mit `--verify-models` auch per
+  SHA-256), Netz-Abschottung, Zustand des Stapels und riskante Schalter wie
+  `CLOUD_MISSION_AUTO_APPROVE=true`. Werte von Geheimnissen gibt es nie aus.
+- `reset-password <konto>` setzt das Passwort eines Kontos zurück, auch des letzten
+  Administrators. Es fragt das neue Passwort verdeckt ab, beendet alle Sitzungen des Kontos und
+  schreibt einen Eintrag ins Auditprotokoll. Der Stapel muss dafür laufen.
 
 `install.cmd` ist ein reines Batch-Skript ohne PowerShell und startet `setup/install.py`. Eine
 EXE gibt es bewusst nicht: Ein lesbares Skript lässt sich prüfen, und unsignierte EXE-Dateien

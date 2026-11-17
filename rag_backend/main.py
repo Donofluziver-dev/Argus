@@ -1804,7 +1804,10 @@ def _genannte_uploads(text: str, user_id: int | None = None, role: str | None = 
     Nachricht; wer ihn von Hand tippt, wird genauso erfasst.'''
     if not text:
         return []
-    klein = text.lower()
+    import unicodedata
+    #--- Normalisierung nach NFC fuer den Abgleich mit macOS-Dateinamen (NFD)
+    text_norm = unicodedata.normalize("NFC", text)
+    klein = text_norm.lower()
     treffer = []
 
     # 1. Eigener Ordner 'Dateien' des Kontos (fuer alle Rollen)
@@ -1816,7 +1819,8 @@ def _genannte_uploads(text: str, user_id: int | None = None, role: str | None = 
                 for i, p in enumerate(u_dateien.iterdir()):
                     if i >= 5000 or len(treffer) >= 50:
                         break
-                    if len(p.name) >= 5 and p.name.lower() in klein:
+                    p_name_norm = unicodedata.normalize("NFC", p.name)
+                    if len(p_name_norm) >= 5 and p_name_norm.lower() in klein:
                         if p.name not in treffer:
                             treffer.append(p.name)
         except OSError:
@@ -1829,7 +1833,8 @@ def _genannte_uploads(text: str, user_id: int | None = None, role: str | None = 
                 for i, p in enumerate(_UPLOAD_DIR.iterdir()):
                     if i >= 5000 or len(treffer) >= 50:
                         break
-                    if len(p.name) >= 5 and p.name.lower() in klein:
+                    p_name_norm = unicodedata.normalize("NFC", p.name)
+                    if len(p_name_norm) >= 5 and p_name_norm.lower() in klein:
                         if p.name not in treffer:
                             treffer.append(p.name)
             except OSError:
@@ -2204,7 +2209,8 @@ async def dashboard_stt(request: Request, file: UploadFile = File(...),
     url = os.getenv("STT_SERVICE_URL", "http://stt-service:8003").rstrip("/") + "/v1/audio/transcriptions"
     #--- Stueckweise lesen und frueh abbrechen: Starlette begrenzt Datei-Parts
     #--- nicht, ein riesiger Upload laege sonst komplett im Speicher.
-    max_bytes = int(os.getenv("STT_MAX_UPLOAD_MB", "50")) * 1024 * 1024
+    #--- Standard 25 MB (Paritaet zur Grenze des STT-Dienstes).
+    max_bytes = int(os.getenv("STT_MAX_UPLOAD_MB", "25")) * 1024 * 1024
     chunks, total = [], 0
     while chunk := await file.read(1024 * 1024):
         total += len(chunk)
@@ -2220,8 +2226,12 @@ async def dashboard_stt(request: Request, file: UploadFile = File(...),
                 headers=headers,
                 files={"file": (file.filename or "audio.webm", data, file.content_type or "audio/webm")},
             )
+        if r.status_code == 413:
+            raise HTTPException(status_code=413, detail="Aufnahme zu gross fuer den STT-Dienst.")
         r.raise_for_status()
         return r.json()
+    except HTTPException:
+        raise
     except Exception:
         log.exception("STT-Dienst-Aufruf fehlgeschlagen")
         raise HTTPException(status_code=502, detail="STT-Dienst nicht erreichbar.")
@@ -2271,26 +2281,38 @@ _MAX_UPLOAD_BYTES = int(os.getenv("UPLOAD_MAX_BYTES", str(500 * 1024 * 1024)))
 #--- hier nach einem halben Jahr jeden je geprueften Vertrag liegen.
 #--- Sofort nach dem Lesen loeschen geht NICHT: die erste Rueckfrage in derselben
 #--- Unterhaltung liesse read_document sonst ins Leere laufen.
-#--- 0 Stunden = Aufraeumen aus.
+#--- Aufraeumfrist fuer bereits indexierte Uploads im gemeinsamen Uploads-Ordner
+#--- (Standard: 24 Stunden nach mtime, nur wenn bereits in IngestedDocument erfasst;
+#--- noch nicht indexierte Dateien bleiben dauerhaft erhalten). 0 Stunden = Aufraeumen aus.
 _UPLOAD_RETENTION_HOURS = float(os.getenv("UPLOAD_RETENTION_HOURS", "24"))
 _UPLOAD_SWEEP_SECONDS = int(os.getenv("UPLOAD_SWEEP_SECONDS", "3600"))
 
 
 def _sweep_uploads_once() -> int:
-    '''Entfernt Dateien im Uploads-Ordner, die aelter als die Frist sind,
-    sowie veraltete Benutzerdateien (users/*/Dateien und users/*/Ergebnisse).
-    Liefert die Gesamtzahl entfernter Dateien.'''
+    '''Entfernt bereits indexierte Dateien im Uploads-Ordner, die aelter als die Frist
+    sind, sowie veraltete Benutzerdateien (users/*/Dateien und users/*/Ergebnisse).
+    Noch nicht indexierte Dateien bleiben erhalten. Liefert die Gesamtzahl entfernter Dateien.'''
     weg = 0
     if _UPLOAD_RETENTION_HOURS > 0 and _UPLOAD_DIR.is_dir():
         try:
             grenze = time.time() - _UPLOAD_RETENTION_HOURS * 3600
+            #--- Nur bereits indexierte Dokumente duerfen aufgeraeumt werden.
+            #--- Noch nicht indexierte Dateien bleiben erhalten.
+            with SessionLocal() as db:
+                indexed_names = {
+                    row[0]
+                    for row in db.query(IngestedDocument.filename).all()
+                    if row[0]
+                }
             for p in _UPLOAD_DIR.iterdir():
                 try:
                     if not p.is_file() or p.stat().st_mtime >= grenze:
                         continue
+                    if p.name not in indexed_names:
+                        continue
                     p.unlink()
                     weg += 1
-                    log.info(f"Upload aufgeraeumt (aelter als {_UPLOAD_RETENTION_HOURS}h): {p.name}")
+                    log.info(f"Bereits indexierter Upload aufgeraeumt (aelter als {_UPLOAD_RETENTION_HOURS}h): {p.name}")
                 except Exception as e:
                     log.warning(f"Upload {p.name} liess sich nicht entfernen: {e}")
         except Exception:
@@ -2324,13 +2346,13 @@ async def _uploads_sweeper():
 #--- Archive sind bewusst nicht dabei: Pfad-Ausbruch, Kompressionsbomben und
 #--- Dateizahl muessten alle einzeln abgefangen werden.
 _UPLOAD_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".odt", ".rtf", ".epub", ".txt", ".md",
+    ".pdf", ".docx", ".odt", ".epub", ".txt", ".md",
     ".html", ".htm", ".json", ".yaml", ".yml", ".csv", ".xlsx", ".pptx",
     ".png", ".jpg", ".jpeg", ".gif", ".webp",
 }
 #--- Dateitypen, aus denen die Indexierung Text ziehen kann.
 _INGESTABLE_EXTENSIONS = {
-    ".pdf", ".docx", ".pptx", ".xlsx", ".epub", ".txt", ".md",
+    ".pdf", ".docx", ".odt", ".pptx", ".xlsx", ".epub", ".txt", ".md",
     ".html", ".htm", ".json", ".yaml", ".yml", ".csv",
 }
 
@@ -2339,13 +2361,16 @@ def _safe_upload_name(raw: str) -> str:
     '''Baut aus einem beliebigen Client-Dateinamen einen harmlosen Basename.
 
     Ein Upload-Name kommt vom Browser und ist damit Fremdeingabe: '../../run/secrets/
-    ssh_key' oder ein Name mit Doppelpunkt (alternativer NTFS-Datenstrom) muss hier
-    scheitern, nicht erst am Dateisystem.'''
-    name = os.path.basename((raw or "").replace("\\", "/")).strip()
-    name = re.sub(r"[^A-Za-z0-9._ ()\-]", "_", name).lstrip(".")
-    if not name or name in {".", ".."}:
+    ssh_key' oder Windows-Geraetenamen muessen hier scheitern.
+    Nutzt die zentrale Bereinigung aus user_files.py.'''
+    from rag_backend.user_files import sanitize_filename
+    base = os.path.basename((raw or "").replace("\\", "/")).strip()
+    if not base or base in {".", ".."}:
         raise HTTPException(status_code=400, detail="Unbrauchbarer Dateiname.")
-    return name[:180]
+    try:
+        return sanitize_filename(base)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unbrauchbarer Dateiname.")
 
 
 def _upload_path(name: str) -> Path:
@@ -2392,8 +2417,11 @@ async def dashboard_upload(request: Request, file: UploadFile = File(...),
     name = _safe_upload_name(file.filename or "")
     suffix = Path(name).suffix.lower()
     if suffix not in _UPLOAD_EXTENSIONS:
-        raise HTTPException(status_code=415,
-                            detail=f"Dateityp '{suffix or '?'}' ist nicht zugelassen.")
+        if suffix in {".doc", ".rtf"}:
+            detail = f"Dateityp '{suffix}' wird nicht unterstuetzt. Bitte als .docx oder PDF speichern."
+        else:
+            detail = f"Dateityp '{suffix or '?'}' ist nicht zugelassen."
+        raise HTTPException(status_code=415, detail=detail)
     _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = _upload_path(name)
     #--- Bestehende Datei nicht ueberschreiben, sondern durchnummerieren.
@@ -2558,9 +2586,13 @@ async def dashboard_user_file_upload(
 
     suffix = Path(name).suffix.lower()
     if suffix not in _UPLOAD_EXTENSIONS:
+        if suffix in {".doc", ".rtf"}:
+            detail = f"Dateityp '{suffix}' wird nicht unterstuetzt. Bitte als .docx oder PDF speichern."
+        else:
+            detail = f"Dateityp '{suffix or '?'}' ist nicht zugelassen."
         raise HTTPException(
             status_code=415,
-            detail=f"Dateityp '{suffix or '?'}' ist nicht zugelassen.",
+            detail=detail,
         )
 
     dateien_dir = user_files.get_user_dir(user.id, "dateien", create=True)
@@ -2641,9 +2673,9 @@ async def dashboard_user_file_download(
 
     return FileResponse(
         path=target,
+        filename=target.name,
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f'attachment; filename="{target.name}"',
             "X-Content-Type-Options": "nosniff",
         },
     )

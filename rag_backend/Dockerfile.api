@@ -10,12 +10,21 @@ COPY pyproject.toml .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r pyproject.toml
 COPY . /app/rag_backend
-#--- /app/data vorab anlegen: ein neues benanntes Volume uebernimmt Besitzer und
-#--- Rechte dieses Ordners. Fehlt er, legt Docker den Mountpunkt root-eigen an.
-RUN useradd -m -u 1000 ragbackend && mkdir -p /app/data && chown -R ragbackend:ragbackend /app
+#--- /app/data (und /app/evals als Fallback) vorab mit 1777 anlegen: das benannte
+#--- Volume rag_data uebernimmt Besitzer und Rechte dieses Ordners und bleibt so
+#--- auch fuer eine fremde ARGUS_UID beschreibbar. Bytecode wird beim Bau erzeugt
+#--- (compileall) und zur Laufzeit unterdrueckt (PYTHONDONTWRITEBYTECODE=1), damit
+#--- weder uvicorn noch alembic Schreibrechte unter /app/rag_backend brauchen.
+RUN useradd -m -u 1000 ragbackend \
+    && mkdir -p /app/data /app/evals \
+    && python -m compileall -q /app/rag_backend \
+    && chown -R ragbackend:ragbackend /app \
+    && chmod 1777 /app/data /app/evals
 USER ragbackend
 ENV PYTHONPATH=/app \
     PYTHONIOENCODING=utf-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 CMD ["uvicorn", "rag_backend.main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]

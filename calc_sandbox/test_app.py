@@ -4,9 +4,9 @@ import tempfile
 import pytest
 
 try:
-    from calc_sandbox.app import _run, _exec_code, _EXEC_LOCK
+    from calc_sandbox.app import _run, _exec_code, _EXEC_LOCK, sanitize_filename
 except ModuleNotFoundError:
-    from app import _run, _exec_code, _EXEC_LOCK
+    from app import _run, _exec_code, _EXEC_LOCK, sanitize_filename
 
 #--- Aufraeumen zwischen Laeufen (Prozesse beenden, /tmp leeren) gibt es nur im
 #--- Sandbox-Abbild. Die Tests dazu laufen dort (CI: docker run mit dem Abbild).
@@ -762,3 +762,59 @@ def test_failed_run_stays_failed_while_calculations_run_in_parallel():
         t.join(timeout=20.0)
     assert not t.is_alive()
     assert rechnungen["n"] > 0 and rechnungen["falsch"] == 0, rechnungen
+
+
+#--- Paritaetstest fuer die Dateinamensbereinigung zwischen Sandbox und rag_backend
+PARITY_TEST_CASES_VALID = [
+    ("Prüfbericht_Übergabe.pdf", "Prüfbericht_Übergabe.pdf"),
+    ("Pru\u0308fbericht_U\u0308bergabe.pdf", "Prüfbericht_Übergabe.pdf"),  # NFD -> NFC
+    ("Bericht (2026) - Entwurf_v1.0.txt", "Bericht (2026) - Entwurf_v1.0.txt"),
+    ("отчет_2026.xlsx", "отчет_2026.xlsx"),
+    ("日本語_メモ.txt", "日本語_メモ.txt"),
+    ("bericht:mit*fragezeichen?.txt", "bericht_mit_fragezeichen_.txt"),
+    ("datei.pdf. ", "datei.pdf"),
+    ("notiz.txt...", "notiz.txt"),
+    ("...geheim.txt", "geheim.txt"),
+    ("/pfad/zu/dokument.pdf", "dokument.pdf"),
+    ("..\\windows\\notiz.txt", "notiz.txt"),
+]
+
+PARITY_TEST_CASES_INVALID = [
+    "",
+    "   ",
+    ".",
+    "..",
+    "...",
+    "CON",
+    "con.txt",
+    "PRN.pdf",
+    "aux.dat",
+    "NUL",
+    "COM1.txt",
+    "com9.png",
+    "lpt1.csv",
+    "LPT8.tar.gz",
+]
+
+
+@pytest.mark.parametrize("raw, expected", PARITY_TEST_CASES_VALID)
+def test_sanitize_filename_parity_valid(raw, expected):
+    assert sanitize_filename(raw) == expected
+
+
+@pytest.mark.parametrize("raw", PARITY_TEST_CASES_INVALID)
+def test_sanitize_filename_parity_invalid(raw):
+    with pytest.raises(ValueError):
+        sanitize_filename(raw)
+
+
+def test_sanitize_filename_parity_length_limits():
+    long_ascii = "a" * 200 + ".txt"
+    cleaned = sanitize_filename(long_ascii)
+    assert len(cleaned) == 180
+    assert len(cleaned.encode("utf-8")) <= 240
+
+    long_umlaut = "ä" * 150 + ".txt"
+    cleaned_umlaut = sanitize_filename(long_umlaut)
+    assert len(cleaned_umlaut) <= 180
+    assert len(cleaned_umlaut.encode("utf-8")) <= 240

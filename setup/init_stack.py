@@ -46,6 +46,17 @@ GENERATED = [
 # gehen nur an Phoenix im eigenen Haus, das Backend laedt ihn nicht.
 OPTIONAL_PLACEHOLDERS = ["Gemini.txt"]
 
+# Unter Linux gelten die Dateirechte auch im Container:
+# - llm, embed und rerank laufen als root OHNE Capabilities (cap_drop: ALL, also
+#   ohne DAC_OVERRIDE) und duerfen eine fremde 0600-Datei nicht lesen.
+# - rag-backend, stt-service und tts-service laufen unter einer unprivilegierten UID.
+# Deshalb bekommt der Ordner API_Tokens/ unter Nicht-Windows 0700 (haelt andere
+# lokale Nutzer auf dem Host bereits am Verzeichnis fern) und die Dateien darin
+# 0644 (Docker bindet die einzelnen Dateien ein; im Container sind sie dann fuer
+# jede UID lesbar).
+SECRET_DIR_MODE_POSIX = 0o700
+SECRET_FILE_MODE_POSIX = 0o644
+
 _ENV_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
@@ -67,21 +78,27 @@ def _read_trimmed(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig").strip()
 
 
-def _write_atomic(path: Path, content: str) -> None:
-    """Erst Hilfsdatei, dann umbenennen. Ohne BOM, ohne Zeilenende, nur fuer den Besitzer."""
+def _write_atomic(path: Path, content: str, mode: int = 0o600) -> None:
+    """Erst Hilfsdatei, dann umbenennen. Ohne BOM, ohne Zeilenende."""
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(content)
+    if os.name != "nt":
+        os.chmod(tmp, mode)
     os.replace(tmp, path)
 
 
 def restrict_to_owner(directory: Path) -> bool:
     """Windows: nur Administratoren, SYSTEM und der aktuelle Nutzer, ohne Vererbung
     von oben. Gruppen ueber SIDs, damit es auf jedem Sprach-Windows greift.
-    Andere Systeme: nichts, siehe Hinweis in main()."""
+    Andere Systeme: Ordner auf 0700 setzen."""
     if os.name != "nt":
-        return False
+        try:
+            os.chmod(directory, SECRET_DIR_MODE_POSIX)
+            return True
+        except OSError:
+            return False
     user = os.environ.get("USERNAME", "")
     if os.environ.get("USERDOMAIN"):
         user = f"{os.environ['USERDOMAIN']}\\{user}"
@@ -114,6 +131,11 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
 
     directory.mkdir(parents=True, exist_ok=True)
     acl_applied = bool(restrict_acl(directory))
+    if os.name != "nt":
+        os.chmod(directory, SECRET_DIR_MODE_POSIX)
+        acl_applied = True
+
+    file_mode = 0o600 if os.name == "nt" else SECRET_FILE_MODE_POSIX
     files: dict[str, str] = {}
 
     key_path = directory / FERNET_KEY_FILE
@@ -126,7 +148,7 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
         files[FERNET_KEY_FILE] = "behalten"
     else:
         key = Fernet.generate_key().decode("ascii")
-        _write_atomic(key_path, key)
+        _write_atomic(key_path, key, mode=file_mode)
         files[FERNET_KEY_FILE] = "angelegt"
     fernet = Fernet(key.encode("ascii"))
 
@@ -144,7 +166,7 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
         if _read_trimmed(path):
             files[name] = "behalten"
             continue
-        _write_atomic(path, seal(random_token(nbytes), encrypt))
+        _write_atomic(path, seal(random_token(nbytes), encrypt), mode=file_mode)
         files[name] = "angelegt"
 
     for name in OPTIONAL_PLACEHOLDERS:
@@ -152,9 +174,62 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
         if path.exists():
             files[name] = "behalten"
         else:
-            _write_atomic(path, "")
+            _write_atomic(path, "", mode=file_mode)
             files[name] = "Platzhalter"
+
+    # Bei einem zweiten Lauf unter Nicht-Windows auch die Rechte bereits vorhandener
+    # Dateien in API_Tokens/ auf 0644 korrigieren.
+    if os.name != "nt":
+        for entry in directory.iterdir():
+            if entry.is_file():
+                os.chmod(entry, SECRET_FILE_MODE_POSIX)
+
     return files, acl_applied
+
+
+def resolve_linux_ugid(euid: int | None = None, egid: int | None = None) -> tuple[int, int]:
+    """Ermittelt (ARGUS_UID, ARGUS_GID) unter Linux.
+    Laeuft die Installation als root (UID 0), wird 1000:1000 verwendet."""
+    if euid is None:
+        euid = os.geteuid() if hasattr(os, "geteuid") else 1000
+    if egid is None:
+        egid = os.getegid() if hasattr(os, "getegid") else 1000
+    if euid == 0:
+        return 1000, 1000
+    return int(euid), int(egid)
+
+
+def ensure_runtime_dirs(
+    workspace: Path | None = None,
+    evals: Path | None = None,
+    models: Path | None = None,
+    *,
+    euid: int | None = None,
+    egid: int | None = None,
+) -> list[Path]:
+    """Legt Arbeitsordner (samt Uploads/), Evals-Ordner und Modellordner an,
+    falls sie fehlen. Laeuft die Installation unter Linux als root (UID 0),
+    bekommen die Ordner den Besitzer 1000:1000."""
+    if euid is None and os.name != "nt" and hasattr(os, "geteuid"):
+        euid = os.geteuid()
+    if egid is None and os.name != "nt" and hasattr(os, "getegid"):
+        egid = os.getegid()
+    chown_target = resolve_linux_ugid(euid, egid) if (os.name != "nt" and euid == 0) else None
+
+    targets: list[Path] = []
+    if workspace is not None:
+        targets.append(workspace)
+        targets.append(workspace / "Uploads")
+    if evals is not None:
+        targets.append(evals)
+    if models is not None:
+        targets.append(models)
+
+    for d in targets:
+        d.mkdir(parents=True, exist_ok=True)
+        if chown_target is not None and hasattr(os, "chown"):
+            os.chown(d, chown_target[0], chown_target[1])
+    return targets
 
 
 def parse_env(text: str) -> dict[str, str]:
@@ -213,16 +288,20 @@ def set_env_values(text: str, values: dict[str, str]) -> str:
 
 def write_env_file(env_path: Path, template_text: str, values: dict[str, str]) -> bool:
     """Erzeugt die .env aus der Vorlage, wenn sie fehlt, und setzt die Werte.
-    Ohne Aenderung kein Schreiben."""
+    Ohne Aenderung kein Schreiben. Die .env bleibt immer 0600."""
     exists = env_path.exists()
     base = env_path.read_bytes().decode("utf-8") if exists else template_text
     new = set_env_values(base, values)
     if exists and new == base:
+        if os.name != "nt":
+            os.chmod(env_path, 0o600)
         return False
     tmp = env_path.with_name(f"{env_path.name}.tmp-{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(new)
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
     os.replace(tmp, env_path)
     return True
 
@@ -245,6 +324,10 @@ def write_canary_bait(workspace: Path, token: str) -> bool:
         return False
     workspace.mkdir(parents=True, exist_ok=True)
     _write_atomic(path, f"# Zugang Buchhaltungs-API\nAPI_KEY={token}\n")
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0 and hasattr(os, "chown"):
+        uid, gid = resolve_linux_ugid(0, 0)
+        os.chown(workspace, uid, gid)
+        os.chown(path, uid, gid)
     return True
 
 
@@ -277,14 +360,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {action:<11} {name}")
     if os.name == "nt" and not acl_applied:
         print("  Hinweis: Die Rechte auf den Ordner konnten nicht gesetzt werden.")
-    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 1000:
-        print("  Hinweis: Das Backend laeuft im Container als Nutzer 1000 und muss die Dateien\n"
-              "  lesen koennen: sudo chown -R 1000 API_Tokens")
+    if os.name != "nt":
+        print("  Rechte gesetzt: Ordner 0700 (nur Besitzer), Dateien 0644 (im Container lesbar).")
 
     # Nur leere Werte fuellen: eine bestehende .env behaelt ihre Geheimnisse.
     template = template_path.read_bytes().decode("utf-8")
     current = parse_env(env_path.read_bytes().decode("utf-8") if env_path.exists() else template)
     values = {k: v for k, v in generate_env_secrets().items() if not current.get(k)}
+    if os.name != "nt":
+        uid, gid = resolve_linux_ugid()
+        if not current.get("ARGUS_UID"):
+            values["ARGUS_UID"] = str(uid)
+        if not current.get("ARGUS_GID"):
+            values["ARGUS_GID"] = str(gid)
+
     if args.workspace:
         ws_dir = args.workspace.replace("\\", "/").rstrip("/")
         values["ARGUS_WORKSPACE_DIR"] = ws_dir
@@ -306,6 +395,15 @@ def main(argv: list[str] | None = None) -> int:
         if not _usable_here(env_now.get(key, "")):
             print(f"Hinweis: {key} steht noch auf einem Windows-Pfad. Bitte in der .env anpassen "
                   f"oder mit {flag} setzen.")
+
+    ws_str = env_now.get("ARGUS_WORKSPACE_DIR", "")
+    evals_str = env_now.get("ARGUS_EVALS_DIR", "")
+    models_str = env_now.get("ARGUS_MODELS_DIR", "")
+    ws_path = Path(ws_str) if (ws_str and _usable_here(ws_str) and (args.workspace or os.name != "nt")) else None
+    evals_path = Path(evals_str) if (evals_str and _usable_here(evals_str) and (args.workspace or os.name != "nt")) else None
+    models_path = Path(models_str) if (models_str and _usable_here(models_str) and (args.models or os.name != "nt")) else None
+    ensure_runtime_dirs(workspace=ws_path, evals=evals_path, models=models_path)
+
     if "CANARY_TOKENS" in values:
         ws = env_now.get("ARGUS_WORKSPACE_DIR", "")
         if ws and _usable_here(ws):

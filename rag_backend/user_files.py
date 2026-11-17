@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import unicodedata
 
 log = logging.getLogger("argus.user_files")
 
@@ -22,7 +23,12 @@ BEREICH_DIRS: dict[str, str] = {
     "ergebnisse": "Ergebnisse",
 }
 
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ ()\-]")
+_SAFE_FILENAME_RE = re.compile(r"[^\w._ ()\-]")
+_WINDOWS_DEVICE_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def get_workspace_root() -> Path:
@@ -41,15 +47,56 @@ def validate_user_id(user_id: int) -> int:
     return user_id
 
 
+def sanitize_filename(raw: str) -> str:
+    """Bereinigt einen Dateinamen (Basename) fuer die sichere Ablage.
+
+    - Normalisiert nach Unicode NFC (wichtig fuer macOS NFD).
+    - Behaelt Buchstaben und Ziffern aller Schriften sowie . _ ( ) - bei.
+    - Ersetzt alle anderen Zeichen durch _.
+    - Entfernt fuehrende Punkte sowie abschliessende Punkte und Leerzeichen.
+    - Begrenzt auf max. 180 Zeichen und max. 240 Bytes in UTF-8.
+    - Weist Windows-Geraetenamen (CON, PRN, AUX, NUL, COM1-9, LPT1-9) und leere Namen ab.
+    """
+    name = unicodedata.normalize("NFC", str(raw or ""))
+    name = os.path.basename(name.replace("\\", "/")).strip()
+    name = name.lstrip(".")
+    name = name.rstrip(". ")
+    if not name or name in {".", ".."}:
+        raise ValueError("Unbrauchbarer Dateiname: Name ist leer.")
+
+    name = _SAFE_FILENAME_RE.sub("_", name)
+    name = name.rstrip(". ")
+    if not name:
+        raise ValueError("Unbrauchbarer Dateiname: Keine zulaessigen Zeichen vorhanden.")
+
+    if len(name) > 180:
+        name = name[:180]
+    while len(name.encode("utf-8")) > 240:
+        name = name[:-1]
+    name = name.rstrip(". ")
+    if not name:
+        raise ValueError("Unbrauchbarer Dateiname nach Laengenbegrenzung.")
+
+    stem = name.split(".")[0].upper()
+    if stem in _WINDOWS_DEVICE_NAMES:
+        raise ValueError(f"Unbrauchbarer Dateiname: Windows-Geraetename {stem!r} ist nicht zulaessig.")
+
+    return name
+
+
 def safe_filename(raw: str) -> str:
     """Baut aus einem beliebigen Namen einen harmlosen Basename ohne Pfadanteile.
 
-    Namen mit ../, %2e%2e, absolutem Pfad, Backslash, Doppelpunkt oder leer
-    werden strikt abgewiesen.
+    Namen mit ../, %2e%2e, absolutem Pfad, Backslash, Doppelpunkt, Steuerzeichen,
+    fuehrendem Punkt oder Windows-Geraetenamen werden strikt abgewiesen.
     """
     raw_str = (raw or "").strip()
     if not raw_str:
         raise ValueError("Unbrauchbarer Dateiname: Name ist leer.")
+
+    # Steuerzeichen strikt abweisen
+    if any(ord(c) < 32 or ord(c) == 127 or unicodedata.category(c).startswith("C") for c in raw_str):
+        raise ValueError(f"Ungueltiger Dateiname mit Steuerzeichen: {raw!r}")
 
     low = raw_str.lower()
     if (
@@ -61,10 +108,10 @@ def safe_filename(raw: str) -> str:
     ):
         raise ValueError(f"Ungueltiger Dateiname mit unzulaessigen Zeichen/Pfaden: {raw!r}")
 
-    name = _SAFE_FILENAME_RE.sub("_", raw_str).lstrip(".")
-    if not name or name in {".", ".."}:
-        raise ValueError("Unbrauchbarer Dateiname.")
-    return name[:180]
+    if raw_str.startswith("."):
+        raise ValueError(f"Ungueltiger Dateiname mit fuehrendem Punkt: {raw!r}")
+
+    return sanitize_filename(raw_str)
 
 
 def get_user_dir(user_id: int, bereich: str, create: bool = True) -> Path:

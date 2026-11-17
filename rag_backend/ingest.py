@@ -239,6 +239,63 @@ def _read_epub_text(filepath: Path) -> Optional[str]:
         return "\n\n".join(book_text) if book_text else None
 
 
+def _read_odt_text(filepath: Path) -> Optional[str]:
+    #--- ODT ohne Drittpaket lesen: ZIP mit content.xml, Text der Absaetze (<text:p>)
+    #--- und Ueberschriften (<text:h>) nur mit der Standardbibliothek (wie _read_epub_text).
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    def _extract_text(element) -> str:
+        parts = []
+        if element.text:
+            parts.append(element.text)
+        for child in element:
+            tag = child.tag.rsplit("}", 1)[-1] if "}" in child.tag else child.tag
+            if tag == "tab":
+                parts.append("\t")
+            elif tag == "line-break":
+                parts.append("\n")
+            elif tag == "s":
+                count_str = child.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:text:1.0}c", child.attrib.get("c", "1"))
+                try:
+                    count = int(count_str)
+                except (ValueError, TypeError):
+                    count = 1
+                parts.append(" " * count)
+            else:
+                parts.append(_extract_text(child))
+            if child.tail:
+                parts.append(child.tail)
+        return "".join(parts)
+
+    try:
+        with zipfile.ZipFile(filepath, "r") as zf:
+            if "content.xml" not in zf.namelist():
+                return None
+            xml_content = zf.read("content.xml")
+        root = ET.fromstring(xml_content)
+        paras = []
+        for el in root.iter():
+            local = el.tag.rsplit("}", 1)[-1] if "}" in el.tag else el.tag
+            if local in ("p", "h"):
+                txt = _extract_text(el).strip()
+                if txt:
+                    paras.append(txt)
+        return "\n\n".join(paras) if paras else None
+    except Exception as e:
+        print(f"  -> ODT-Fehler {filepath.name}: {e}")
+        return None
+
+
+#--- Endungen, aus denen load_file Text zieht. EINE Liste fuer load_file, read_document
+#--- (Meldung "Typ nicht unterstuetzt") und die Indexierung im Monitor. Ein neuer
+#--- Leser in load_file gehoert hier mit hinein.
+READABLE_EXTENSIONS = frozenset({
+    ".pdf", ".docx", ".odt", ".html", ".htm", ".epub", ".pptx", ".xlsx",
+    ".txt", ".md", ".json", ".yaml", ".yml", ".csv", ".py", ".ini", ".cfg",
+})
+
+
 def load_file(filepath: Path) -> Optional[str]:
     try:
         if not filepath.is_file():
@@ -249,7 +306,7 @@ def load_file(filepath: Path) -> Optional[str]:
             return None
 
         suffix = filepath.suffix.lower()
-        if suffix in {".docx", ".xlsx", ".pptx", ".epub"}:
+        if suffix in {".docx", ".xlsx", ".pptx", ".epub", ".odt"}:
             ok, err = _check_zip_limits(filepath)
             if not ok:
                 print(f"  -> Ueberspringe {filepath.name} (Sicherheitsgrenze): {err}")
@@ -287,6 +344,9 @@ def load_file(filepath: Path) -> Optional[str]:
             except Exception as e:
                 print(f"  -> EPUB-Fehler {filepath.name}: {e}")
                 return None
+
+        elif suffix == ".odt":
+            text_content = _read_odt_text(filepath)
 
         elif suffix == ".pptx":
             from pptx import Presentation

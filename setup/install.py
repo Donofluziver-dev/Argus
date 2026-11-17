@@ -1,29 +1,43 @@
 #!/usr/bin/env python3
-"""Gefuehrte Installation fuer Argus (Container-Stapel und Konfiguration)."""
+"""Gefuehrte Installation und Diagnose fuer Argus (Container-Stapel und Konfiguration)."""
 from __future__ import annotations
 
 import argparse
 import ctypes
+import getpass
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import NamedTuple
 
 # Ausgabe nur ASCII-sicher oder UTF-8
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+class DoctorResult(NamedTuple):
+    """Ergebnis einer einzelnen Doctor-Pruefung (OK, WARNUNG oder FEHLER)."""
+    status: str
+    name: str
+    message: str
+
+    def format_line(self) -> str:
+        return f"{self.status}: [{self.name}] {self.message}"
 
 
 # =============================================================================
@@ -165,10 +179,10 @@ def check_ram_bytes() -> int:
                     ("ullAvailVirtual", ctypes.c_ulonglong),
                     ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
                 ]
-            stat = MEMORYSTATUSEX()
-            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-                return int(stat.ullTotalPhys)
+            stat_mem = MEMORYSTATUSEX()
+            stat_mem.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat_mem)):
+                return int(stat_mem.ullTotalPhys)
         except Exception:
             pass
     elif os.path.exists("/proc/meminfo"):
@@ -488,8 +502,63 @@ def download_file_with_resume(
 
 
 # =============================================================================
-# Geheimnisse und .env (setup/init_stack.py)
+# Geheimnisse, .env und Laufzeit-Ordner (setup/init_stack.py)
 # =============================================================================
+
+def _load_init_stack_module(repo_root: Path):
+    """Laedt setup/init_stack.py dynamisch."""
+    init_script = repo_root / "setup" / "init_stack.py"
+    spec = importlib.util.spec_from_file_location("init_stack", init_script)
+    if not spec or not spec.loader:
+        raise ImportError("setup/init_stack.py konnte nicht geladen werden.")
+    init_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(init_mod)
+    return init_mod
+
+
+_COMPOSE_DIR_DEFAULT_RE = re.compile(r"\$\{(ARGUS_[A-Z_]+_DIR):-([^}]+)\}")
+
+
+def _compose_dir_defaults(repo_root: Path) -> dict[str, str]:
+    """Standardwerte der Ordner aus docker-compose.yml (${ARGUS_..._DIR:-<Pfad>}).
+    Fehlt ein Schluessel in der .env, nimmt Compose diesen Wert. Aus der Datei
+    gelesen statt hier wiederholt, damit beide nicht auseinanderlaufen."""
+    compose_path = repo_root / "docker-compose.yml"
+    try:
+        text = compose_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {k: v.strip() for k, v in _COMPOSE_DIR_DEFAULT_RE.findall(text)}
+
+
+def _effective_dir(repo_root: Path, env_data: dict[str, str], key: str,
+                   windows: bool | None = None) -> tuple[str, bool]:
+    """Ordner, den Compose fuer <key> tatsaechlich einbindet: (Pfad, aus Standardwert?).
+
+    Die Standardwerte sind Windows-Pfade. Unter Linux taugen sie nicht: Dort gilt ein
+    fehlender Schluessel als nicht gesetzt (leerer Pfad)."""
+    val = (env_data.get(key) or "").strip()
+    if val:
+        return val, False
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        default = _compose_dir_defaults(repo_root).get(key, "")
+        if default:
+            return default, True
+    return "", False
+
+
+def _load_check_networks_module(repo_root: Path):
+    """Laedt setup/check_networks.py dynamisch."""
+    net_script = repo_root / "setup" / "check_networks.py"
+    spec = importlib.util.spec_from_file_location("check_networks", net_script)
+    if not spec or not spec.loader:
+        raise ImportError("setup/check_networks.py konnte nicht geladen werden.")
+    net_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(net_mod)
+    return net_mod
+
 
 def ensure_setup_venv(repo_root: Path) -> Path:
     """Richtet .venv-setup ein und installiert cryptography==50.0.2."""
@@ -531,15 +600,32 @@ def run_init_stack(repo_root: Path, venv_python: Path, workspace: str, models: s
         raise RuntimeError("setup/init_stack.py wurde mit Fehler beendet.")
 
 
+def ensure_installation_dirs(
+    repo_root: Path,
+    workspace_dir: str,
+    models_dir: str,
+    evals_dir: str | None = None,
+) -> list[Path]:
+    """Legt vor dem Start fehlende Ordner an: Arbeitsordner, darin Uploads,
+    den Evals-Ordner und den Modellordner."""
+    init_mod = _load_init_stack_module(repo_root)
+    if evals_dir is None:
+        env_path = repo_root / ".env"
+        if env_path.exists():
+            env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+            evals_dir = env_data.get("ARGUS_EVALS_DIR")
+        if not evals_dir:
+            evals_dir = str(Path(workspace_dir) / "Evals")
+    return init_mod.ensure_runtime_dirs(
+        workspace=Path(workspace_dir),
+        evals=Path(evals_dir),
+        models=Path(models_dir),
+    )
+
+
 def update_server_env(repo_root: Path, server_url: str) -> None:
     """Aktualisiert die Server-Werte in der .env."""
-    init_script = repo_root / "setup" / "init_stack.py"
-    spec = importlib.util.spec_from_file_location("init_stack", init_script)
-    if not spec or not spec.loader:
-        raise ImportError("setup/init_stack.py konnte nicht geladen werden.")
-    init_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(init_mod)
-
+    init_mod = _load_init_stack_module(repo_root)
     env_path = repo_root / ".env"
     template_path = repo_root / ".env.example"
     template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
@@ -614,6 +700,599 @@ def wait_for_healthz(repo_root: Path, timeout_seconds: int = 1500) -> bool:
 
 
 # =============================================================================
+# Diagnose-Pruefungen (doctor: nur lesen, nichts aendern)
+# =============================================================================
+
+def doctor_check_docker() -> DoctorResult:
+    """Prueft Docker, Docker Compose v2, Erreichbarkeit des Dienstes und unter
+    Linux das NVIDIA Container Toolkit."""
+    rc_ver, _, _ = run_command(["docker", "version"])
+    rc_comp, _, _ = run_command(["docker", "compose", "version"])
+    if rc_ver != 0 or rc_comp != 0:
+        return DoctorResult(
+            "FEHLER",
+            "Docker",
+            "Docker oder Docker Compose v2 fehlt. Naechster Schritt: Docker installieren (https://docs.docker.com/engine/install/).",
+        )
+
+    rc_info, info_out, _ = run_command(["docker", "info"])
+    if rc_info != 0:
+        hint = "Docker Desktop starten" if os.name == "nt" else "sudo systemctl start docker"
+        return DoctorResult(
+            "FEHLER",
+            "Docker",
+            f"Docker-Dienst ist nicht erreichbar. Naechster Schritt: {hint}.",
+        )
+
+    if os.name != "nt":
+        has_nvidia_runtime = "nvidia" in info_out.lower()
+        has_nvidia_ctk = shutil.which("nvidia-ctk") is not None
+        if not (has_nvidia_runtime or has_nvidia_ctk):
+            return DoctorResult(
+                "FEHLER",
+                "Docker",
+                "NVIDIA Container Toolkit fehlt unter Linux. Naechster Schritt: nvidia-container-toolkit installieren und Docker neu starten.",
+            )
+
+    return DoctorResult("OK", "Docker", "Docker und Docker Compose v2 sind erreichbar.")
+
+
+def doctor_check_gpu() -> DoctorResult:
+    """Prueft per nvidia-smi, ob eine NVIDIA-Grafikkarte vorhanden ist."""
+    has_gpu, gpu_name, vram_mib = check_gpu()
+    if not has_gpu:
+        return DoctorResult(
+            "FEHLER",
+            "Grafikkarte",
+            "Keine NVIDIA-Grafikkarte erkannt (nvidia-smi fehlgeschlagen). Naechster Schritt: NVIDIA-Treiber pruefen.",
+        )
+    vram_gb = vram_mib / 1024
+    if vram_mib < 16000:
+        return DoctorResult(
+            "WARNUNG",
+            "Grafikkarte",
+            f"{gpu_name} ({vram_gb:.1f} GB VRAM) erkannt; unter 16 GB VRAM ggf. LLM_N_CPU_MOE in der .env erhoehen.",
+        )
+    return DoctorResult("OK", "Grafikkarte", f"{gpu_name} ({vram_gb:.1f} GB VRAM).")
+
+
+def doctor_check_ram() -> DoctorResult:
+    """Prueft den physischen Arbeitsspeicher."""
+    ram_bytes = check_ram_bytes()
+    if ram_bytes <= 0:
+        return DoctorResult("WARNUNG", "Arbeitsspeicher", "Arbeitsspeicher konnte nicht ermittelt werden.")
+    ram_gb = ram_bytes / (1024**3)
+    if ram_bytes < 30 * (1024**3):
+        return DoctorResult(
+            "WARNUNG",
+            "Arbeitsspeicher",
+            f"{ram_gb:.1f} GB RAM erkannt (mindestens 32 GB empfohlen).",
+        )
+    return DoctorResult("OK", "Arbeitsspeicher", f"{ram_gb:.1f} GB RAM.")
+
+
+def doctor_check_disk_space(models_dir: Path, models_spec_path: Path | None = None) -> DoctorResult:
+    """Prueft freien Platz im Modellordner, ohne Ordner anzulegen."""
+    probe = models_dir
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    if not probe.exists():
+        return DoctorResult(
+            "FEHLER",
+            "Speicherplatz",
+            f"Pfad fuer Modellordner '{models_dir}' existiert nicht.",
+        )
+
+    needed_bytes = 0
+    if models_spec_path and models_spec_path.exists():
+        try:
+            for item in load_models_spec(models_spec_path):
+                target = models_dir / item["target"]
+                if not target.exists() or target.stat().st_size != item["size"]:
+                    needed_bytes += item["size"]
+        except Exception:
+            pass
+
+    usage = shutil.disk_usage(probe)
+    reserve_bytes = 1024**3
+    required_bytes = needed_bytes + reserve_bytes
+    free_gb = usage.free / (1024**3)
+    req_gb = required_bytes / (1024**3)
+    if usage.free < required_bytes:
+        return DoctorResult(
+            "FEHLER",
+            "Speicherplatz",
+            f"Zu wenig freier Platz in '{models_dir}': {free_gb:.1f} GB frei, {req_gb:.1f} GB benoetigt.",
+        )
+    return DoctorResult("OK", "Speicherplatz", f"{free_gb:.1f} GB frei fuer Modellordner '{models_dir}'.")
+
+
+def doctor_check_env(repo_root: Path) -> DoctorResult:
+    """Prueft .env, fehlende Schluessel aus .env.example und ARGUS_*_DIR-Pfade.
+    Gibt niemals Werte von Geheimnissen aus."""
+    env_path = repo_root / ".env"
+    template_path = repo_root / ".env.example"
+    if not env_path.exists():
+        return DoctorResult(
+            "FEHLER",
+            ".env",
+            ".env fehlt. Naechster Schritt: python setup/init_stack.py ausfuehren.",
+        )
+
+    init_mod = _load_init_stack_module(repo_root)
+    env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+    template_data = (
+        init_mod.parse_env(template_path.read_bytes().decode("utf-8"))
+        if template_path.exists()
+        else {}
+    )
+
+    dir_keys = sorted(
+        {k for k in (set(template_data) | set(env_data)) if k.startswith("ARGUS_") and k.endswith("_DIR")}
+        | {"ARGUS_MODELS_DIR", "ARGUS_WORKSPACE_DIR", "ARGUS_EVALS_DIR"}
+    )
+    dir_errors: list[str] = []
+    #--- Unter Windows nimmt Compose fuer einen fehlenden Ordner-Schluessel seinen
+    #--- Standardwert; das ist kein Fehler, solange der Ordner da ist.
+    dir_notes: list[str] = []
+    for key in dir_keys:
+        val, from_default = _effective_dir(repo_root, env_data, key)
+        if not val:
+            dir_errors.append(f"{key} nicht gesetzt")
+            continue
+        if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", val):
+            dir_errors.append(f"{key} steht unter Linux auf einem Windows-Pfad")
+            continue
+        if not Path(val).is_dir():
+            dir_errors.append(f"Ordner fuer {key} fehlt ({val})" if from_default else f"Ordner fuer {key} fehlt")
+            continue
+        if from_default:
+            dir_notes.append(f"{key} nicht gesetzt, Compose nimmt {val}")
+
+    noted = {n.split(" ", 1)[0] for n in dir_notes}
+    missing_keys = [k for k in template_data if k not in env_data and k not in noted]
+
+    if dir_errors:
+        msg = "; ".join(dir_errors)
+        if missing_keys:
+            msg += f" (zudem fehlen aus .env.example: {', '.join(missing_keys)})"
+        msg += ". Naechster Schritt: Pfade in .env pruefen oder python setup/init_stack.py ausfuehren."
+        return DoctorResult("FEHLER", ".env", msg)
+
+    if missing_keys or dir_notes:
+        parts = list(dir_notes)
+        if missing_keys:
+            parts.append(f"Schluessel aus .env.example fehlen in .env: {', '.join(missing_keys)}"
+                         " (es gilt der Standard im Code)")
+        return DoctorResult("WARNUNG", ".env", "; ".join(parts) + ".")
+
+    return DoctorResult("OK", ".env", ".env vorhanden, alle Schluessel und ARGUS_*_DIR-Ordner gueltig.")
+
+
+def _is_dir_writable_for_ugid(path: Path, uid: int, gid: int) -> bool:
+    """Prueft lesend anhand der Dateirechte, ob (uid, gid) in <path> schreiben darf."""
+    if not path.is_dir():
+        return False
+    if os.name == "nt":
+        return os.access(path, os.W_OK)
+    st = path.stat()
+    mode = stat.S_IMODE(st.st_mode)
+    if uid == 0:
+        return True
+    if st.st_uid == uid:
+        return bool(mode & stat.S_IWUSR) and bool(mode & stat.S_IXUSR)
+    if st.st_gid == gid:
+        return bool(mode & stat.S_IWGRP) and bool(mode & stat.S_IXGRP)
+    return bool(mode & stat.S_IWOTH) and bool(mode & stat.S_IXOTH)
+
+
+def doctor_check_secrets_and_dirs(repo_root: Path) -> DoctorResult:
+    """Prueft API_Tokens/ (Vorhandensein und Rechte unter Linux) sowie die Ordner
+    aus Punkt 2 auf Vorhandensein und Beschreibbarkeit fuer ARGUS_UID."""
+    init_mod = _load_init_stack_module(repo_root)
+    compose_path = repo_root / "docker-compose.yml"
+    mounted: set[str] = set()
+    if compose_path.exists():
+        mounted |= set(
+            re.findall(r"\./API_Tokens/([A-Za-z0-9_.]+):", compose_path.read_text(encoding="utf-8"))
+        )
+    if not mounted:
+        mounted = (
+            {init_mod.FERNET_KEY_FILE}
+            | {g[0] for g in init_mod.GENERATED}
+            | set(init_mod.OPTIONAL_PLACEHOLDERS)
+        )
+
+    tokens_dir = repo_root / "API_Tokens"
+    if not tokens_dir.is_dir():
+        return DoctorResult(
+            "FEHLER",
+            "API_Tokens & Ordner",
+            "Ordner API_Tokens/ fehlt. Naechster Schritt: python setup/init_stack.py ausfuehren.",
+        )
+
+    errors: list[str] = []
+    if os.name != "nt":
+        dir_mode = stat.S_IMODE(tokens_dir.stat().st_mode)
+        if dir_mode != 0o700:
+            errors.append(f"API_Tokens/ hat Rechte {oct(dir_mode)} statt 0o700")
+
+    required_non_empty = {init_mod.FERNET_KEY_FILE} | {g[0] for g in init_mod.GENERATED}
+    for name in sorted(mounted):
+        p = tokens_dir / name
+        if not p.is_file():
+            errors.append(f"API_Tokens/{name} fehlt")
+            continue
+        if name in required_non_empty and p.stat().st_size == 0:
+            errors.append(f"API_Tokens/{name} ist leer")
+        if os.name != "nt":
+            f_mode = stat.S_IMODE(p.stat().st_mode)
+            if f_mode != 0o644:
+                errors.append(f"API_Tokens/{name} hat Rechte {oct(f_mode)} statt 0o644")
+
+    env_path = repo_root / ".env"
+    env_data = (
+        init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+        if env_path.exists()
+        else {}
+    )
+    default_uid, default_gid = init_mod.resolve_linux_ugid() if os.name != "nt" else (1000, 1000)
+    try:
+        argus_uid = int(env_data.get("ARGUS_UID") or default_uid)
+    except ValueError:
+        argus_uid = default_uid
+    try:
+        argus_gid = int(env_data.get("ARGUS_GID") or default_gid)
+    except ValueError:
+        argus_gid = default_gid
+
+    ws_str = _effective_dir(repo_root, env_data, "ARGUS_WORKSPACE_DIR")[0]
+    evals_str = _effective_dir(repo_root, env_data, "ARGUS_EVALS_DIR")[0]
+    models_str = _effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]
+
+    check_dirs: list[tuple[str, Path, bool]] = []
+    if ws_str and init_mod._usable_here(ws_str):
+        ws_p = Path(ws_str)
+        check_dirs.append(("ARGUS_WORKSPACE_DIR", ws_p, True))
+        check_dirs.append(("ARGUS_WORKSPACE_DIR/Uploads", ws_p / "Uploads", True))
+    else:
+        errors.append("ARGUS_WORKSPACE_DIR nicht nutzbar")
+
+    if evals_str and init_mod._usable_here(evals_str):
+        check_dirs.append(("ARGUS_EVALS_DIR", Path(evals_str), True))
+    else:
+        errors.append("ARGUS_EVALS_DIR nicht nutzbar")
+
+    if models_str and init_mod._usable_here(models_str):
+        check_dirs.append(("ARGUS_MODELS_DIR", Path(models_str), False))
+    else:
+        errors.append("ARGUS_MODELS_DIR nicht nutzbar")
+
+    for label, d_path, must_write in check_dirs:
+        if not d_path.is_dir():
+            errors.append(f"{label} fehlt")
+        elif must_write and not _is_dir_writable_for_ugid(d_path, argus_uid, argus_gid):
+            errors.append(f"{label} ist fuer UID {argus_uid} nicht beschreibbar")
+
+    if errors:
+        return DoctorResult(
+            "FEHLER",
+            "API_Tokens & Ordner",
+            "; ".join(errors) + ". Naechster Schritt: python setup/init_stack.py ausfuehren.",
+        )
+
+    return DoctorResult("OK", "API_Tokens & Ordner", "Alle Geheimnis-Dateien und Laufzeitordner vorhanden und Rechte stimmen.")
+
+
+def doctor_check_models(models_dir: Path, models_spec_path: Path, verify_sha256: bool = False) -> DoctorResult:
+    """Prueft Modelle aus setup/models.json auf Vorhandensein, Groesse und optional SHA-256."""
+    if not models_spec_path.exists():
+        return DoctorResult("FEHLER", "Modelle", f"{models_spec_path} fehlt.")
+    entries = load_models_spec(models_spec_path)
+    missing: list[str] = []
+    wrong_size: list[str] = []
+    wrong_hash: list[str] = []
+
+    for item in entries:
+        target = models_dir / item["target"]
+        if not target.is_file():
+            missing.append(item["target"])
+            continue
+        if target.stat().st_size != item["size"]:
+            wrong_size.append(item["target"])
+            continue
+        if verify_sha256:
+            if not verify_file_sha256(target, item["sha256"], total_size=item["size"], show_progress=False):
+                wrong_hash.append(item["target"])
+
+    problems: list[str] = []
+    if missing:
+        problems.append(f"fehlend: {', '.join(missing)}")
+    if wrong_size:
+        problems.append(f"Groesse weicht ab: {', '.join(wrong_size)}")
+    if wrong_hash:
+        problems.append(f"SHA-256 falsch: {', '.join(wrong_hash)}")
+
+    if problems:
+        return DoctorResult(
+            "FEHLER",
+            "Modelle",
+            "; ".join(problems) + ". Naechster Schritt: python setup/install.py --models-only.",
+        )
+
+    suffix = "Groesse und SHA-256 geprueft" if verify_sha256 else "Groesse geprueft"
+    return DoctorResult("OK", "Modelle", f"Alle {len(entries)} Modelldateien vorhanden ({suffix}).")
+
+
+def doctor_check_networks(repo_root: Path) -> DoctorResult:
+    """Prueft die Netz-Abschottung per 'docker compose config --format json' und setup/check_networks.py."""
+    net_mod = _load_check_networks_module(repo_root)
+    env_path = repo_root / ".env"
+
+    # Falls noch keine .env existiert, eine temporaer leere Datei fuer die Compose-Aufloesung nutzen.
+    temp_env: Path | None = None
+    try:
+        cmd = ["docker", "compose"]
+        if not env_path.exists():
+            fd, tmp_name = tempfile.mkstemp(prefix="argus-empty-env-", suffix=".env")
+            os.close(fd)
+            temp_env = Path(tmp_name)
+            cmd.extend(["--env-file", str(temp_env)])
+        cmd.extend(["config", "--format", "json"])
+
+        res = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, check=False)
+        if res.returncode != 0 or not res.stdout.strip():
+            err_line = (res.stderr or "").strip().splitlines()
+            short_err = err_line[0] if err_line else "docker compose config fehlgeschlagen"
+            return DoctorResult("FEHLER", "Netz-Abschottung", short_err)
+
+        cfg = json.loads(res.stdout)
+        errors = net_mod.check(cfg)
+        if errors:
+            return DoctorResult("FEHLER", "Netz-Abschottung", "; ".join(errors))
+        return DoctorResult(
+            "OK",
+            "Netz-Abschottung",
+            f"{len(cfg.get('services') or {})} Dienste geprueft, keine Abweichung.",
+        )
+    except Exception as exc:
+        return DoctorResult("FEHLER", "Netz-Abschottung", f"Pruefung fehlgeschlagen: {exc}")
+    finally:
+        if temp_env is not None:
+            temp_env.unlink(missing_ok=True)
+
+
+def doctor_check_stack(repo_root: Path, healthz_url: str = "http://127.0.0.1:7860/healthz") -> DoctorResult:
+    """Prueft den Laufzustand der Container (docker compose ps) und /healthz auf 127.0.0.1:7860."""
+    try:
+        res = subprocess.run(
+            ["docker", "compose", "ps", "--format", "json"],
+            cwd=repo_root, capture_output=True, text=True, check=False,
+        )
+    except Exception as exc:
+        return DoctorResult("FEHLER", "Stapel-Status", f"docker compose ps fehlgeschlagen: {exc}")
+
+    items: list[dict] = []
+    if res.returncode == 0 and res.stdout.strip():
+        text = res.stdout.strip()
+        try:
+            if text.startswith("["):
+                items = json.loads(text)
+            else:
+                for line in text.splitlines():
+                    if line.strip():
+                        items.append(json.loads(line.strip()))
+        except Exception:
+            items = []
+
+    healthy = check_healthz(healthz_url)
+    if not items:
+        if healthy:
+            return DoctorResult("OK", "Stapel-Status", "/healthz auf 127.0.0.1:7860 antwortet mit HTTP 200.")
+        return DoctorResult(
+            "WARNUNG",
+            "Stapel-Status",
+            "Container-Stapel laeuft derzeit nicht. Naechster Schritt: docker compose up -d.",
+        )
+
+    not_running = [
+        (it.get("Service") or it.get("Name", "dienst"))
+        for it in items
+        if it.get("State", "").lower() != "running"
+    ]
+    unhealthy = [
+        (it.get("Service") or it.get("Name", "dienst"))
+        for it in items
+        if it.get("Health", "").lower() == "unhealthy"
+    ]
+    if not_running or unhealthy:
+        problems = []
+        if not_running:
+            problems.append(f"nicht laufend: {', '.join(not_running)}")
+        if unhealthy:
+            problems.append(f"ungesund: {', '.join(unhealthy)}")
+        return DoctorResult(
+            "FEHLER",
+            "Stapel-Status",
+            "; ".join(problems) + ". Naechster Schritt: docker compose logs pruefen.",
+        )
+
+    if healthy:
+        return DoctorResult(
+            "OK",
+            "Stapel-Status",
+            f"{len(items)} Dienste laufen, /healthz auf 127.0.0.1:7860 antwortet.",
+        )
+
+    starting = [
+        (it.get("Service") or it.get("Name", "dienst"))
+        for it in items
+        if it.get("Health", "").lower() == "starting"
+    ]
+    if starting:
+        return DoctorResult(
+            "WARNUNG",
+            "Stapel-Status",
+            f"Dienste starten noch ({', '.join(starting)}); /healthz antwortet noch nicht.",
+        )
+    return DoctorResult(
+        "FEHLER",
+        "Stapel-Status",
+        "Container laufen, aber /healthz auf 127.0.0.1:7860 antwortet nicht. Naechster Schritt: docker compose logs rag-backend.",
+    )
+
+
+def doctor_check_switches(env_data: dict[str, str]) -> list[DoctorResult]:
+    """Prueft sicherheitsrelevante Schalter in der .env und liefert Hinweise als WARNUNG.
+    Gibt niemals Werte von Geheimnissen aus."""
+    warnings: list[DoctorResult] = []
+
+    if env_data.get("CLOUD_AGENTS_ENABLED", "").strip().lower() == "true":
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter CLOUD_AGENTS_ENABLED",
+            "CLOUD_AGENTS_ENABLED=true: Cloud-Helfer sind eingeschaltet (Anfragen koennen geschwaerzt an externe Modell-APIs gehen).",
+        ))
+    if env_data.get("CLOUD_MISSION_AUTO_APPROVE", "").strip().lower() == "true":
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter CLOUD_MISSION_AUTO_APPROVE",
+            "CLOUD_MISSION_AUTO_APPROVE=true: Cloud-Missionen und cloud_ask laufen ohne Einzelfreigabe.",
+        ))
+    if not env_data.get("DASHBOARD_SETUP_TOKEN", "").strip():
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter DASHBOARD_SETUP_TOKEN",
+            "DASHBOARD_SETUP_TOKEN ist leer: Beim Erstlauf kann jeder, der die Seite zuerst erreicht, das Administrator-Konto anlegen.",
+        ))
+    if env_data.get("EGRESS_AFTER_SENSITIVE", "").strip().lower() == "allow":
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter EGRESS_AFTER_SENSITIVE",
+            "EGRESS_AFTER_SENSITIVE=allow: Nach dem Lesen sensibler Daten bleibt der Internetzugang im Gespraech offen.",
+        ))
+    if env_data.get("WEB_INJECTION_GUARD", "true").strip().lower() != "true":
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter WEB_INJECTION_GUARD",
+            "WEB_INJECTION_GUARD ist nicht 'true': Die Pruefung abgerufener Webseiten auf Prompt-Injection ist abgeschaltet.",
+        ))
+    if env_data.get("API_DOCS", "").strip().lower() == "true":
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter API_DOCS",
+            "API_DOCS=true: Die Routenbeschreibung (/docs, /openapi.json) ist ohne Anmeldung abrufbar.",
+        ))
+
+    if not warnings:
+        return [DoctorResult("OK", "Sicherheitsschalter", "Keine risikobehafteten Schalter aktiv.")]
+    return warnings
+
+
+def doctor_check_selinux(enforce_file: Path = Path("/sys/fs/selinux/enforce")) -> DoctorResult:
+    """Prueft unter Linux, ob SELinux im Modus enforcing laeuft."""
+    if os.name == "nt":
+        return DoctorResult("OK", "SELinux", "Unter Windows nicht zutreffend.")
+
+    enforcing = False
+    try:
+        if enforce_file.exists() and enforce_file.read_text(encoding="utf-8").strip() == "1":
+            enforcing = True
+    except OSError:
+        pass
+
+    if not enforcing and shutil.which("getenforce"):
+        rc, out, _ = run_command(["getenforce"])
+        if rc == 0 and out.strip().lower() == "enforcing":
+            enforcing = True
+
+    if enforcing:
+        return DoctorResult(
+            "WARNUNG",
+            "SELinux",
+            "SELinux ist im Modus 'enforcing' aktiv: Bind-Mounts in Docker brauchen dann Labels (:z oder :Z).",
+        )
+    return DoctorResult("OK", "SELinux", "SELinux ist nicht im Modus enforcing.")
+
+
+def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[DoctorResult]]:
+    """Fuehrt alle Diagnose-Pruefungen lesend aus und gibt eine Zeile je Pruefung aus."""
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    env_data = (
+        init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+        if env_path.exists()
+        else {}
+    )
+    #--- Derselbe Ordner, den Compose einbindet (Schluessel oder Standardwert der
+    #--- Compose-Datei); unter Linux ohne Schluessel die Vorgabe der Installation.
+    models_dir = Path(_effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]
+                      or os.path.expanduser("~/argus/models"))
+    models_spec_path = repo_root / "setup" / "models.json"
+
+    results: list[DoctorResult] = [
+        doctor_check_docker(),
+        doctor_check_gpu(),
+        doctor_check_ram(),
+        doctor_check_disk_space(models_dir, models_spec_path),
+        doctor_check_env(repo_root),
+        doctor_check_secrets_and_dirs(repo_root),
+        doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models),
+        doctor_check_networks(repo_root),
+        doctor_check_stack(repo_root),
+    ]
+    results.extend(doctor_check_switches(env_data))
+    if os.name != "nt":
+        results.append(doctor_check_selinux())
+
+    for r in results:
+        print(r.format_line())
+
+    has_error = any(r.status == "FEHLER" for r in results)
+    return (1 if has_error else 0), results
+
+
+# =============================================================================
+# Passwort zuruecksetzen (reset-password <konto>)
+# =============================================================================
+
+def run_reset_password(repo_root: Path, account: str) -> int:
+    """Fragt das neue Passwort zweimal verdeckt ab und uebergibt es per Standardeingabe
+    an rag_backend.admin_cli im laufenden Container rag-backend."""
+    name = (account or "").strip()
+    if not name:
+        print("Fehler: Bitte einen Kontonamen angeben.", file=sys.stderr)
+        return 1
+
+    try:
+        pw1 = getpass.getpass(f"Neues Passwort fuer '{name}': ")
+        pw2 = getpass.getpass("Passwort wiederholen: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAbgebrochen.", file=sys.stderr)
+        return 1
+
+    if pw1 != pw2:
+        print("Fehler: Die eingegebenen Passwoerter stimmen nicht ueberein.", file=sys.stderr)
+        return 1
+    if len(pw1) < 8:
+        print("Fehler: Das Passwort muss mindestens 8 Zeichen lang sein.", file=sys.stderr)
+        return 1
+
+    cmd = [
+        "docker", "compose", "exec", "-T", "rag-backend",
+        "python", "-m", "rag_backend.admin_cli", "reset-password", name,
+    ]
+    res = subprocess.run(
+        cmd,
+        input=pw1 + "\n",
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    return res.returncode
+
+
+# =============================================================================
 # Hauptablauf
 # =============================================================================
 
@@ -626,9 +1305,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-models", action="store_true", help="Modelle nicht laden.")
     parser.add_argument("--no-start", action="store_true", help="Stapel nicht starten.")
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
+
+    subparsers = parser.add_subparsers(dest="subcommand")
+    doc_parser = subparsers.add_parser("doctor", help="Installation und Umgebung lesend pruefen.")
+    doc_parser.add_argument("--verify-models", action="store_true", help="Modelldateien zusaetzlich per SHA-256 pruefen.")
+    doc_parser.add_argument("--stack", type=str, default=None, help="Pfad zur Installation (Standard: dieses Repo).")
+
+    rp_parser = subparsers.add_parser("reset-password", help="Passwort eines Kontos im Backend-Container zuruecksetzen.")
+    rp_parser.add_argument("account", help="Kontoname, dessen Passwort zurueckgesetzt werden soll.")
+
     args = parser.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
+
+    if args.subcommand == "doctor":
+        target_root = Path(args.stack).resolve() if args.stack else repo_root
+        rc, _ = run_doctor(target_root, verify_models=args.verify_models)
+        return rc
+
+    if args.subcommand == "reset-password":
+        return run_reset_password(repo_root, args.account)
 
     print("=================================================================")
     print("                ARGUS - Gefuehrte Installation                   ")
@@ -712,11 +1408,12 @@ def main(argv: list[str] | None = None) -> int:
     print("")
 
     # -------------------------------------------------------------------------
-    # Schritt 4: Geheimnisse und .env anlegen
+    # Schritt 4: Geheimnisse, .env und Laufzeit-Ordner anlegen
     # -------------------------------------------------------------------------
     print("[4/7] Erzeuge Geheimnisse und .env...")
     venv_python = ensure_setup_venv(repo_root)
     run_init_stack(repo_root, venv_python, workspace=workspace_dir, models=models_dir)
+    ensure_installation_dirs(repo_root, workspace_dir=workspace_dir, models_dir=models_dir)
 
     if server_url:
         update_server_env(repo_root, server_url)
@@ -775,24 +1472,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Einrichtungs-Schluessel in Zwischenablage kopieren (nur Windows)
     if os.name == "nt":
-        init_script = repo_root / "setup" / "init_stack.py"
-        spec = importlib.util.spec_from_file_location("init_stack", init_script)
-        if spec and spec.loader:
-            init_mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(init_mod)
-            env_file = repo_root / ".env"
-            if env_file.exists():
-                env_data = init_mod.parse_env(env_file.read_bytes().decode("utf-8"))
-                token = env_data.get("DASHBOARD_SETUP_TOKEN", "")
-                if token:
-                    copy_clip = prompt_bool("Soll der Einrichtungs-Schluessel in die Zwischenablage kopiert werden?",
-                                            default=True, non_interactive=args.yes)
-                    if copy_clip:
-                        try:
-                            subprocess.run(["clip"], input=token.encode("utf-8"), check=True)
-                            print("Der Einrichtungs-Schluessel wurde in die Zwischenablage kopiert.")
-                        except Exception as exc:
-                            print(f"Konnte nicht in Zwischenablage kopieren: {exc}")
+        init_mod = _load_init_stack_module(repo_root)
+        env_file = repo_root / ".env"
+        if env_file.exists():
+            env_data = init_mod.parse_env(env_file.read_bytes().decode("utf-8"))
+            token = env_data.get("DASHBOARD_SETUP_TOKEN", "")
+            if token:
+                copy_clip = prompt_bool("Soll der Einrichtungs-Schluessel in die Zwischenablage kopiert werden?",
+                                        default=True, non_interactive=args.yes)
+                if copy_clip:
+                    try:
+                        subprocess.run(["clip"], input=token.encode("utf-8"), check=True)
+                        print("Der Einrichtungs-Schluessel wurde in die Zwischenablage kopiert.")
+                    except Exception as exc:
+                        print(f"Konnte nicht in Zwischenablage kopieren: {exc}")
 
     open_now = prompt_bool("Soll die Oberflaeche jetzt im Browser geoeffnet werden?",
                            default=True, non_interactive=args.yes)

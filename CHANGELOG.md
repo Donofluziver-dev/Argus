@@ -92,6 +92,14 @@ roles, administrator and user.
 
 ### Added
 
+- **`install.cmd doctor` / `./install.sh doctor`** checks an installation without changing
+  anything: Docker and GPU, memory and disk space, `.env` against `.env.example`, secrets and
+  folder permissions, models (`--verify-models` adds SHA-256), network isolation, the state of
+  the stack and risky switches. It never prints secret values.
+- **`install.cmd reset-password <account>`** resets a password through the backend container
+  (`python -m rag_backend.admin_cli`), also for the last administrator. The password is read
+  from standard input, all sessions of the account end and the reset is audited.
+- **OpenDocument text (`.odt`)** is read and indexed.
 - **Audit of logins and account changes, forwarding to a SIEM.** Logins (successful, failed,
   locked), API logins, logouts, setup, password changes and every account change by an
   administrator go into the HMAC-chained audit log, with account, address and reason but
@@ -149,6 +157,26 @@ roles, administrator and user.
 
 ### Fixed
 
+- **The stack could not start on Linux.** The secrets were created with mode `0600`; the
+  model services run as root without capabilities and the backend and speech services as uid
+  1000, so none of them could read them unless the installing user happened to be uid 1000.
+  `API_Tokens/` now gets `0700` and the files `0644`. The backend runs as the installing
+  user (`ARGUS_UID`, `ARGUS_GID` in `.env`), the installer creates the workspace, uploads,
+  evals and model folders, and the backend image runs under any uid.
+- SearXNG mounted the `searxng_config` folder writable; it now gets only `settings.yml`,
+  read-only.
+- `install.cmd` is checked out with CRLF line endings; `cmd.exe` is unreliable with labels in
+  LF files.
+- **File names keep umlauts and other letters.** "Prüfbericht.pdf" became "Pr_fbericht.pdf",
+  in the chat and in every passage of the document search, and files with umlauts placed into
+  `Uploads` by hand could not be indexed. Names are normalised to NFC; Windows device names
+  are rejected. Backend and sandbox use the same rule.
+- Uploads of administrators were deleted after 24 hours even when they had not been indexed
+  yet; only indexed files are cleaned up now.
+- `.doc` and `.rtf` could be uploaded but not read; they are no longer accepted, and
+  `read_document` tells an unsupported type, an image and a scan apart.
+- Voice recordings between 25 and 50 MB ended in "STT service unreachable"; the limit is now
+  25 MB on both sides and the message says the recording is too large.
 - Timestamps from the backend were read as local time in the interface; times were off by the
   UTC offset and chats after midnight appeared under "yesterday".
 - After creating the first account and logging out, the page showed the setup form again

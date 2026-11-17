@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import warnings
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -37,6 +38,44 @@ _KILL_MAX_ATTEMPTS = 25
 _CALC_TIMEOUT_SEC = 5.0
 _CALC_CPU_LIMIT_SEC = (6, 7)
 _CALC_MEM_LIMIT_BYTES = 256 * 1024 * 1024
+
+_SAFE_SANDBOX_NAME_RE = _re.compile(r"[^\w._ ()\-]")
+_WINDOWS_DEVICE_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+#--- Paritaet mit rag_backend/user_files.py:sanitize_filename
+#--- Bereinigt Dateinamen fuer data/ und out/ nach denselben Regeln.
+def sanitize_filename(raw: str) -> str:
+    """Bereinigt einen Dateinamen (Basename) fuer data/ und out/."""
+    name = unicodedata.normalize("NFC", str(raw or ""))
+    name = os.path.basename(name.replace("\\", "/")).strip()
+    name = name.lstrip(".")
+    name = name.rstrip(". ")
+    if not name or name in {".", ".."}:
+        raise ValueError("Unbrauchbarer Dateiname: Name ist leer.")
+
+    name = _SAFE_SANDBOX_NAME_RE.sub("_", name)
+    name = name.rstrip(". ")
+    if not name:
+        raise ValueError("Unbrauchbarer Dateiname: Keine zulaessigen Zeichen vorhanden.")
+
+    if len(name) > 180:
+        name = name[:180]
+    while len(name.encode("utf-8")) > 240:
+        name = name[:-1]
+    name = name.rstrip(". ")
+    if not name:
+        raise ValueError("Unbrauchbarer Dateiname nach Laengenbegrenzung.")
+
+    stem = name.split(".")[0].upper()
+    if stem in _WINDOWS_DEVICE_NAMES:
+        raise ValueError(f"Unbrauchbarer Dateiname: Windows-Geraetename {stem!r} ist nicht zulaessig.")
+
+    return name
 
 
 def _harden_service_process() -> None:
@@ -717,8 +756,10 @@ def _exec_code(
         if not isinstance(f, dict):
             continue
         raw_name = f.get("name") or ""
-        clean_name = os.path.basename(raw_name.replace("\\", "/")).strip()
-        clean_name = _re.sub(r"[^A-Za-z0-9._ ()\-]", "_", clean_name).lstrip(".")
+        try:
+            clean_name = sanitize_filename(raw_name)
+        except ValueError:
+            continue
         if not clean_name:
             continue
         raw_b64 = f.get("content") or f.get("content_base64") or ""
@@ -861,7 +902,10 @@ def _exec_code(
                             # Nur normale Dateien direkt in out/ (keine Unterordner, keine Symlinks)
                             if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
                                 continue
-                            clean_out_name = _re.sub(r"[^A-Za-z0-9._ ()\-]", "_", entry.name).lstrip(".")
+                            try:
+                                clean_out_name = sanitize_filename(entry.name)
+                            except ValueError:
+                                continue
                             if not clean_out_name:
                                 continue
                             file_size = st.st_size

@@ -1849,7 +1849,22 @@ async def read_document(path: str) -> str:
         if not cpath.is_file():
             return "ERROR: Document not found or access denied." if user_role not in (None, "admin") else f"ERROR: Path does not exist or is invalid: {path}"
 
-        text = await asyncio.to_thread(load_file, cpath)
+        #--- Unterscheidung: Bild vs. nicht unterstuetzter Dateityp vs. leer/Scan
+        from rag_backend.ingest import READABLE_EXTENSIONS as _readable_exts
+        _img_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        suffix = cpath.suffix.lower()
+        if suffix in _img_exts:
+            return f"ERROR: '{cpath.name}' is an image. Images cannot be read as text documents."
+        if suffix not in _readable_exts:
+            ext_list = ", ".join(sorted(_readable_exts))
+            return (f"ERROR: File type '{suffix or 'unknown'}' is not supported. "
+                    f"Supported readable types: {ext_list}.")
+
+        try:
+            text = await asyncio.to_thread(load_file, cpath)
+        except Exception:
+            return "ERROR: Failed to read document."
+
         if not text or not text.strip():
             return (f"ERROR: No text could be extracted from '{cpath.name}' -- scanned/image "
                     f"PDF or empty document. OCR is not available.")

@@ -54,7 +54,8 @@ an audit log that can go to the company's SIEM ([Why Argus is secure](#why-argus
 
 ## What works today
 
-- **Questions about your own documents:** PDF, Word, Excel, PowerPoint, EPUB, HTML, text. The
+- **Questions about your own documents:** PDF, Word (`.docx`), OpenDocument text (`.odt`),
+  Excel, PowerPoint, EPUB, HTML, text; file names keep umlauts and other letters. The
   model answers from retrieved passages, not from memory (often called "RAG"). Search combines
   meaning (bge-m3) and keywords (BM25) and ranks hits with a reranker; identifiers such as
   part numbers match literally. Above the answer the chat lists the documents the passages
@@ -99,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 339 for the backend, 46 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 394 for the backend, 72 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -339,7 +340,9 @@ These are known and not solved yet:
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) are fixed parts of the
   stack; for an offer to third parties both should be optional or replaceable.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
-- `install.sh` is only partly tested (syntax, ShellCheck, the Python steps on Windows).
+- Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
+  the stack has not yet been started on a real Linux server. With SELinux enforcing, the bind
+  mounts need labels (`:z`); `doctor` warns about it.
 - Image input is not switched on yet (the model service does not load the mmproj file), and
   PDFs without a text layer (scans) are skipped when documents are indexed. The intended way
   is the multimodal model itself, not a separate OCR.
@@ -349,7 +352,10 @@ Details: [README.de.md](README.de.md#offen-für-einen-einsatz-im-unternehmen).
 ## Setup
 
 Tested on Windows 11 with Docker Desktop (WSL2). Linux with Docker Engine and the NVIDIA
-Container Toolkit is intended but not yet tested on real hardware. Requirements: an NVIDIA GPU
+Container Toolkit is intended but not yet tested on real hardware. On Linux the installer
+writes the installing user's ids as `ARGUS_UID`/`ARGUS_GID` to `.env`, so the backend can write
+to the workspace, and gives `API_Tokens/` mode `0700` with `0644` files, so containers can read
+the mounted secrets while other users of the machine cannot. Requirements: an NVIDIA GPU
 (measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models.
 
 **Guided setup:** run `install.cmd` on Windows (double-click) or `./install.sh` on Linux. It
@@ -361,6 +367,13 @@ resumable), builds and starts the stack and waits until Argus answers. Every ste
 running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
 `--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
 there is deliberately no EXE.
+
+The same script checks and maintains an installation: `install.cmd doctor` (or `./install.sh
+doctor`) only reads and reports Docker, GPU, `.env`, secrets and folder permissions, models
+(`--verify-models` adds SHA-256), network isolation, the stack and risky switches, never secret
+values. `install.cmd reset-password <account>` resets a password, also of the last
+administrator, ends that account's sessions and writes an audit entry; the stack must be
+running.
 
 Then open `http://127.0.0.1:7860`. The page asks for a user name, a password and the setup
 token from `.env` (`DASHBOARD_SETUP_TOKEN`). This account becomes the administrator; it creates
