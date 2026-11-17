@@ -946,6 +946,14 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     assert env3["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
 
 
+def _own_ugid() -> dict[str, str]:
+    """ARGUS_UID/GID = der Nutzer, der die Tests ausfuehrt (wie init_stack es unter Linux
+    eintraegt). Ohne sie prueft doctor gegen 1000:1000, den Standard aus compose."""
+    if not hasattr(os, "getuid"):
+        return {}
+    return {"ARGUS_UID": str(os.getuid()), "ARGUS_GID": str(os.getgid())}
+
+
 def test_doctor_check_proxy_states(installer, tmp_path):
     repo = tmp_path / "repo"
     (repo / "proxy" / "certs").mkdir(parents=True)
@@ -968,6 +976,7 @@ def test_doctor_check_proxy_states(installer, tmp_path):
         "ARGUS_TRUSTED_PROXIES": "172.31.250.0/29",
         "TRUSTED_HOSTS": "argus.example.org,127.0.0.1,localhost,rag-backend",
         "DASHBOARD_ORIGINS": "https://argus.example.org,http://127.0.0.1:7860",
+        **_own_ugid(),
     }
     assert installer.doctor_check_proxy(repo, valid_proxy_env).status == "OK"
 
@@ -1036,7 +1045,8 @@ def test_update_server_env_with_proxy_creates_dirs_and_port(installer, tmp_path)
     assert parsed["ARGUS_PROXY_HTTPS_PORT"] == "8443"
     assert (repo / "proxy" / "data").is_dir() and (repo / "proxy" / "certs").is_dir()
     #--- Was der Installer schreibt, besteht die eigene Pruefung (bis auf die Zertifikate).
-    r = installer.doctor_check_proxy(repo, parsed)
+    #--- ARGUS_UID setzt sonst init_stack; der Installer laeuft hier ohne.
+    r = installer.doctor_check_proxy(repo, {**parsed, **_own_ugid()})
     assert r.status == "FEHLER" and "cert.pem" in r.message
     assert "TRUSTED_HOSTS" not in r.message and "DASHBOARD_ORIGINS" not in r.message
     assert "Datenordner" not in r.message
