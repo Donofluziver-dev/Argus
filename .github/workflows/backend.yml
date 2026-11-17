@@ -57,7 +57,9 @@ jobs:
         run: |
           touch .env
           docker compose config -q
+          docker compose --profile proxy config -q
       # Wer ins Internet darf, wer Ports veroeffentlicht. Das Skript gibt nur Namen aus.
       - name: Netz-Abschottung
         run: |
           docker compose config --format json | python3 setup/check_networks.py
+          docker compose --profile proxy config --format json | python3 setup/check_networks.py

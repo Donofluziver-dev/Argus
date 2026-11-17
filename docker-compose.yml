@@ -20,6 +20,12 @@ networks:
   publish:
   sandbox:
     internal: true
+  # TLS-Eingang (Profil "proxy"): nur caddy und rag-backend. Festes Subnetz,
+  # damit ARGUS_TRUSTED_PROXIES genau diesem Netz vertrauen kann.
+  edge:
+    ipam:
+      config:
+        - subnet: ${ARGUS_EDGE_SUBNET:-172.31.250.0/29}
 
 services:
   llm:
@@ -344,12 +350,14 @@ services:
     env_file: .env
     user: "${ARGUS_UID:-1000}:${ARGUS_GID:-1000}"
     restart: unless-stopped
-    # Einziger Dienst in allen drei Netzen: Er braucht das Internet (Websuche,
-    # Seitenabruf, Cloud) und spricht Modell, Datenbanken und Sandbox an.
+    # Einziger Dienst in allen Netzen: Er braucht das Internet (Websuche,
+    # Seitenabruf, Cloud), spricht Modell, Datenbanken und Sandbox an und ist
+    # ueber "edge" fuer den optionalen TLS-Proxy (caddy) erreichbar.
     networks:
       - backend
       - intern
       - sandbox
+      - edge
     ports:
       - "127.0.0.1:7860:7860"
     mem_limit: 8g
@@ -492,6 +500,48 @@ services:
     # Reicht die Antworten des Modells und Audio durch; das kostet kaum Rechenzeit.
     cpus: "1.0"
     pids_limit: 32
+
+  # TLS-Reverse-Proxy fuer den Server-Betrieb (nur mit --profile proxy bzw.
+  # COMPOSE_PROFILES=proxy aktiv). Haengt ausschliesslich im Netz "edge".
+  caddy:
+    image: caddy:2.11-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    profiles: ["proxy"]
+    restart: unless-stopped
+    # Laeuft wie das Backend als der installierende Nutzer: So liest Caddy unter
+    # Linux einen Firmen-Schluessel mit Rechten 0600 und schreibt in proxy/data.
+    user: "${ARGUS_UID:-1000}:${ARGUS_GID:-1000}"
+    networks:
+      - edge
+    ports:
+      - "${ARGUS_PROXY_BIND:-0.0.0.0}:${ARGUS_PROXY_HTTP_PORT:-80}:80"
+      - "${ARGUS_PROXY_BIND:-0.0.0.0}:${ARGUS_PROXY_HTTPS_PORT:-443}:443"
+    environment:
+      - ARGUS_DOMAIN=${ARGUS_DOMAIN:-localhost}
+      - ARGUS_TLS_MODE=${ARGUS_TLS_MODE:-internal}
+    # Ports 80 und 443 ohne Root und ohne Capability. Docker setzt das seit 20.10
+    # ohnehin; hier steht es ausdruecklich, falls eine Installation es aendert.
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=0
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec
+      # autosave.json; Caddy liest seine Konfiguration bei jedem Start aus dem Caddyfile.
+      - /config:size=4m,noexec,mode=1777
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Zertifikate, ACME-Konto und die eigene CA (pki/authorities/local/root.crt).
+      - ${ARGUS_PROXY_DATA_DIR:-./proxy/data}:/data
+      - ${ARGUS_TLS_DIR:-./proxy/certs}:/certs:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: "1.0"
+    pids_limit: 64
+    depends_on:
+      rag-backend:
+        condition: service_healthy
 
 volumes:
   pg_data:

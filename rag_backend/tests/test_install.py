@@ -6,6 +6,7 @@ import hashlib
 import http.server
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -822,3 +823,220 @@ def test_doctor_uses_compose_defaults_for_missing_dirs_only_on_windows(installer
     assert installer._effective_dir(root, env, "ARGUS_MODELS_DIR", windows=False) == ("", False)
     # Ohne Compose-Datei gibt es keinen Standard.
     assert installer._effective_dir(tmp_path, env, "ARGUS_MODELS_DIR", windows=True) == ("", False)
+
+
+# =============================================================================
+# 8. TLS-Proxy-Optionen, .env-Werte und Doctor-Pruefungen (Auftrag C)
+# =============================================================================
+
+
+def test_compute_and_update_server_env_with_proxy(installer, tmp_path):
+    # 1. Mit Proxy (Standard internal) und leerer Vorbelegung
+    env_p = installer.compute_server_env(
+        "https://argus.example.org:8443",
+        use_proxy=True,
+        tls_mode="internal",
+        existing_env={},
+    )
+    assert env_p["DASHBOARD_ORIGINS"] == "https://argus.example.org:8443,http://127.0.0.1:7860,http://localhost:7860"
+    assert env_p["TRUSTED_HOSTS"] == "argus.example.org,127.0.0.1,localhost,rag-backend"
+    assert env_p["COMPOSE_PROFILES"] == "proxy"
+    assert env_p["ARGUS_DOMAIN"] == "argus.example.org"
+    assert env_p["ARGUS_TLS_MODE"] == "internal"
+    assert env_p["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
+
+    # 2. Vorhandene COMPOSE_PROFILES und eigenes ARGUS_EDGE_SUBNET bleiben erhalten
+    env_keep = installer.compute_server_env(
+        "https://ki.firma.de",
+        use_proxy=True,
+        tls_mode="files",
+        existing_env={"COMPOSE_PROFILES": "monitoring,extra", "ARGUS_EDGE_SUBNET": "10.250.0.0/29"},
+    )
+    assert env_keep["COMPOSE_PROFILES"] == "monitoring,extra,proxy"
+    assert env_keep["ARGUS_DOMAIN"] == "ki.firma.de"
+    assert env_keep["ARGUS_TLS_MODE"] == "files"
+    assert env_keep["ARGUS_TRUSTED_PROXIES"] == "10.250.0.0/29"
+
+    # 3. Ungueltiger TLS-Modus wirft ValueError
+    with pytest.raises(ValueError, match="TLS-Modus"):
+        installer.compute_server_env("https://ki.firma.de", use_proxy=True, tls_mode="ungueltig")
+
+    # 4. update_server_env schreibt Werte in .env
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+    shutil.copy2(_SCRIPT.parent.parent / ".env.example", repo / ".env.example")
+    init_mod = installer._load_init_stack_module(repo)
+    (repo / ".env").write_text("COMPOSE_PROFILES=alt\n", encoding="utf-8")
+
+    installer.update_server_env(repo, "https://argus.firma.de", use_proxy=True, tls_mode="acme")
+    parsed = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert parsed["COMPOSE_PROFILES"] == "alt,proxy"
+    assert parsed["ARGUS_DOMAIN"] == "argus.firma.de"
+    assert parsed["ARGUS_TLS_MODE"] == "acme"
+    assert parsed["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
+
+
+def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+    shutil.copy2(_SCRIPT.parent.parent / ".env.example", repo / ".env.example")
+    shutil.copy2(_SCRIPT.parent.parent / "docker-compose.yml", repo / "docker-compose.yml")
+    init_mod = installer._load_init_stack_module(repo)
+
+    ws = tmp_path / "ws"
+    models = tmp_path / "models"
+
+    monkeypatch.setattr(installer, "check_docker_environment", lambda non_interactive=False: None)
+    monkeypatch.setattr(installer, "check_gpu", lambda: (True, "RTX 5070 Ti", 16376))
+    monkeypatch.setattr(installer, "check_ram_bytes", lambda: 64 * 1024**3)
+    monkeypatch.setattr(installer, "ensure_setup_venv", lambda root: Path("python"))
+    monkeypatch.setattr(
+        installer,
+        "run_init_stack",
+        lambda root, py, workspace, models: init_mod.write_env_file(
+            root / ".env",
+            (root / ".env.example").read_text(encoding="utf-8"),
+            {"ARGUS_WORKSPACE_DIR": workspace, "ARGUS_MODELS_DIR": models},
+        ),
+    )
+    monkeypatch.setattr(installer.Path, "resolve", lambda self, *a, **kw: repo / "setup" / "install.py" if self == Path(installer.__file__) else os.path.abspath(self))
+    monkeypatch.setattr(installer, "__file__", str(repo / "setup" / "install.py"))
+    monkeypatch.setattr(installer.webbrowser, "open", lambda url: True)
+
+    # 1. --server-url mit --yes: Proxy ist standardmaessig aktiv (internal)
+    rc1 = installer.main([
+        "--yes", "--no-models", "--no-start",
+        "--workspace", str(ws), "--models", str(models),
+        "--server-url", "https://argus.example.org",
+    ])
+    assert rc1 == 0
+    env1 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert env1["COMPOSE_PROFILES"] == "proxy"
+    assert env1["ARGUS_DOMAIN"] == "argus.example.org"
+    assert env1["ARGUS_TLS_MODE"] == "internal"
+    assert env1["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
+
+    # 2. --server-url mit --no-proxy: keine Proxy-Werte gesetzt
+    (repo / ".env").unlink()
+    rc2 = installer.main([
+        "--yes", "--no-models", "--no-start", "--no-proxy",
+        "--workspace", str(ws), "--models", str(models),
+        "--server-url", "https://argus.example.org",
+    ])
+    assert rc2 == 0
+    env2 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert env2.get("COMPOSE_PROFILES", "") == ""
+    assert env2.get("ARGUS_TRUSTED_PROXIES", "") == ""
+
+    # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme)
+    (repo / ".env").unlink()
+    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "n", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    rc3 = installer.main([
+        "--no-models", "--no-start",
+        "--workspace", str(ws), "--models", str(models),
+    ])
+    assert rc3 == 0
+    env3 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert env3["COMPOSE_PROFILES"] == "proxy"
+    assert env3["ARGUS_DOMAIN"] == "interaktiv.example.org"
+    assert env3["ARGUS_TLS_MODE"] == "acme"
+    assert env3["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
+
+
+def test_doctor_check_proxy_states(installer, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "proxy" / "certs").mkdir(parents=True)
+    (repo / "proxy" / "data").mkdir(parents=True)
+
+    # 1. Weder Profil proxy noch ARGUS_TRUSTED_PROXIES -> OK
+    r_local = installer.doctor_check_proxy(repo, {})
+    assert r_local.status == "OK"
+
+    # 2. ARGUS_TRUSTED_PROXIES ohne Profil proxy gesetzt -> WARNUNG
+    r_warn = installer.doctor_check_proxy(repo, {"ARGUS_TRUSTED_PROXIES": "10.0.0.1"})
+    assert r_warn.status == "WARNUNG"
+    assert "ARGUS_TRUSTED_PROXIES" in r_warn.message
+
+    # 3. Profil proxy aktiv, alles gueltig (internal) -> OK
+    valid_proxy_env = {
+        "COMPOSE_PROFILES": "proxy",
+        "ARGUS_DOMAIN": "argus.example.org",
+        "ARGUS_TLS_MODE": "internal",
+        "ARGUS_TRUSTED_PROXIES": "172.31.250.0/29",
+        "TRUSTED_HOSTS": "argus.example.org,127.0.0.1,localhost,rag-backend",
+        "DASHBOARD_ORIGINS": "https://argus.example.org,http://127.0.0.1:7860",
+    }
+    assert installer.doctor_check_proxy(repo, valid_proxy_env).status == "OK"
+
+    # 3a. Domain fehlt in TRUSTED_HOSTS bzw. DASHBOARD_ORIGINS -> FEHLER
+    r_host = installer.doctor_check_proxy(repo, dict(valid_proxy_env, TRUSTED_HOSTS="127.0.0.1,localhost"))
+    assert r_host.status == "FEHLER" and "TRUSTED_HOSTS" in r_host.message
+    r_origin = installer.doctor_check_proxy(
+        repo, dict(valid_proxy_env, DASHBOARD_ORIGINS="http://argus.example.org,http://127.0.0.1:7860")
+    )
+    assert r_origin.status == "FEHLER" and "DASHBOARD_ORIGINS" in r_origin.message
+    # Mit Port in der Adresse ist der Eintrag gueltig
+    assert installer.doctor_check_proxy(
+        repo, dict(valid_proxy_env, DASHBOARD_ORIGINS="https://argus.example.org:8443")
+    ).status == "OK"
+
+    # 3b. Datenordner fehlt -> FEHLER (sonst legte Docker ihn unter Linux root-eigen an)
+    r_nodata = installer.doctor_check_proxy(repo, dict(valid_proxy_env, ARGUS_PROXY_DATA_DIR="proxy/fehlt"))
+    assert r_nodata.status == "FEHLER" and "Datenordner" in r_nodata.message
+
+    # 4. Profil proxy aktiv, ARGUS_DOMAIN fehlt -> FEHLER
+    no_domain = dict(valid_proxy_env, ARGUS_DOMAIN="")
+    r_nodom = installer.doctor_check_proxy(repo, no_domain)
+    assert r_nodom.status == "FEHLER" and "ARGUS_DOMAIN" in r_nodom.message
+
+    # 5. Profil proxy aktiv, ARGUS_TLS_MODE ungueltig -> FEHLER
+    bad_tls = dict(valid_proxy_env, ARGUS_TLS_MODE="selfsigned")
+    r_badtls = installer.doctor_check_proxy(repo, bad_tls)
+    assert r_badtls.status == "FEHLER" and "ARGUS_TLS_MODE" in r_badtls.message
+
+    # 6. Profil proxy aktiv, ARGUS_TRUSTED_PROXIES fehlt -> FEHLER
+    no_trusted = dict(valid_proxy_env, ARGUS_TRUSTED_PROXIES="")
+    r_notrusted = installer.doctor_check_proxy(repo, no_trusted)
+    assert r_notrusted.status == "FEHLER" and "ARGUS_TRUSTED_PROXIES" in r_notrusted.message
+
+    # 7. Profil proxy aktiv mit ARGUS_TLS_MODE=files: ohne Dateien FEHLER, mit Dateien OK
+    files_env = dict(valid_proxy_env, ARGUS_TLS_MODE="files")
+    r_missing_files = installer.doctor_check_proxy(repo, files_env)
+    assert r_missing_files.status == "FEHLER"
+    assert "cert.pem" in r_missing_files.message and "key.pem" in r_missing_files.message
+
+    (repo / "proxy" / "certs" / "cert.pem").write_text("CERT", encoding="utf-8")
+    (repo / "proxy" / "certs" / "key.pem").write_text("KEY", encoding="utf-8")
+    assert installer.doctor_check_proxy(repo, files_env).status == "OK"
+
+    # 8. Unter Linux: Schluessel 0600 eines anderen Nutzers ist fuer ARGUS_UID nicht lesbar
+    if os.name != "nt":
+        key = repo / "proxy" / "certs" / "key.pem"
+        key.chmod(0o600)
+        own_uid = os.getuid()
+        ok_env = dict(files_env, ARGUS_UID=str(own_uid), ARGUS_GID=str(os.getgid()))
+        assert installer.doctor_check_proxy(repo, ok_env).status == "OK"
+        other_env = dict(files_env, ARGUS_UID=str(own_uid + 4242), ARGUS_GID=str(own_uid + 4242))
+        r_unreadable = installer.doctor_check_proxy(repo, other_env)
+        assert r_unreadable.status == "FEHLER" and "key.pem" in r_unreadable.message
+
+
+def test_update_server_env_with_proxy_creates_dirs_and_port(installer, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "setup").mkdir(parents=True)
+    shutil.copy2(_SCRIPT.parent / "init_stack.py", repo / "setup" / "init_stack.py")
+    shutil.copy2(_SCRIPT.parent.parent / ".env.example", repo / ".env.example")
+    init_mod = installer._load_init_stack_module(repo)
+
+    installer.update_server_env(repo, "https://ki.firma.de:8443", use_proxy=True, tls_mode="files")
+    parsed = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
+    assert parsed["ARGUS_PROXY_HTTPS_PORT"] == "8443"
+    assert (repo / "proxy" / "data").is_dir() and (repo / "proxy" / "certs").is_dir()
+    #--- Was der Installer schreibt, besteht die eigene Pruefung (bis auf die Zertifikate).
+    r = installer.doctor_check_proxy(repo, parsed)
+    assert r.status == "FEHLER" and "cert.pem" in r.message
+    assert "TRUSTED_HOSTS" not in r.message and "DASHBOARD_ORIGINS" not in r.message
+    assert "Datenordner" not in r.message

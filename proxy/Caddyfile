@@ -1,0 +1,53 @@
+# TLS-Reverse-Proxy vor rag-backend:7860 (Compose-Profil "proxy").
+#
+# Drei TLS-Arten ueber ARGUS_TLS_MODE (Standard: internal):
+#   internal - eigene lokale CA von Caddy (fuer Tests und Firmen mit CA-Verteilung);
+#              das Stammzertifikat liegt danach unter
+#              proxy/data/caddy/pki/authorities/local/root.crt
+#   acme     - automatisches Zertifikat ueber Let's Encrypt (oeffentlicher DNS-Name,
+#              Ports 80 und 443 aus dem Internet erreichbar)
+#   files    - eigenes Zertifikat aus /certs/cert.pem und /certs/key.pem
+#              (ARGUS_TLS_DIR, Standard proxy/certs)
+{
+	# Die eigene CA nicht in den Vertrauensspeicher des Containers eintragen;
+	# ohne Root geht das ohnehin nicht. Verteilt wird root.crt von Hand.
+	skip_install_trust
+	# Kein HTTP/3: UDP 443 wird nicht veroeffentlicht.
+	servers {
+		protocols h1 h2
+	}
+}
+
+(tls_internal) {
+	tls internal
+}
+
+(tls_acme) {
+	# Automatischer Bezug per ACME ist in Caddy fuer HTTPS-Sites voreingestellt.
+}
+
+(tls_files) {
+	tls /certs/cert.pem /certs/key.pem
+}
+
+{$ARGUS_DOMAIN:localhost} {
+	import tls_{$ARGUS_TLS_MODE:internal}
+
+	# HSTS nicht fuer localhost: Der Browser wuerde sonst auch
+	# http://localhost:7860 ein Jahr lang auf HTTPS umbiegen.
+	@not_localhost not host localhost 127.0.0.1
+	header @not_localhost Strict-Transport-Security "max-age=31536000"
+	header -Server
+
+	# SSE-Chat und lange Modell-Antworten: kein Puffern (flush_interval -1)
+	# und mindestens 30 Minuten Timeout wie bei den internen nginx-Proxys.
+	reverse_proxy rag-backend:7860 {
+		flush_interval -1
+		transport http {
+			dial_timeout 10s
+			read_timeout 30m
+			write_timeout 30m
+			response_header_timeout 30m
+		}
+	}
+}

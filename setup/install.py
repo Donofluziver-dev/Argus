@@ -119,19 +119,51 @@ def validate_server_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
-def compute_server_env(url: str) -> dict[str, str]:
-    """Erzeugt die .env-Werte fuer den Serverbetrieb."""
+VALID_TLS_MODES = ("internal", "acme", "files")
+DEFAULT_EDGE_SUBNET = "172.31.250.0/29"
+
+
+def _merge_compose_profiles(existing: str, add_profile: str = "proxy") -> str:
+    """Fuegt ein Compose-Profil hinzu, ohne vorhandene Profile zu verlieren."""
+    profiles = [p.strip() for p in (existing or "").split(",") if p.strip()]
+    if add_profile not in profiles:
+        profiles.append(add_profile)
+    return ",".join(profiles)
+
+
+def compute_server_env(
+    url: str,
+    *,
+    use_proxy: bool = False,
+    tls_mode: str = "internal",
+    existing_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Erzeugt die .env-Werte fuer den Serverbetrieb (optional mit TLS-Proxy)."""
     valid, err = validate_server_url(url)
     if not valid:
         raise ValueError(f"Ungueltige Server-Adresse: {err}")
     parsed = urllib.parse.urlsplit(url)
     adresse = f"https://{parsed.netloc}"
-    hostname = parsed.hostname
-    return {
+    hostname = parsed.hostname or ""
+    out = {
         "DASHBOARD_ORIGINS": f"{adresse},http://127.0.0.1:7860,http://localhost:7860",
         "TRUSTED_HOSTS": f"{hostname},127.0.0.1,localhost,rag-backend",
         "DASHBOARD_TRACES_URL": "",
     }
+    if use_proxy:
+        mode = (tls_mode or "internal").strip()
+        if mode not in VALID_TLS_MODES:
+            raise ValueError(f"Ungueltiger TLS-Modus '{mode}' (erlaubt: {', '.join(VALID_TLS_MODES)}).")
+        cur = existing_env or {}
+        edge_subnet = (cur.get("ARGUS_EDGE_SUBNET") or "").strip() or DEFAULT_EDGE_SUBNET
+        out["COMPOSE_PROFILES"] = _merge_compose_profiles(cur.get("COMPOSE_PROFILES", ""), "proxy")
+        out["ARGUS_DOMAIN"] = hostname
+        out["ARGUS_TLS_MODE"] = mode
+        out["ARGUS_TRUSTED_PROXIES"] = edge_subnet
+        #--- Eine Adresse mit Port (https://ki.firma.de:8443) heisst: Caddy auf diesem Port.
+        if parsed.port:
+            out["ARGUS_PROXY_HTTPS_PORT"] = str(parsed.port)
+    return out
 
 
 # =============================================================================
@@ -623,16 +655,51 @@ def ensure_installation_dirs(
     )
 
 
-def update_server_env(repo_root: Path, server_url: str) -> None:
-    """Aktualisiert die Server-Werte in der .env."""
+def update_server_env(
+    repo_root: Path,
+    server_url: str,
+    use_proxy: bool = False,
+    tls_mode: str = "internal",
+) -> dict[str, str]:
+    """Aktualisiert die Server-Werte (und optional den TLS-Proxy) in der .env."""
     init_mod = _load_init_stack_module(repo_root)
     env_path = repo_root / ".env"
     template_path = repo_root / ".env.example"
     template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
-    server_values = compute_server_env(server_url)
+    existing_env = (
+        init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+        if env_path.exists()
+        else init_mod.parse_env(template_text)
+    )
+    server_values = compute_server_env(
+        server_url,
+        use_proxy=use_proxy,
+        tls_mode=tls_mode,
+        existing_env=existing_env,
+    )
     init_mod.write_env_file(env_path, template_text, server_values)
-    print("Hinweis: Fuer den Serverbetrieb ist ein TLS-Reverse-Proxy vor Port 7860 noetig "
-          "(siehe README, Abschnitt 'Betrieb auf einem Server').")
+    if not use_proxy:
+        print("Hinweis: Fuer den Serverbetrieb ist ein TLS-Reverse-Proxy vor Port 7860 noetig "
+              "(siehe README, Abschnitt 'Betrieb auf einem Server').")
+        return server_values
+
+    #--- Unter Linux muss der Datenordner dem Nutzer gehoeren, unter dem Caddy laeuft;
+    #--- legte ihn erst Docker an, gehoerte er root.
+    data_dir, tls_dir = proxy_dirs(repo_root, {**existing_env, **server_values})
+    init_mod.ensure_runtime_dirs(extra=[data_dir, tls_dir])
+    port = server_values.get("ARGUS_PROXY_HTTPS_PORT") or existing_env.get("ARGUS_PROXY_HTTPS_PORT") or "443"
+    print(f"TLS-Proxy: Caddy nimmt HTTPS fuer {server_values['ARGUS_DOMAIN']} auf Port {port} an "
+          f"(Modus {tls_mode}).")
+    if tls_mode == "files":
+        print(f"  Zertifikat (mit Zwischenzertifikaten) und Schluessel ablegen als "
+              f"{tls_dir / 'cert.pem'} und {tls_dir / 'key.pem'}.")
+    elif tls_mode == "internal":
+        print("  Caddy stellt das Zertifikat mit einer eigenen CA aus. Deren Stammzertifikat liegt nach dem")
+        print(f"  ersten Start unter {data_dir / 'caddy' / 'pki' / 'authorities' / 'local' / 'root.crt'}")
+        print("  und muss auf den Rechnern der Nutzer als vertrauenswuerdig eingetragen werden.")
+    else:
+        print("  Let's Encrypt braucht einen oeffentlichen DNS-Namen und die Ports 80 und 443 aus dem Internet.")
+    return server_values
 
 
 # =============================================================================
@@ -828,7 +895,10 @@ def doctor_check_env(repo_root: Path) -> DoctorResult:
     )
 
     dir_keys = sorted(
-        {k for k in (set(template_data) | set(env_data)) if k.startswith("ARGUS_") and k.endswith("_DIR")}
+        {
+            k for k in (set(template_data) | set(env_data))
+            if k.startswith("ARGUS_") and k.endswith("_DIR") and k != "ARGUS_TLS_DIR"
+        }
         | {"ARGUS_MODELS_DIR", "ARGUS_WORKSPACE_DIR", "ARGUS_EVALS_DIR"}
     )
     dir_errors: list[str] = []
@@ -1215,6 +1285,138 @@ def doctor_check_selinux(enforce_file: Path = Path("/sys/fs/selinux/enforce")) -
     return DoctorResult("OK", "SELinux", "SELinux ist nicht im Modus enforcing.")
 
 
+def proxy_dirs(repo_root: Path, env_data: dict[str, str]) -> tuple[Path, Path]:
+    """Datenordner (ARGUS_PROXY_DATA_DIR) und Zertifikatsordner (ARGUS_TLS_DIR) des
+    TLS-Proxys; relative Angaben gelten wie in compose vom Projektordner aus."""
+    def _resolve(key: str, default: str) -> Path:
+        raw = (env_data.get(key) or "").strip() or default
+        p = Path(raw)
+        return p if p.is_absolute() else repo_root / p
+    return _resolve("ARGUS_PROXY_DATA_DIR", "proxy/data"), _resolve("ARGUS_TLS_DIR", "proxy/certs")
+
+
+def _argus_ugid(env_data: dict[str, str]) -> tuple[int, int]:
+    """ARGUS_UID/ARGUS_GID aus der .env, sonst wie compose 1000:1000."""
+    def _int(key: str) -> int:
+        try:
+            return int(env_data.get(key) or 1000)
+        except ValueError:
+            return 1000
+    return _int("ARGUS_UID"), _int("ARGUS_GID")
+
+
+def _is_readable_for_ugid(path: Path, uid: int, gid: int, directory: bool = False) -> bool:
+    """Prueft lesend anhand der Dateirechte, ob (uid, gid) <path> lesen (bzw. als
+    Ordner betreten und auflisten) darf. Unter Windows entscheidet Docker Desktop."""
+    if os.name == "nt":
+        return path.exists()
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    mode = stat.S_IMODE(st.st_mode)
+    need = (stat.S_IRUSR | stat.S_IXUSR) if directory else stat.S_IRUSR
+    if st.st_uid == uid:
+        return mode & need == need
+    if st.st_gid == gid:
+        return mode & (need >> 3) == need >> 3
+    return mode & (need >> 6) == need >> 6
+
+
+def doctor_check_proxy(
+    repo_root_or_env: Path | dict[str, str],
+    env_data: dict[str, str] | None = None,
+) -> DoctorResult:
+    """Prueft die TLS-Proxy-Einstellungen (Profil 'proxy' und ARGUS_TRUSTED_PROXIES)."""
+    if isinstance(repo_root_or_env, dict):
+        env_data = repo_root_or_env
+        repo_root = Path(__file__).resolve().parent.parent
+    else:
+        repo_root = Path(repo_root_or_env)
+        if env_data is None:
+            init_mod = _load_init_stack_module(repo_root)
+            env_path = repo_root / ".env"
+            env_data = (
+                init_mod.parse_env(env_path.read_bytes().decode("utf-8"))
+                if env_path.exists()
+                else {}
+            )
+
+    profiles = {
+        p.strip() for p in (env_data.get("COMPOSE_PROFILES") or "").split(",") if p.strip()
+    }
+    proxy_active = "proxy" in profiles
+    trusted_proxies = (env_data.get("ARGUS_TRUSTED_PROXIES") or "").strip()
+
+    if not proxy_active:
+        if trusted_proxies:
+            return DoctorResult(
+                "WARNUNG",
+                "TLS-Proxy",
+                "ARGUS_TRUSTED_PROXIES ist ohne Profil 'proxy' gesetzt (dann muss der eigene Proxy darin stehen).",
+            )
+        return DoctorResult("OK", "TLS-Proxy", "Profil 'proxy' nicht aktiv (lokaler Betrieb).")
+
+    errors: list[str] = []
+    uid, gid = _argus_ugid(env_data)
+    data_dir, tls_dir = proxy_dirs(repo_root, env_data)
+    domain = (env_data.get("ARGUS_DOMAIN") or "").strip()
+    if not domain:
+        errors.append("ARGUS_DOMAIN nicht gesetzt")
+    else:
+        #--- Ohne diese beiden Eintraege antwortet das Backend auf Anfragen ueber den
+        #--- Proxy mit 400 (Host-Pruefung) bzw. die Anmeldung scheitert am CSRF-Schutz.
+        hosts = {
+            h.strip().lower()
+            for h in (env_data.get("TRUSTED_HOSTS") or "127.0.0.1,localhost,rag-backend").split(",")
+        }
+        if domain.lower() not in hosts and "*" not in hosts:
+            errors.append(f"{domain} fehlt in TRUSTED_HOSTS")
+        origins = [
+            urllib.parse.urlsplit(o.strip())
+            for o in (env_data.get("DASHBOARD_ORIGINS") or "").split(",") if o.strip()
+        ]
+        if not any(o.scheme == "https" and (o.hostname or "") == domain.lower() for o in origins):
+            errors.append(f"https://{domain} fehlt in DASHBOARD_ORIGINS")
+
+    if not data_dir.is_dir():
+        errors.append(f"Datenordner des Proxys {data_dir} fehlt")
+    elif not _is_dir_writable_for_ugid(data_dir, uid, gid):
+        errors.append(f"Datenordner des Proxys {data_dir} ist fuer UID {uid} nicht beschreibbar")
+
+    tls_mode = (env_data.get("ARGUS_TLS_MODE") or "").strip()
+    if tls_mode not in VALID_TLS_MODES:
+        errors.append(
+            f"ARGUS_TLS_MODE '{tls_mode}' ungueltig (erlaubt: {', '.join(VALID_TLS_MODES)})"
+        )
+    elif tls_mode == "files":
+        missing_certs = [name for name in ("cert.pem", "key.pem") if not (tls_dir / name).is_file()]
+        if missing_certs:
+            errors.append(f"Zertifikatsdateien fuer ARGUS_TLS_MODE=files fehlen ({', '.join(missing_certs)})")
+        else:
+            unreadable = [
+                name for name in ("cert.pem", "key.pem")
+                if not _is_readable_for_ugid(tls_dir / name, uid, gid)
+            ]
+            if unreadable or not _is_readable_for_ugid(tls_dir, uid, gid, directory=True):
+                errors.append(
+                    f"{tls_dir} bzw. {', '.join(unreadable) or 'der Ordner'} ist fuer UID {uid} "
+                    "nicht lesbar (Caddy laeuft als ARGUS_UID)"
+                )
+
+    if not trusted_proxies:
+        errors.append("ARGUS_TRUSTED_PROXIES nicht gesetzt")
+
+    if errors:
+        return DoctorResult("FEHLER", "TLS-Proxy", "; ".join(errors) + ".")
+
+    return DoctorResult(
+        "OK",
+        "TLS-Proxy",
+        f"Profil 'proxy' aktiv (Domain: {domain}, TLS-Modus: {tls_mode}).",
+    )
+
+
 def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[DoctorResult]]:
     """Fuehrt alle Diagnose-Pruefungen lesend aus und gibt eine Zeile je Pruefung aus."""
     init_mod = _load_init_stack_module(repo_root)
@@ -1239,6 +1441,7 @@ def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[
         doctor_check_secrets_and_dirs(repo_root),
         doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models),
         doctor_check_networks(repo_root),
+        doctor_check_proxy(repo_root, env_data),
         doctor_check_stack(repo_root),
     ]
     results.extend(doctor_check_switches(env_data))
@@ -1302,6 +1505,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", type=str, default=None, help="Arbeitsordner (ARGUS_WORKSPACE_DIR).")
     parser.add_argument("--models", type=str, default=None, help="Modellordner (ARGUS_MODELS_DIR).")
     parser.add_argument("--server-url", type=str, default=None, help="Server-Adresse (z. B. https://argus.example.org).")
+    parser.add_argument("--proxy", dest="use_proxy", action="store_true", default=None,
+                        help="Mitgelieferten TLS-Proxy (Profil 'proxy') aktivieren.")
+    parser.add_argument("--no-proxy", dest="use_proxy", action="store_false", default=None,
+                        help="Mitgelieferten TLS-Proxy nicht aktivieren.")
+    parser.add_argument("--tls-mode", type=str, default=None,
+                        help="TLS-Modus fuer den Proxy (internal, acme, files; Standard: internal).")
     parser.add_argument("--no-models", action="store_true", help="Modelle nicht laden.")
     parser.add_argument("--no-start", action="store_true", help="Stapel nicht starten.")
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
@@ -1325,6 +1534,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "reset-password":
         return run_reset_password(repo_root, args.account)
+
+    if args.tls_mode is not None and args.tls_mode not in VALID_TLS_MODES:
+        print(f"Fehler in --tls-mode: '{args.tls_mode}' ist ungueltig (erlaubt: {', '.join(VALID_TLS_MODES)}).")
+        return 1
 
     print("=================================================================")
     print("                ARGUS - Gefuehrte Installation                   ")
@@ -1388,6 +1601,8 @@ def main(argv: list[str] | None = None) -> int:
     models_dir = args.models or prompt_text("Modellordner", default_models, non_interactive=args.yes)
 
     server_url = ""
+    use_proxy = False
+    tls_mode = "internal"
     if args.server_url:
         valid, err = validate_server_url(args.server_url)
         if not valid:
@@ -1405,6 +1620,23 @@ def main(argv: list[str] | None = None) -> int:
                     server_url = srv_in
                     break
                 print(f"Ungueltige Adresse: {err}")
+
+    if server_url:
+        if args.use_proxy is not None:
+            use_proxy = args.use_proxy
+        else:
+            use_proxy = prompt_bool("Soll der mitgelieferte TLS-Proxy (Caddy) genutzt werden?",
+                                    default=True, non_interactive=args.yes)
+        if use_proxy:
+            if args.tls_mode is not None:
+                tls_mode = args.tls_mode
+            else:
+                tls_mode = prompt_choice(
+                    "TLS-Modus [internal = eigene CA, acme = Let's Encrypt, files = eigenes Zertifikat]",
+                    choices=list(VALID_TLS_MODES),
+                    default="internal",
+                    non_interactive=args.yes,
+                )
     print("")
 
     # -------------------------------------------------------------------------
@@ -1416,7 +1648,7 @@ def main(argv: list[str] | None = None) -> int:
     ensure_installation_dirs(repo_root, workspace_dir=workspace_dir, models_dir=models_dir)
 
     if server_url:
-        update_server_env(repo_root, server_url)
+        update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
     print("")
 
     # -------------------------------------------------------------------------

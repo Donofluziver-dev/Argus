@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 394 for the backend, 72 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 408 for the backend, 72 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -249,7 +249,7 @@ agent evaluation does for text.
 ```mermaid
 flowchart LR
   WEB["Browser<br/>UI at /dashboard"]
-  subgraph Docker["Docker, ports on 127.0.0.1 only"]
+  subgraph Docker["Docker, ports on 127.0.0.1 only (except caddy)"]
     subgraph EXT["network backend, with egress"]
       API["rag-backend<br/>FastAPI · LangGraph · UI"]
       SX["searxng"]
@@ -262,8 +262,11 @@ flowchart LR
       SP["stt · tts"]
     end
     SB["calc-sandbox<br/>no egress"]
+    CAD["caddy, profile proxy only<br/>TLS, network edge, ports 80/443"]
   end
   WEB -->|"login, chat (SSE)"| API
+  WEB -.->|"HTTPS (server)"| CAD
+  CAD --> API
   API --> LLM
   API --> EMB
   API --> DB
@@ -280,8 +283,10 @@ inside a model, so security rests on permissions, gates and isolation rather tha
 model behaving well.
 
 - **Networks:** only `rag-backend` and SearXNG can reach the internet. Model, embedding,
-  reranker, databases, speech and tracing sit in a network without egress.
-  `setup/check_networks.py` verifies this in CI.
+  reranker, databases, speech and tracing sit in a network without egress. With the profile
+  `proxy`, `caddy` joins in its own network `edge`, shared only with `rag-backend`, and is the
+  only service that publishes ports beyond 127.0.0.1 (80 and 443). `setup/check_networks.py`
+  verifies this in CI, with and without the profile.
 - **Lock after company data:** once a conversation has read documents, files or sandbox
   output, or had a file attached, every outbound path in that conversation is blocked (`EGRESS_AFTER_SENSITIVE=block`),
   so a prepared web page cannot make the agent leak data through a search query.
@@ -336,7 +341,8 @@ These are known and not solved yet:
   separation.
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); entries the SIEM does not receive are not re-sent.
-- No TLS proxy in the stack; behind a proxy all users share one rate limit.
+- The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
+  yet with Let's Encrypt.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) are fixed parts of the
   stack; for an offer to third parties both should be optional or replaceable.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
@@ -365,13 +371,14 @@ whether this is a single machine or a server, creates the secrets and `.env`, do
 models listed in `setup/models.json` (pinned to a Hugging Face revision, verified by SHA-256,
 resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
 running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
-`--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
+`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--no-models`, `--no-start`,
+`--models-only`. `install.cmd` is plain batch without PowerShell;
 there is deliberately no EXE.
 
 The same script checks and maintains an installation: `install.cmd doctor` (or `./install.sh
 doctor`) only reads and reports Docker, GPU, `.env`, secrets and folder permissions, models
-(`--verify-models` adds SHA-256), network isolation, the stack and risky switches, never secret
-values. `install.cmd reset-password <account>` resets a password, also of the last
+(`--verify-models` adds SHA-256), network isolation, the TLS proxy, the stack and risky
+switches, never secret values. `install.cmd reset-password <account>` resets a password, also of the last
 administrator, ends that account's sessions and writes an audit entry; the stack must be
 running.
 
@@ -380,8 +387,16 @@ token from `.env` (`DASHBOARD_SETUP_TOKEN`). This account becomes the administra
 further accounts under *Monitor › Konten*. Manual setup without the installer: see
 [README.de.md](README.de.md#von-hand).
 
-For a server with several users, put a TLS reverse proxy in front of port 7860 and set
-`DASHBOARD_ORIGINS`, `TRUSTED_HOSTS` and `DASHBOARD_TRACES_URL` (see README.de.md).
+For a server with several users the stack brings Caddy as a TLS proxy (compose profile
+`proxy`, off by default). The installer sets it up when it is given a server address, for
+example `./install.sh --server-url https://argus.example.org --tls-mode files`. TLS modes:
+`internal` (Caddy's own CA; its root certificate has to be trusted on the users' machines),
+`files` (the company's `cert.pem` and `key.pem` in `proxy/certs`) and `acme` (Let's Encrypt).
+Caddy runs as `ARGUS_UID` without capabilities, only in the network `edge` shared with
+`rag-backend`. The backend takes client address and scheme from `X-Forwarded-*` only from
+`ARGUS_TRUSTED_PROXIES`. The rate limit counts per account (session or API token); only login,
+setup and registration count per address. Details and the `.env` values:
+[README.de.md](README.de.md#betrieb-auf-einem-server).
 
 **GPU for a server** (calculated, not measured). Offloading experts to RAM (`LLM_N_CPU_MOE`)
 is a llama.cpp feature; it is why 16 GB are enough on the PC. With vLLM the whole model sits

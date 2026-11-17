@@ -15,14 +15,20 @@ EGRESS_ALLOWED = {
     "searxng": "Websuche",
     "local-proxy": "veroeffentlicht SearXNG",
     "intern-proxy": "veroeffentlicht die Dienste aus 'intern'",
+    "caddy": "TLS-Reverse-Proxy (Profil proxy)",
 }
 # Nur diese duerfen zugleich in einem internen Netz und einem mit Ausgang haengen.
 BRIDGES = {"rag-backend", "intern-proxy"}
 # Ihr Netz mit Ausgang darf kein anderer Dienst benutzen, sonst waeren sie eine
 # Bruecke zwischen 'intern' und dem Rest.
 EXCLUSIVE_EGRESS = {"intern-proxy"}
-# Nur diese veroeffentlichen Ports, und nur auf 127.0.0.1.
-PUBLISHERS = {"rag-backend", "local-proxy", "intern-proxy"}
+# Nur diese veroeffentlichen Ports; ausser caddy nur auf 127.0.0.1.
+PUBLISHERS = {"rag-backend", "local-proxy", "intern-proxy", "caddy"}
+# caddy darf Ports auch auf anderen Adressen als 127.0.0.1 veroeffentlichen,
+# aber ausschliesslich 80 und 443 auf Container-Seite.
+CADDY_TARGET_PORTS = {80, 443}
+# Das Netz 'edge' ist ausschliesslich fuer caddy und rag-backend reserviert.
+EDGE_ALLOWED = {"caddy", "rag-backend"}
 # Diese haengen ausschliesslich im Netz 'intern'.
 INTERN_ONLY = {"llm", "embed", "rerank", "postgres", "qdrant", "phoenix",
                "tts-service", "stt-service"}
@@ -59,11 +65,27 @@ def check(cfg: dict) -> list[str]:
             errors.append(f"{name}: verbindet interne Netze mit einem Netz mit Ausgang")
         if name in INTERN_ONLY and nets != {"intern"}:
             errors.append(f"{name}: soll nur im Netz 'intern' haengen, haengt in {sorted(nets)}")
+        if name == "caddy" and nets != {"edge"}:
+            errors.append(f"caddy: soll nur im Netz 'edge' haengen, haengt in {sorted(nets)}")
         for port in svc.get("ports") or []:
             if name not in PUBLISHERS:
                 errors.append(f"{name}: veroeffentlicht Port {port.get('published')}")
+            elif name == "caddy":
+                raw_target = port.get("target", port.get("published"))
+                try:
+                    target_port = int(raw_target)
+                except (TypeError, ValueError):
+                    target_port = None
+                if target_port not in CADDY_TARGET_PORTS:
+                    errors.append(
+                        f"caddy: veroeffentlicht unerlaubten Container-Port {raw_target} (nur 80 und 443 erlaubt)"
+                    )
             elif port.get("host_ip") != "127.0.0.1":
                 errors.append(f"{name}: Port {port.get('published')} nicht nur auf 127.0.0.1")
+
+    edge_others = members.get("edge", set()) - EDGE_ALLOWED
+    if edge_others:
+        errors.append(f"Netz 'edge' wird von unerlaubten Diensten benutzt: {sorted(edge_others)}")
 
     for name in sorted(INTERN_ONLY - services.keys()):
         errors.append(f"Dienst '{name}' fehlt (umbenannt? Regeln anpassen)")

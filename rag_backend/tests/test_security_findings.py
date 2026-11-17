@@ -15,6 +15,7 @@ os.environ.setdefault("OAI_MODEL", "test-model")
 
 import pytest
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
@@ -506,7 +507,13 @@ def test_langsmith_key_not_loaded_and_tracing_forced_false(monkeypatch):
 
 
 def test_sandbox_middleware_blocks_sandbox_ip_and_allows_others(db_session, monkeypatch):
-    assert main_test_app.user_middleware[0].cls is TrustedHostMiddleware
+    #--- Aussen nach innen: Sandbox-Sperre (echte Gegenstelle), Proxy-Header, Host-Pruefung.
+    #--- Vergleich ueber Namen: test_company_profile laedt rag_backend.main neu.
+    outer = main_test_app.user_middleware
+    assert outer[0].cls is BaseHTTPMiddleware
+    assert outer[0].kwargs["dispatch"].__name__ == "block_sandbox_requests"
+    assert outer[1].cls.__name__ == "_TrustedProxyHeaders"
+    assert outer[2].cls is TrustedHostMiddleware
 
     monkeypatch.setattr(backend_main, "_SANDBOX_IPS", frozenset({"172.19.0.55"}))
     main_test_app.dependency_overrides[main_test_get_db] = lambda: db_session

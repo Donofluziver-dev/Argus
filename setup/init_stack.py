@@ -204,12 +204,13 @@ def ensure_runtime_dirs(
     evals: Path | None = None,
     models: Path | None = None,
     *,
+    extra: list[Path] | tuple[Path, ...] = (),
     euid: int | None = None,
     egid: int | None = None,
 ) -> list[Path]:
-    """Legt Arbeitsordner (samt Uploads/), Evals-Ordner und Modellordner an,
-    falls sie fehlen. Laeuft die Installation unter Linux als root (UID 0),
-    bekommen die Ordner den Besitzer 1000:1000."""
+    """Legt Arbeitsordner (samt Uploads/), Evals-Ordner, Modellordner und weitere
+    Ordner (extra, z. B. proxy/data) an, falls sie fehlen. Laeuft die Installation
+    unter Linux als root (UID 0), bekommen die Ordner den Besitzer 1000:1000."""
     if euid is None and os.name != "nt" and hasattr(os, "geteuid"):
         euid = os.geteuid()
     if egid is None and os.name != "nt" and hasattr(os, "getegid"):
@@ -224,6 +225,7 @@ def ensure_runtime_dirs(
         targets.append(evals)
     if models is not None:
         targets.append(models)
+    targets.extend(extra)
 
     for d in targets:
         d.mkdir(parents=True, exist_ok=True)

@@ -291,4 +291,3 @@ def test_argus_uid_gid_and_runtime_dirs_on_linux_and_root(init_stack, tmp_path, 
         assert str(root_ws / "Uploads") in chowned_paths
         assert str(root_ws / "Evals") in chowned_paths
         assert str(root_models) in chowned_paths
-

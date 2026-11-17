@@ -37,6 +37,10 @@ roles, administrator and user.
 - **Document search** is hybrid: bge-m3 vectors plus BM25, fused in Qdrant, reranked in a
   separate container. Measured on 60 questions: correct document first 67 % → 96 %,
   19.9 s → 3.5 s per search. The backend no longer loads models itself (no PyTorch).
+- **The rate limit counts per account.** Behind a proxy all users shared one limit (for the
+  chat 60 requests per minute for the whole company), because it counted per address. Now a
+  valid session or API token is the key; login, setup and registration still count per
+  address.
 
 ### Security
 
@@ -58,7 +62,11 @@ roles, administrator and user.
   `calculate` runs in its own process with a hard time limit; before, the calculation went on
   in a thread after the timeout.
 - The backend rejects requests coming from the sandbox container, which shares a Docker
-  network with it.
+  network with it. The check looks at the real TCP peer, before any forwarding header.
+- **Client address and scheme only from trusted proxies.** `X-Forwarded-For` and
+  `X-Forwarded-Proto` count only from addresses in `ARGUS_TRUSTED_PROXIES` (default: none,
+  `*` is refused); uvicorn itself runs with `--no-proxy-headers`. Rate limit and audit log
+  see the real client behind the proxy and cannot be fed a made-up address.
 - **Injection check:** on by default in the code (`WEB_INJECTION_GUARD`), and content that
   cannot be checked is not used. Before, a failed check let the content through.
 - A session cookie is no longer accepted as an API bearer token.
@@ -92,6 +100,13 @@ roles, administrator and user.
 
 ### Added
 
+- **TLS proxy for a server** (compose profile `proxy`, off by default): Caddy in front of
+  `rag-backend`, with its own CA (`internal`), the company's certificate (`files`) or Let's
+  Encrypt (`acme`). It runs as `ARGUS_UID` without capabilities and with a read-only file
+  system, only in the new network `edge` shared with `rag-backend`, redirects HTTP to HTTPS,
+  sets HSTS and does not buffer the chat stream. The installer asks for it in server mode
+  (`--proxy`, `--no-proxy`, `--tls-mode`); `doctor` checks name, origins, data folder and
+  whether `ARGUS_UID` can read the certificate.
 - **`install.cmd doctor` / `./install.sh doctor`** checks an installation without changing
   anything: Docker and GPU, memory and disk space, `.env` against `.env.example`, secrets and
   folder permissions, models (`--verify-models` adds SHA-256), network isolation, the state of

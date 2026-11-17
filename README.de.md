@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 394 für das Backend, 72 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 408 für das Backend, 72 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -333,8 +333,9 @@ vielen Personen fehlen vor allem:
 - **Bilder und Scans:** Die Modelle können Bilder lesen, in Argus ist das noch nicht
   eingeschaltet. Gescannte PDFs ohne Textebene werden nicht aufgenommen
   ([Text und Bild](#das-modell-ist-austauschbar)).
-- **Betrieb:** ein TLS-Proxy und ein Modell-Dienst für viele gleichzeitige Nutzer. Eine
-  geführte Installation gibt es (siehe [Einrichten](#einrichten)).
+- **Betrieb:** ein Modell-Dienst für viele gleichzeitige Nutzer. Eine geführte Installation
+  und einen TLS-Proxy gibt es (siehe [Einrichten](#einrichten) und
+  [Betrieb auf einem Server](#betrieb-auf-einem-server)).
 
 Die vollständige Liste steht unter
 [Offen für einen Einsatz im Unternehmen](#offen-für-einen-einsatz-im-unternehmen).
@@ -350,6 +351,7 @@ Die vollständige Liste steht unter
 | `setup/` | Einrichtung (`init_stack.py`), Prüfung der Netze (`check_networks.py`) |
 | `stt_service/`, `tts_service/`, `calc_sandbox/` | Sprache und abgeschottete Code-Ausführung |
 | `local_proxy/`, `searxng_config/` | die beiden Proxys auf 127.0.0.1, Websuche |
+| `proxy/` | TLS-Proxy für den Server (Caddy, Profil `proxy`): `Caddyfile`, `certs/` für ein eigenes Zertifikat |
 | `eval/` | Messungen: Dokumentensuche (`retrieval/`) und ganzer Agent (`agent/`) |
 
 ## Architektur
@@ -360,7 +362,7 @@ flowchart LR
     WEB["Browser<br/>Oberfläche unter /dashboard"]
     API2["weitere Clients<br/>OpenAI-kompatible API"]
   end
-  subgraph Docker["Docker, Ports nur auf 127.0.0.1"]
+  subgraph Docker["Docker, Ports nur auf 127.0.0.1 (außer caddy)"]
     subgraph EXT["Netz backend, mit Ausgang"]
       API["rag-backend<br/>FastAPI · LangGraph · Oberfläche"]
       SX["searxng"]
@@ -375,8 +377,11 @@ flowchart LR
     end
     IP["intern-proxy<br/>nginx, eigenes Netz"]
     SB["calc-sandbox<br/>Netz ohne Ausgang"]
+    CAD["caddy, nur Profil proxy<br/>TLS, Netz edge, Ports 80/443"]
   end
   WEB -->|"Anmeldung, Chat (SSE)"| API
+  WEB -.->|"HTTPS (Server)"| CAD
+  CAD --> API
   API2 -->|"mit API-Key"| IP
   IP --> LLM
   IP --> EMB
@@ -421,8 +426,10 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
   und können nichts hinausschicken, auch wenn einer von ihnen kompromittiert wäre.
   `intern-proxy` leitet nur an Ziele in `intern` weiter und teilt sein Netz zum
   Veröffentlichen der Ports mit keinem anderen Dienst, damit er keine Brücke wird. Die
-  Code-Ausführung hat ein eigenes Netz ohne Ausgang. `setup/check_networks.py` prüft diese
-  Regeln bei jedem Push im CI.
+  Code-Ausführung hat ein eigenes Netz ohne Ausgang. Mit dem Profil `proxy` kommt `caddy`
+  dazu: nur im Netz `edge`, das er allein mit `rag-backend` teilt, und als einziger Dienst mit
+  Ports außerhalb von 127.0.0.1, nur 80 und 443. `setup/check_networks.py` prüft diese Regeln
+  bei jedem Push im CI, mit und ohne Profil `proxy`.
 - **Sperre nach Firmendaten:** Gefährlich wird ein Agent, der zugleich Firmendaten liest,
   fremde Inhalte verarbeitet und nach außen senden kann. Dann kann eine präparierte Seite ihn
   dazu bringen, Daten über eine Suchanfrage abfließen zu lassen. Liest ein Gespräch
@@ -519,9 +526,9 @@ sollte sie kennen.
 - **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
   vermerkt und mit `AUDIT_SIEM` auch ans SIEM gemeldet. Unveränderlich ist das Protokoll erst
   dort. Was das SIEM nicht erreicht, wird nicht nachgeliefert.
-- **Betrieb:** Der Stapel bringt keinen TLS-Proxy mit. Hinter einem Proxy teilen sich alle
-  Nutzer ein Ratenlimit, weil nach Adresse gezählt wird. Wer Docker auf dem Server bedienen
-  darf, hat dort praktisch Admin-Rechte.
+- **Betrieb:** Wer Docker auf dem Server bedienen darf, hat dort praktisch Admin-Rechte. Der
+  mitgelieferte TLS-Proxy ist lokal mit eigener CA und mit eigenem Zertifikat getestet, mit
+  Let's Encrypt noch nicht.
 - **Lizenzen als Module:** Websuche (SearXNG, AGPL) und Ablaufverfolgung (Phoenix, Elastic
   License) gehören fest zum Stapel. Für ein Angebot an Dritte sollten beide abschaltbar oder
   austauschbar sein.
@@ -565,8 +572,9 @@ Installation führt durch diese Schritte:
    installieren, und startet Docker Desktop, wenn es nicht läuft. Unter Linux nennt sie die
    Anleitung und prüft das NVIDIA Container Toolkit, installiert aber nichts selbst.
 3. **Grafikkarte und Arbeitsspeicher** prüfen und vor zu wenig davon warnen.
-4. **Fragen:** Arbeitsordner, Modellordner, Betrieb nur auf diesem Rechner oder als Server
-   (dann mit Adresse, siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
+4. **Fragen:** Arbeitsordner, Modellordner, Betrieb nur auf diesem Rechner oder als Server.
+   Als Server fragt sie nach der Adresse, ob der mitgelieferte TLS-Proxy laufen soll und mit
+   welchem Zertifikat (siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
 5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
    `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte.
 6. **Modelle laden** (rund 25 GB): jede Datei aus `setup/models.json`, festgelegt auf eine
@@ -577,15 +585,18 @@ Installation führt durch diese Schritte:
 
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
 Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
-`--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen und laden).
+`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--no-models`, `--no-start`,
+`--models-only` (nur Modelle prüfen und laden).
 
 **Prüfen und Pflege** mit demselben Skript (`install.cmd …` unter Windows, `./install.sh …`
 unter Linux):
 
 - `doctor` prüft nur, ändert nichts: Docker und GPU, Arbeitsspeicher und Platz, `.env` gegen
   `.env.example`, Geheimnisse und Ordnerrechte, Modelle (mit `--verify-models` auch per
-  SHA-256), Netz-Abschottung, Zustand des Stapels und riskante Schalter wie
-  `CLOUD_MISSION_AUTO_APPROVE=true`. Werte von Geheimnissen gibt es nie aus.
+  SHA-256), Netz-Abschottung, den TLS-Proxy (Name in `TRUSTED_HOSTS` und
+  `DASHBOARD_ORIGINS`, Datenordner, Zertifikat für `ARGUS_UID` lesbar), Zustand des Stapels
+  und riskante Schalter wie `CLOUD_MISSION_AUTO_APPROVE=true`. Werte von Geheimnissen gibt es
+  nie aus.
 - `reset-password <konto>` setzt das Passwort eines Kontos zurück, auch des letzten
   Administrators. Es fragt das neue Passwort verdeckt ab, beendet alle Sitzungen des Kontos und
   schreibt einen Eintrag ins Auditprotokoll. Der Stapel muss dafür laufen.
@@ -617,17 +628,45 @@ Konto wird Administrator und legt weitere Konten unter *Monitor › Konten* an.
 ## Betrieb auf einem Server
 
 Für mehrere Personen läuft Argus auf einem Server, die Nutzer brauchen nur einen Browser.
-Dafür gehört ein Reverse-Proxy mit TLS vor Port 7860 (im Stapel nicht enthalten). In der
-`.env`:
+Vor Port 7860 gehört ein Proxy mit TLS. Der Stapel bringt dafür Caddy als Compose-Profil
+`proxy` mit, das ohne Weiteres aus ist. Die Installation richtet ihn ein, wenn sie mit einer
+Server-Adresse läuft, etwa `./install.sh --server-url https://argus.example.org --tls-mode files`.
+
+| TLS-Art (`ARGUS_TLS_MODE`) | Zertifikat |
+|---|---|
+| `internal` (Standard) | Caddy stellt es mit einer eigenen CA aus. Deren Stammzertifikat liegt nach dem ersten Start unter `proxy/data/caddy/pki/authorities/local/root.crt` und muss auf den Rechnern der Nutzer als vertrauenswürdig eingetragen werden, etwa per Gruppenrichtlinie. |
+| `files` | Zertifikat der Firma: `cert.pem` (samt Zwischenzertifikaten) und `key.pem` in `proxy/certs` (`ARGUS_TLS_DIR`). Unter Linux reicht es, wenn beide dem installierenden Nutzer gehören, auch mit Rechten `0600`. |
+| `acme` | Let's Encrypt. Braucht einen öffentlichen DNS-Namen und die Ports 80 und 443 aus dem Internet. |
+
+Caddy läuft als `ARGUS_UID` ohne Capabilities und mit schreibgeschütztem Dateisystem. Er
+leitet HTTP auf HTTPS um, setzt HSTS und puffert den Chat-Stream nicht. Ein `X-Forwarded-For`,
+das ein Client selbst mitschickt, verwirft er. Das Backend übernimmt `X-Forwarded-For` und
+`X-Forwarded-Proto` nur von Adressen aus `ARGUS_TRUSTED_PROXIES`; die Installation trägt dort
+das Netz `edge` ein. So sehen Ratenlimit und Auditprotokoll die echte Adresse des Clients.
+Das Ratenlimit zählt ohnehin je Konto (Sitzung oder API-Token), nur Anmeldung, Einrichtung
+und Registrierung zählen je Adresse.
+
+Diese Werte setzt die Installation in der `.env`:
 
 | Schalter | Wert |
 |---|---|
 | `DASHBOARD_ORIGINS` | Adresse der Oberfläche, z. B. `https://argus.example.org` |
 | `TRUSTED_HOSTS` | derselbe Name zusätzlich zu `127.0.0.1,localhost,rag-backend` |
 | `DASHBOARD_TRACES_URL` | Adresse, unter der der Browser Phoenix erreicht; leer zeigt der Reiter nur einen Hinweis |
+| `COMPOSE_PROFILES` | `proxy` schaltet Caddy ein |
+| `ARGUS_DOMAIN`, `ARGUS_TLS_MODE` | Name des Servers und TLS-Art |
+| `ARGUS_TRUSTED_PROXIES` | Adressen oder Netze (CIDR), deren Weiterleitungs-Header gelten; leer = keine |
+| `ARGUS_EDGE_SUBNET` | Netz `edge` (Standard `172.31.250.0/29`), falls es mit einem Firmennetz kollidiert |
+| `ARGUS_PROXY_BIND`, `ARGUS_PROXY_HTTPS_PORT`, `ARGUS_PROXY_HTTP_PORT` | Adresse und Ports auf dem Server (Standard `0.0.0.0`, 443, 80) |
 
-Der Proxy muss `X-Forwarded-Proto` setzen, damit das Sitzungs-Cookie als `Secure` gesetzt
-wird. Für einen Server mit vielen gleichzeitigen Nutzern ist llama.cpp nicht die erste Wahl.
+Mit einem anderen HTTPS-Port als 443 (etwa `https://argus.example.org:8443`) leitet Caddy
+Aufrufe über HTTP trotzdem auf Port 443 um; die Nutzer rufen dann direkt die HTTPS-Adresse
+auf. Ein eigener Proxy statt Caddy geht auch: `COMPOSE_PROFILES` ohne `proxy`, und in
+`ARGUS_TRUSTED_PROXIES` die Adresse, mit der er beim Backend ankommt (sie steht im
+Zugriffsprotokoll von `rag-backend`). Er muss `X-Forwarded-Proto` setzen, sonst fehlt dem
+Sitzungs-Cookie das `Secure`. `install.cmd doctor` prüft die Einstellungen.
+
+Für einen Server mit vielen gleichzeitigen Nutzern ist llama.cpp nicht die erste Wahl.
 Das Backend spricht das Modell über eine OpenAI-kompatible Schnittstelle an (`OAI_BASE_URL`);
 ein Betrieb mit vLLM oder SGLang ist damit vorgesehen, mit diesem Stand aber nicht getestet.
 Die offenen Punkte oben gelten.
@@ -653,6 +692,7 @@ weniger. Weil Text und Bild in einem Modell stecken, gilt das für beides.
 | `local-proxy` | nginx vor SearXNG: lässt nur Anfragen an `localhost`/`127.0.0.1` durch, sonst 421 (Schutz gegen DNS-Rebinding) |
 | `intern-proxy` | nginx vor den Diensten im Netz `intern`: Phoenix mit derselben Host-Prüfung, Modell, Einbettung, Reranker und Sprache als TCP-Durchreichung |
 | `calc-sandbox` | abgeschottete Code-Ausführung |
+| `caddy` | nur mit Profil `proxy`: TLS-Proxy vor `rag-backend` für den Server-Betrieb, Ports 80 und 443 |
 
 Clients außerhalb des Browsers brauchen den Modell-Schlüssel aus `API_Tokens/llm_api_key.txt`.
 
@@ -767,7 +807,8 @@ Alle per `.env` änderbar:
 | `AUDIT_SIEM_FORMAT` | `json` | `json` oder `cef` (Common Event Format, etwa für Microsoft Sentinel, Falcon LogScale, QRadar). |
 | `AUDIT_SYSLOG_HOST`, `AUDIT_SYSLOG_PORT`, `AUDIT_SYSLOG_PROTOCOL` | –, `514`, `udp` | Ziel für `syslog`. Bei `tcp` mit Längenangabe je Nachricht (RFC 6587), die Verbindung wird gehalten und nach Fehlern neu aufgebaut. |
 | `AUDIT_SIEM_HOSTNAME` | Name des Containers | Rechnername im Syslog-Kopf und im Feld `host`. |
-| `AUDIT_TRUST_FORWARDED` | `false` | Schreibt die erste Adresse aus `X-Forwarded-For` mit ins Protokoll. Nur hinter einem eigenen Proxy einschalten, sonst ist der Wert gefälscht. |
+| `ARGUS_TRUSTED_PROXIES` | leer | Adressen oder Netze (CIDR) von Proxys, deren `X-Forwarded-For` und `X-Forwarded-Proto` gelten; von allen anderen werden sie ignoriert. `*` wird nicht angenommen. Siehe [Betrieb auf einem Server](#betrieb-auf-einem-server). |
+| `AUDIT_TRUST_FORWARDED` | `false` | Schreibt zusätzlich die erste Adresse aus `X-Forwarded-For` ungeprüft ins Protokoll. Meist unnötig: Mit `ARGUS_TRUSTED_PROXIES` steht die echte Adresse schon im Feld `ip`. |
 
 Die Weitergabe ans SIEM blockiert keine Anfrage: Einträge gehen über eine Warteschlange
 (10.000 Plätze). Ist das SIEM nicht erreichbar oder die Warteschlange voll, wird der Eintrag

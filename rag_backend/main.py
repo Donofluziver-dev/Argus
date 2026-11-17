@@ -25,6 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from langchain_core.messages import AIMessage, HumanMessage
@@ -364,7 +366,52 @@ def _init_tracing() -> None:
 
 _init_tracing()
 
-limiter = Limiter(key_func=get_remote_address)
+_AUTH_ADDR_ONLY_PATHS = frozenset({
+    "/v1/dashboard/auth/login",
+    "/v1/dashboard/auth/setup",
+    "/v1/dashboard/auth/register",
+    "/login",
+    "/register",
+})
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Bestimmt den Schluessel fuer das Ratenlimit ohne Datenbankabfrage.
+
+    Gueltiges Dashboard-Sitzungs-Cookie -> 'konto:<uid>', gueltiges API-Bearer-Token
+    (Scope nicht 'dashboard') -> 'api:<uid>', sonst 'addr:<adresse>'. Anmeldung,
+    Einrichtung und Registrierung zaehlen immer nach Adresse."""
+    path = request.url.path if getattr(request, "url", None) else ""
+    if path not in _AUTH_ADDR_ONLY_PATHS:
+        #--- _DASHBOARD_COOKIE steht weiter unten im Modul; aufgerufen wird erst zur Laufzeit.
+        cookie_token = request.cookies.get(_DASHBOARD_COOKIE) if getattr(request, "cookies", None) else None
+        if cookie_token:
+            try:
+                payload = jwt.decode(cookie_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                if payload.get("scope") == "dashboard":
+                    uid = int(payload["sub"])
+                    if uid > 0:
+                        return f"konto:{uid}"
+            except (InvalidTokenError, ValueError, KeyError, TypeError):
+                pass
+
+        auth_header = (request.headers.get("authorization") or "").strip() if getattr(request, "headers", None) else ""
+        if auth_header:
+            scheme, _, token_str = auth_header.partition(" ")
+            if scheme.lower() == "bearer" and token_str.strip():
+                try:
+                    payload = jwt.decode(token_str.strip(), JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                    if payload.get("scope") != "dashboard":
+                        uid = int(payload["sub"])
+                        if uid > 0:
+                            return f"api:{uid}"
+                except (InvalidTokenError, ValueError, KeyError, TypeError):
+                    pass
+
+    return f"addr:{get_remote_address(request)}"
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 #--- Die API-Beschreibung (/docs, /redoc, /openapi.json) ist ohne Anmeldung lesbar
 #--- und zaehlt jede Route auf. Aus, solange sie niemand ausdruecklich einschaltet.
 _API_DOCS = os.getenv("API_DOCS", "false").strip().lower() == "true"
@@ -442,7 +489,8 @@ async def _sandbox_ip_watcher():
         await asyncio.sleep(_SANDBOX_REFRESH_SECONDS)
 
 
-@app.middleware("http")
+#--- Registriert wird sie weiter unten als aeusserste Schicht (nach
+#--- _TrustedProxyHeaders), damit sie die echte TCP-Gegenstelle sieht.
 async def block_sandbox_requests(request: Request, call_next):
     client_host = (request.client.host if request.client and request.client.host else "").strip().lower()
     if client_host:
@@ -513,8 +561,8 @@ async def security_headers(request: Request, call_next):
 
 #--- Host-Header-Gate gegen DNS-Rebinding. Die lesenden Dashboard-Endpoints
 #--- pruefen keinen Origin; die Bindung an 127.0.0.1 allein schuetzt sie nicht.
-#--- Zuletzt hinzugefuegt = aeusserste Schicht, laeuft vor CORS, den HTTP-
-#--- Middlewares und allen Routen.
+#--- Laeuft vor CORS, den HTTP-Middlewares und allen Routen; aussen davor liegen
+#--- nur noch die Sandbox-Sperre und die Uebernahme der Proxy-Header.
 #--- 'rag-backend' MUSS drinbleiben (Docker-Netzwerk / interner Service-Name),
 #--- ebenso 'localhost' (Healthcheck). Der Port ist nicht Teil des Vergleichs.
 _TRUSTED_HOSTS = [
@@ -523,6 +571,51 @@ _TRUSTED_HOSTS = [
     ).split(",") if h.strip()
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_TRUSTED_HOSTS)
+
+
+def _trusted_proxies(raw: str) -> list[str]:
+    """Adressen und CIDR-Netze aus ARGUS_TRUSTED_PROXIES. '*' wuerde jeder
+    Gegenstelle erlauben, ihre Adresse selbst anzugeben, und wird verworfen."""
+    out = []
+    for p in (raw or "").split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p == "*":
+            log.warning("ARGUS_TRUSTED_PROXIES: '*' wird ignoriert; bitte Adresse oder Netz des Proxys eintragen.")
+            continue
+        out.append(p)
+    return out
+
+
+class _TrustedProxyHeaders(ProxyHeadersMiddleware):
+    """Uebernimmt X-Forwarded-For und X-Forwarded-Proto nur von Gegenstellen aus
+    ARGUS_TRUSTED_PROXIES (leer = niemandem trauen). uvicorn selbst startet mit
+    --no-proxy-headers. Der Wert wird bei jeder Anfrage gelesen; aendert er sich,
+    wird die Liste neu aufgebaut."""
+
+    def __init__(self, app_inner):
+        super().__init__(app_inner, trusted_hosts=[])
+        self._raw: str | None = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        raw = os.getenv("ARGUS_TRUSTED_PROXIES", "")
+        if raw != self._raw:
+            ProxyHeadersMiddleware.__init__(self, self.app, trusted_hosts=_trusted_proxies(raw))
+            self._raw = raw
+
+    async def __call__(self, scope, receive, send):
+        self._refresh()
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_TrustedProxyHeaders)
+
+#--- Aeusserste Schicht: Die Sandbox-Sperre prueft die echte TCP-Gegenstelle,
+#--- bevor X-Forwarded-For uebernommen wird. Auch ein zu weit gefasstes
+#--- ARGUS_TRUSTED_PROXIES, das das Sandbox-Netz einschliesst, hebelt sie so nicht aus.
+app.add_middleware(BaseHTTPMiddleware, dispatch=block_sandbox_requests)
 
 
 # ---- Browser-Oberflaeche (statische Seite, same-origin unter /dashboard/) #---
@@ -697,10 +790,13 @@ def _dashboard_session_token(uid: int, seconds: int, tv: int = 0) -> str:
 
 
 def _ist_https(request: Request) -> bool:
-    #--- Hinter einem Tunnel (Cloudflare, Reverse Proxy) kommt die Anfrage
-    #--- intern per HTTP an; das echte Schema steht in X-Forwarded-Proto.
+    #--- Nur fuer das Secure-Flag des Sitzungs-Cookies. Hinter einem vertrauten
+    #--- Proxy (ARGUS_TRUSTED_PROXIES) setzt _TrustedProxyHeaders das Schema.
+    #--- X-Forwarded-Proto: https wird hier von jeder Gegenstelle angenommen: Es
+    #--- macht das Cookie nur strenger, und hinter einem Proxy, der (noch) nicht
+    #--- in ARGUS_TRUSTED_PROXIES steht, soll das Flag nicht wegfallen.
     fwd = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    return fwd == "https" or request.url.scheme == "https"
+    return request.url.scheme == "https" or fwd == "https"
 
 
 def _set_session_cookie(response: Response, uid: int, remember: bool = False,
@@ -782,7 +878,7 @@ def dashboard_auth_state(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/v1/dashboard/auth/register", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_REGISTER_RATE_LIMIT", "5/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_REGISTER_RATE_LIMIT", "5/minute"))
 def dashboard_auth_register(request: Request, body: DashboardLoginIn,
                             db: Session = Depends(get_db),
                             csrf = Depends(check_dashboard_csrf)):
@@ -884,7 +980,7 @@ def _login_failed(name: str) -> None:
 
 
 @app.post("/v1/dashboard/auth/login", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_LOGIN_RATE_LIMIT", "10/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_LOGIN_RATE_LIMIT", "10/minute"))
 def dashboard_auth_login(request: Request, body: DashboardLoginIn,
                          db: Session = Depends(get_db),
                          csrf = Depends(check_dashboard_csrf)):
@@ -1849,7 +1945,7 @@ class DashboardWebSearchIn(BaseModel):
 
 
 @app.post("/v1/dashboard/web_search", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_WEB_SEARCH_RATE_LIMIT", "20/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_WEB_SEARCH_RATE_LIMIT", "20/minute"))
 async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
                                user: User = Depends(dashboard_user),
                                csrf = Depends(check_dashboard_csrf)):
@@ -1871,7 +1967,7 @@ async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
 
 
 @app.post("/v1/dashboard/chat", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_CHAT_RATE_LIMIT", "60/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_CHAT_RATE_LIMIT", "60/minute"))
 async def dashboard_chat(body: DashboardChatIn, request: Request,
                          user: User = Depends(dashboard_user),
                          csrf = Depends(check_dashboard_csrf)):
@@ -2200,7 +2296,7 @@ def _voice_auth_headers() -> dict[str, str]:
 
 
 @app.post("/v1/dashboard/stt", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_VOICE_RATE_LIMIT", "60/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_VOICE_RATE_LIMIT", "60/minute"))
 async def dashboard_stt(request: Request, file: UploadFile = File(...),
                         user: User = Depends(dashboard_user),
                         csrf = Depends(check_dashboard_csrf)):
@@ -2243,7 +2339,7 @@ class DashboardTtsIn(BaseModel):
 
 
 @app.post("/v1/dashboard/tts", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_VOICE_RATE_LIMIT", "60/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_VOICE_RATE_LIMIT", "60/minute"))
 async def dashboard_tts(body: DashboardTtsIn, request: Request,
                         user: User = Depends(dashboard_user),
                         csrf = Depends(check_dashboard_csrf)):
@@ -2410,7 +2506,7 @@ async def dashboard_uploads(admin: User = Depends(dashboard_admin)):
 
 
 @app.post("/v1/dashboard/uploads", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
 async def dashboard_upload(request: Request, file: UploadFile = File(...),
                            admin: User = Depends(dashboard_admin),
                            csrf = Depends(check_dashboard_csrf)):
@@ -2568,7 +2664,7 @@ async def dashboard_user_files(user: User = Depends(dashboard_user)):
 
 
 @app.post("/v1/dashboard/files", tags=["Dashboard"])
-@limiter.limit(os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
+@limiter.limit(lambda: os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
 async def dashboard_user_file_upload(
     request: Request,
     file: UploadFile = File(...),

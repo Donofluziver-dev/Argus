@@ -20,5 +20,8 @@ __pycache__/
 .pytest_cache/
 documents_to_ingest/*
 !documents_to_ingest/.gitkeep
+proxy/certs/*
+!proxy/certs/.gitkeep
+proxy/data/
 *.log
 

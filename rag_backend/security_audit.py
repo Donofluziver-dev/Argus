@@ -38,14 +38,17 @@ def audit_auth(
 
         payload: dict[str, Any] = {}
 
-        # Client-IP ermitteln, falls Request vorhanden
+        # Client-IP ermitteln, falls Request vorhanden. Hinter einem vertrauten
+        # Reverse-Proxy aus ARGUS_TRUSTED_PROXIES liefert request.client.host
+        # bereits die echte Client-Adresse (_TrustedProxyHeaders in main.py).
         if request is not None:
             client = getattr(request, "client", None)
             host = getattr(client, "host", None) if client else None
             if host:
                 payload["ip"] = host
 
-            # X-Forwarded-For nur auswerten, wenn AUDIT_TRUST_FORWARDED=true
+            # Zusaetzliches Feld forwarded_for nur auswerten, wenn AUDIT_TRUST_FORWARDED=true
+            # (fuer die echte Client-Adresse in payload["ip"] genuegt ARGUS_TRUSTED_PROXIES).
             trust_forwarded = os.getenv("AUDIT_TRUST_FORWARDED", "false").lower() in ("true", "1", "yes")
             if trust_forwarded:
                 headers = getattr(request, "headers", None)
