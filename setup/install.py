@@ -759,8 +759,9 @@ def update_compose_profiles(
     *,
     use_voice: bool = True,
     use_tracing: bool = True,
+    use_web: bool = True,
 ) -> str:
-    """Setzt die Profile 'voice' und 'tracing' in COMPOSE_PROFILES der .env und
+    """Setzt die Profile 'voice', 'tracing' und 'web' in COMPOSE_PROFILES der .env und
     behaelt andere Profile (etwa 'proxy') bei."""
     init_mod = _load_init_stack_module(repo_root)
     env_path = repo_root / ".env"
@@ -773,7 +774,7 @@ def update_compose_profiles(
     )
     merged = _merge_compose_profiles(
         existing_env.get("COMPOSE_PROFILES", ""),
-        {"voice": use_voice, "tracing": use_tracing},
+        {"voice": use_voice, "tracing": use_tracing, "web": use_web},
     )
     init_mod.write_env_file(env_path, template_text, {"COMPOSE_PROFILES": merged})
     return merged
@@ -1009,6 +1010,25 @@ def doctor_check_env(repo_root: Path) -> DoctorResult:
         msg += ". Naechster Schritt: Pfade in .env pruefen oder python setup/init_stack.py ausfuehren."
         return DoctorResult("FEHLER", ".env", msg)
 
+    raw_ver = env_data.get("ARGUS_ENV_VERSION")
+    try:
+        env_ver = int(raw_ver) if raw_ver is not None else 0
+    except ValueError:
+        env_ver = 0
+
+    has_version_req = "ARGUS_ENV_VERSION" in template_data or raw_ver is not None
+    missing_keys_no_ver = [k for k in missing_keys if k != "ARGUS_ENV_VERSION"]
+
+    if has_version_req and env_ver < 2:
+        parts = list(dir_notes)
+        if missing_keys_no_ver:
+            parts.append(f"Schluessel aus .env.example fehlen in .env: {', '.join(missing_keys_no_ver)}"
+                         " (es gilt der Standard im Code)")
+        parts.append(
+            "ARGUS_ENV_VERSION fehlt oder ist kleiner als 2. Naechster Schritt: python setup/init_stack.py ausfuehren."
+        )
+        return DoctorResult("WARNUNG", ".env", "; ".join(parts))
+
     if missing_keys or dir_notes:
         parts = list(dir_notes)
         if missing_keys:
@@ -1215,6 +1235,7 @@ def doctor_check_networks(repo_root: Path) -> DoctorResult:
 PROFILE_SERVICES: dict[str, tuple[str, ...]] = {
     "voice": ("stt-service", "tts-service"),
     "tracing": ("phoenix",),
+    "web": ("searxng", "local-proxy"),
     "proxy": ("caddy",),
 }
 
@@ -1760,6 +1781,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Ablaufverfolgung mit Phoenix (Profil 'tracing') aktivieren.")
     parser.add_argument("--no-tracing", dest="use_tracing", action="store_false", default=None,
                         help="Ablaufverfolgung mit Phoenix (Profil 'tracing') abschalten.")
+    parser.add_argument("--web", dest="use_web", action="store_true", default=None,
+                        help="Websuche und Seitenabruf aus dem Internet (Profil 'web') aktivieren.")
+    parser.add_argument("--no-web", dest="use_web", action="store_false", default=None,
+                        help="Websuche und Seitenabruf aus dem Internet (Profil 'web') abschalten.")
     parser.add_argument("--no-models", action="store_true", help="Modelle nicht laden.")
     parser.add_argument("--no-start", action="store_true", help="Stapel nicht starten.")
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
@@ -1940,6 +1965,15 @@ def main(argv: list[str] | None = None) -> int:
             default=True,
             non_interactive=args.yes,
         )
+
+    if args.use_web is not None:
+        use_web = args.use_web
+    else:
+        use_web = prompt_bool(
+            "Websuche und Seitenabruf aus dem Internet? Ohne geht von Argus nichts ins Internet (ausser dem Cloud-Modul, wenn es an ist).",
+            default=True,
+            non_interactive=args.yes,
+        )
     print("")
 
     # -------------------------------------------------------------------------
@@ -1955,7 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if server_url:
         update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
-    update_compose_profiles(repo_root, use_voice=use_voice, use_tracing=use_tracing)
+    update_compose_profiles(repo_root, use_voice=use_voice, use_tracing=use_tracing, use_web=use_web)
     if selinux_enforcing():
         configure_selinux_label(repo_root, non_interactive=args.yes)
     try:

@@ -913,7 +913,7 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     ])
     assert rc1 == 0
     env1 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
-    assert env1["COMPOSE_PROFILES"] == "voice,tracing,proxy"
+    assert env1["COMPOSE_PROFILES"] == "voice,tracing,web,proxy"
     assert env1["ARGUS_DOMAIN"] == "argus.example.org"
     assert env1["ARGUS_TLS_MODE"] == "internal"
     assert env1["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
@@ -927,12 +927,12 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     ])
     assert rc2 == 0
     env2 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
-    assert env2.get("COMPOSE_PROFILES", "") == "voice,tracing"
+    assert env2.get("COMPOSE_PROFILES", "") == "voice,tracing,web"
     assert env2.get("ARGUS_TRUSTED_PROXIES", "") == ""
 
-    # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme -> Sprache Ja -> Tracing Ja)
+    # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme -> Sprache Ja -> Tracing Ja -> Web Ja)
     (repo / ".env").unlink()
-    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "j", "j", "n", "n"])
+    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "j", "j", "j", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     rc3 = installer.main([
         "--no-models", "--no-start",
@@ -940,7 +940,7 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     ])
     assert rc3 == 0
     env3 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
-    assert env3["COMPOSE_PROFILES"] == "voice,tracing,proxy"
+    assert env3["COMPOSE_PROFILES"] == "voice,tracing,web,proxy"
     assert env3["ARGUS_DOMAIN"] == "interaktiv.example.org"
     assert env3["ARGUS_TLS_MODE"] == "acme"
     assert env3["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"

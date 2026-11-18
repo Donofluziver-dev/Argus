@@ -375,10 +375,25 @@ def main(argv: list[str] | None = None) -> int:
     current = parse_env(env_path.read_bytes().decode("utf-8") if env_path.exists() else template)
     values = {k: v for k, v in generate_env_secrets().items() if not current.get(k)}
     # Bestehende Installationen bekommen beim Update die bisherigen Dienste als
-    # Profile eingetragen, falls der Schluessel noch fehlt; ein vorhandener Wert
-    # (auch ein leerer) bleibt unangetastet.
+    # Profile eingetragen, falls der Schluessel noch fehlt. Vor Version 2 gab es
+    # das Profil web noch nicht und SearXNG lief immer: Bei alten Ständen (< 2)
+    # wird web an vorhandene Profile angehaengt und die Version auf 2 gesetzt.
+    # Ist die Version schon mindestens 2, bleibt der Profil-Zustand unberuehrt.
+    env_version_raw = current.get("ARGUS_ENV_VERSION")
+    try:
+        env_version = int(env_version_raw) if env_version_raw is not None else 0
+    except ValueError:
+        env_version = 0
+
     if "COMPOSE_PROFILES" not in current:
-        values["COMPOSE_PROFILES"] = "voice,tracing"
+        values["COMPOSE_PROFILES"] = "voice,tracing,web"
+        values["ARGUS_ENV_VERSION"] = "2"
+    elif env_version < 2:
+        prof_list = [p.strip() for p in current["COMPOSE_PROFILES"].split(",") if p.strip()]
+        if "web" not in prof_list:
+            prof_list.append("web")
+        values["COMPOSE_PROFILES"] = ",".join(prof_list)
+        values["ARGUS_ENV_VERSION"] = "2"
     if os.name != "nt":
         uid, gid = resolve_linux_ugid()
         if not current.get("ARGUS_UID"):

@@ -215,6 +215,7 @@ services:
 
   searxng:
     image: searxng/searxng:2026.10.29-c15647b5a@sha256:c4e8448495ef3b0175eb6c97a19c1ac7cc0a5c907d581ab3877f3cb430e81b86
+    profiles: ["web"]
     networks:
       - backend
     environment:
@@ -446,6 +447,7 @@ services:
         condition: service_healthy
       searxng:
         condition: service_healthy
+        required: false
       calc-sandbox:
         condition: service_healthy
       llm:
@@ -506,6 +508,7 @@ services:
   # local-proxy:8888 an SearXNG und damit ins Internet.
   local-proxy:
     image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    profiles: ["web"]
     restart: unless-stopped
     networks:
       - backend

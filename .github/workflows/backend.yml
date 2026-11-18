@@ -61,10 +61,11 @@ jobs:
           docker compose config -q
           docker compose --profile voice config -q
           docker compose --profile tracing config -q
+          docker compose --profile web config -q
           docker compose --profile proxy config -q
-          docker compose --profile voice --profile tracing --profile proxy config -q
+          docker compose --profile voice --profile tracing --profile web --profile proxy config -q
       # Wer ins Internet darf, wer Ports veroeffentlicht. Das Skript gibt nur Namen aus.
       - name: Netz-Abschottung
         run: |
           docker compose config --format json | python3 setup/check_networks.py
-          docker compose --profile voice --profile tracing --profile proxy config --format json | python3 setup/check_networks.py
+          docker compose --profile voice --profile tracing --profile web --profile proxy config --format json | python3 setup/check_networks.py

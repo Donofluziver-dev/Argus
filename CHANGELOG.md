@@ -114,6 +114,14 @@ roles, administrator and user.
 
 ### Added
 
+- **Web access is a compose profile (`web`: SearXNG, `local-proxy`).** Without it Argus offers
+  the model no tool that reaches the internet (web search, page fetch, research, weather,
+  route), the prompts do not describe them, `/v1/dashboard/web_search` answers 503, and the
+  router does not ask for web research; only the cloud module remains, if it is on. The
+  detection of optional services moved into `rag_backend/features.py`. Installer `--web`,
+  `--no-web`. **Update note:** `ARGUS_ENV_VERSION=2` marks the migrated `.env`;
+  `init_stack.py` (or the installer) adds `web` to the profiles of an older one, because
+  SearXNG always ran before. Until then web access is off and `doctor` warns.
 - **Installation without internet** (`install bundle`, `install --bundle <dir>`). The bundle
   holds every image of every profile, the source of the last commit, the Python wheels of the
   installer and optionally the models, with a SHA-256 over the images. Third-party images are

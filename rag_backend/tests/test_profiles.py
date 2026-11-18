@@ -48,10 +48,12 @@ def _load_setup_module(name: str, filename: str):
 
 def test_watcher_default_state_is_present():
     """Solange die Hintergrundaufgabe noch nicht gelaufen ist (z. B. in Tests
-    ohne lifespan), gelten Sprache und Ablaufverfolgung als vorhanden."""
-    assert backend._OPTIONAL_SERVICES == {"voice": True, "tracing": True}
+    ohne lifespan), gelten Sprache, Ablaufverfolgung und Websuche als vorhanden."""
+    from rag_backend import features
+    assert features._OPTIONAL_SERVICES == {"voice": True, "tracing": True, "web": True}
     assert backend.is_voice_available() is True
     assert backend.is_tracing_available() is True
+    assert backend.is_web_available() is True
 
 
 @pytest.mark.asyncio
@@ -68,45 +70,48 @@ async def test_optional_services_watcher_resolves_via_getaddrinfo(monkeypatch):
     monkeypatch.setenv("STT_SERVICE_URL", "http://stt-service:8003")
     monkeypatch.setenv("TTS_SERVICE_URL", "http://tts-service:8002")
     monkeypatch.setenv("PHOENIX_COLLECTOR_ENDPOINT", "http://phoenix:6006")
+    monkeypatch.setenv("SEARXNG_URL", "http://searxng:8080")
 
-    state = await backend._check_optional_services_once()
-    assert state == {"voice": True, "tracing": False}
-    assert {"stt-service", "tts-service", "phoenix"} <= set(seen_hosts)
+    from rag_backend import features
+    state = await features._check_optional_services_once()
+    assert state == {"voice": True, "tracing": False, "web": False}
+    assert {"stt-service", "tts-service", "phoenix", "searxng"} <= set(seen_hosts)
 
     # Fehlt einer der beiden Sprachdienste, gilt Sprache als nicht vorhanden.
     def fake_getaddrinfo_no_tts(host, port, *args, **kwargs):
-        if host == "stt-service":
+        if host in ("stt-service", "searxng"):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("172.20.0.10", 0))]
         raise socket.gaierror("not found")
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo_no_tts)
-    state2 = await backend._check_optional_services_once()
-    assert state2 == {"voice": False, "tracing": False}
+    state2 = await features._check_optional_services_once()
+    assert state2 == {"voice": False, "tracing": False, "web": True}
 
 
 def test_auth_state_reports_features_without_leaking_addresses(client, monkeypatch):
-    # Standard: beide vorhanden
+    from rag_backend import features
+    # Standard: alle drei vorhanden
     r = client.get("/v1/dashboard/auth/state")
     assert r.status_code == 200
     body = r.json()
-    assert body["features"] == {"voice": True, "tracing": True}
+    assert body["features"] == {"voice": True, "tracing": True, "web": True}
     # Keine internen Hostnamen oder Ports in /auth/state
-    for secret_or_host in ("stt-service", "tts-service", "phoenix", "6006", "8002", "8003"):
+    for secret_or_host in ("stt-service", "tts-service", "phoenix", "searxng", "6006", "8002", "8003", "8080"):
         assert secret_or_host not in r.text
 
     # Abgeschaltet: features spiegeln den Watcher-Zustand
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", {"voice": False, "tracing": False})
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", {"voice": False, "tracing": False, "web": False})
     r_off = client.get("/v1/dashboard/auth/state")
     assert r_off.status_code == 200
-    assert r_off.json()["features"] == {"voice": False, "tracing": False}
+    assert r_off.json()["features"] == {"voice": False, "tracing": False, "web": False}
 
     # Auch angemeldet bleibt features enthalten
     _make_account(client, "chef", "einLangesPasswort", "admin")
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", {"voice": True, "tracing": False})
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", {"voice": True, "tracing": False, "web": False})
     r_auth = client.get("/v1/dashboard/auth/state")
     assert r_auth.status_code == 200
     assert r_auth.json()["authenticated"] is True
-    assert r_auth.json()["features"] == {"voice": True, "tracing": False}
+    assert r_auth.json()["features"] == {"voice": True, "tracing": False, "web": False}
 
 
 # =============================================================================
@@ -117,8 +122,9 @@ def test_auth_state_reports_features_without_leaking_addresses(client, monkeypat
 def test_stt_and_tts_return_503_without_voice_and_never_call_service(client, monkeypatch):
     import httpx
 
+    from rag_backend import features
     _make_account(client, "chef", "einLangesPasswort", "admin")
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", {"voice": False, "tracing": True})
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", {"voice": False, "tracing": True, "web": True})
 
     called = []
 
@@ -150,8 +156,9 @@ def test_stt_and_tts_return_503_without_voice_and_never_call_service(client, mon
 def test_stt_and_tts_keep_502_when_voice_enabled_but_service_down(client, monkeypatch):
     import httpx
 
+    from rag_backend import features
     _make_account(client, "chef", "einLangesPasswort", "admin")
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", {"voice": True, "tracing": True})
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", {"voice": True, "tracing": True, "web": True})
 
     class FailingClient:
         def __init__(self, *a, **kw):
@@ -214,34 +221,38 @@ def test_init_tracing_skips_exporter_when_phoenix_host_unresolvable(monkeypatch,
 async def test_watcher_sets_up_tracing_when_phoenix_appears_later(monkeypatch):
     """Profil tracing erst nach dem Backend-Start eingeschaltet: Der Watcher richtet die
     Ablaufverfolgung ein, sobald Phoenix aufloesbar ist -- genau einmal."""
+    from rag_backend import features
     calls = []
 
     async def fake_check():
-        return {"voice": False, "tracing": True}
+        return {"voice": False, "tracing": True, "web": False}
 
     def fake_init():
         calls.append(1)
         backend._TRACING_ACTIVE = True
         return True
 
-    monkeypatch.setattr(backend, "_check_optional_services_once", fake_check)
+    monkeypatch.setattr(features, "_check_optional_services_once", fake_check)
     monkeypatch.setattr(backend, "_init_tracing", fake_init)
     monkeypatch.setattr(backend, "_TRACING_ACTIVE", False)
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", dict(backend._OPTIONAL_SERVICES))
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", dict(features._OPTIONAL_SERVICES))
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES_REFRESH_SECONDS", 0.01)
 
-    task = asyncio.create_task(backend._optional_services_watcher())
+    #--- So startet lifespan den Watcher.
+    task = asyncio.create_task(
+        features._optional_services_watcher(on_tracing_available=backend._tracing_nachholen))
     await asyncio.sleep(0.2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls == [1]
-    assert backend._OPTIONAL_SERVICES == {"voice": False, "tracing": True}
+    assert features._OPTIONAL_SERVICES == {"voice": False, "tracing": True, "web": False}
 
 
 @pytest.mark.asyncio
 async def test_metrics_tts_skips_http_and_reports_off_when_voice_disabled(monkeypatch, caplog):
-    monkeypatch.setattr(backend, "_OPTIONAL_SERVICES", {"voice": False, "tracing": True})
+    from rag_backend import features
+    monkeypatch.setattr(features, "_OPTIONAL_SERVICES", {"voice": False, "tracing": True, "web": True})
 
     class ForbiddenClient:
         def __init__(self, *a, **kw):
@@ -328,7 +339,7 @@ def test_init_stack_sets_compose_profiles_only_when_key_missing(tmp_path, monkey
     ws = tmp_path / "ws"
     models = tmp_path / "models"
 
-    # 1. Bestehende .env OHNE Schluessel COMPOSE_PROFILES -> wird mit voice,tracing nachgetragen
+    # 1. Bestehende .env OHNE Schluessel COMPOSE_PROFILES -> wird mit voice,tracing,web nachgetragen (ARGUS_ENV_VERSION=2)
     (tmp_path / ".env").write_text(
         f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
         f"ARGUS_MODELS_DIR={models.as_posix()}\n"
@@ -339,9 +350,10 @@ def test_init_stack_sets_compose_profiles_only_when_key_missing(tmp_path, monkey
     )
     assert init_stack.main(["--stack", str(tmp_path), "--ohne-naechste-schritte"]) == 0
     env1 = init_stack.parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
-    assert env1["COMPOSE_PROFILES"] == "voice,tracing"
+    assert env1["COMPOSE_PROFILES"] == "voice,tracing,web"
+    assert env1["ARGUS_ENV_VERSION"] == "2"
 
-    # 2. Bestehende .env mit LEEREM COMPOSE_PROFILES= (bewusst aus) -> bleibt leer
+    # 2. Bestehende .env mit LEEREM COMPOSE_PROFILES= und alter Version -> Migration auf v2 haengt web an
     (tmp_path / ".env").write_text(
         f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
         f"ARGUS_MODELS_DIR={models.as_posix()}\n"
@@ -353,10 +365,25 @@ def test_init_stack_sets_compose_profiles_only_when_key_missing(tmp_path, monkey
     )
     assert init_stack.main(["--stack", str(tmp_path), "--ohne-naechste-schritte"]) == 0
     env2 = init_stack.parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
-    assert "COMPOSE_PROFILES" in env2
-    assert env2["COMPOSE_PROFILES"] == ""
+    assert env2["COMPOSE_PROFILES"] == "web"
+    assert env2["ARGUS_ENV_VERSION"] == "2"
 
-    # 3. Bestehende .env mit eigenem Wert (z. B. proxy) -> bleibt unangetastet
+    # 2b. Ist die Version schon 2 und COMPOSE_PROFILES leer: bleibt leer
+    (tmp_path / ".env").write_text(
+        f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
+        f"ARGUS_MODELS_DIR={models.as_posix()}\n"
+        "ARGUS_ENV_VERSION=2\n"
+        "COMPOSE_PROFILES=\n"
+        "SEARXNG_SECRET=a" + "0" * 63 + "\n"
+        "CANARY_TOKENS=sk-argus-1234567890abcdef\n"
+        "DASHBOARD_SETUP_TOKEN=setup-token-123456789012345\n",
+        encoding="utf-8",
+    )
+    assert init_stack.main(["--stack", str(tmp_path), "--ohne-naechste-schritte"]) == 0
+    env2b = init_stack.parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
+    assert env2b["COMPOSE_PROFILES"] == ""
+
+    # 3. Bestehende .env mit eigenem Wert (z. B. proxy) und alter Version -> bekommt web
     (tmp_path / ".env").write_text(
         f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
         f"ARGUS_MODELS_DIR={models.as_posix()}\n"
@@ -368,7 +395,23 @@ def test_init_stack_sets_compose_profiles_only_when_key_missing(tmp_path, monkey
     )
     assert init_stack.main(["--stack", str(tmp_path), "--ohne-naechste-schritte"]) == 0
     env3 = init_stack.parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
-    assert env3["COMPOSE_PROFILES"] == "proxy"
+    assert env3["COMPOSE_PROFILES"] == "proxy,web"
+    assert env3["ARGUS_ENV_VERSION"] == "2"
+
+    # 3b. Bestehende .env mit Version 2 und proxy -> proxy bleibt unberuehrt
+    (tmp_path / ".env").write_text(
+        f"ARGUS_WORKSPACE_DIR={ws.as_posix()}\n"
+        f"ARGUS_MODELS_DIR={models.as_posix()}\n"
+        "ARGUS_ENV_VERSION=2\n"
+        "COMPOSE_PROFILES=proxy\n"
+        "SEARXNG_SECRET=a" + "0" * 63 + "\n"
+        "CANARY_TOKENS=sk-argus-1234567890abcdef\n"
+        "DASHBOARD_SETUP_TOKEN=setup-token-123456789012345\n",
+        encoding="utf-8",
+    )
+    assert init_stack.main(["--stack", str(tmp_path), "--ohne-naechste-schritte"]) == 0
+    env3b = init_stack.parse_env((tmp_path / ".env").read_text(encoding="utf-8"))
+    assert env3b["COMPOSE_PROFILES"] == "proxy"
 
 
 # =============================================================================
@@ -426,10 +469,10 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     monkeypatch.setattr(installer, "__file__", str(repo / "setup" / "install.py"))
     monkeypatch.setattr(installer.webbrowser, "open", lambda url: True)
 
-    # 1. --no-voice --no-tracing mit --server-url (Proxy bleibt erhalten, voice/tracing entfernt)
+    # 1. --no-voice --no-tracing --no-web mit --server-url (Proxy bleibt erhalten, voice/tracing/web entfernt)
     rc1 = installer.main([
         "--yes", "--no-models", "--no-start",
-        "--no-voice", "--no-tracing",
+        "--no-voice", "--no-tracing", "--no-web",
         "--workspace", str(ws), "--models", str(models),
         "--server-url", "https://argus.example.org",
     ])
@@ -437,10 +480,10 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     env1 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
     assert env1["COMPOSE_PROFILES"] == "proxy"
 
-    # 2. --voice --no-tracing auf bestehender .env mit proxy -> proxy,voice
+    # 2. --voice --no-tracing --no-web auf bestehender .env mit proxy -> proxy,voice
     rc2 = installer.main([
         "--yes", "--no-models", "--no-start",
-        "--voice", "--no-tracing",
+        "--voice", "--no-tracing", "--no-web",
         "--workspace", str(ws), "--models", str(models),
     ])
     assert rc2 == 0
@@ -448,8 +491,9 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     assert env2["COMPOSE_PROFILES"] == "proxy,voice"
 
     # 3. 4,4-GB-Hinweis nur mit Profil voice (ohne --no-start, Start-Frage mit 'n' beantwortet)
+    # Eingaben: 1 = lokal, Stimme = n, Tracing = j, Web = n, Start = n, Token-Zwischenablage = n, Browser = n
     capsys.readouterr()
-    answers_no_voice = iter(["1", "n", "j", "n", "n", "n"])
+    answers_no_voice = iter(["1", "n", "j", "n", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers_no_voice))
     (repo / ".env").unlink()
     rc3 = installer.main([
@@ -462,7 +506,8 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     env3 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
     assert env3["COMPOSE_PROFILES"] == "tracing"
 
-    answers_with_voice = iter(["1", "j", "n", "n", "n", "n"])
+    # Eingaben: 1 = lokal, Stimme = j, Tracing = n, Web = n, Start = n, Token-Zwischenablage = n, Browser = n
+    answers_with_voice = iter(["1", "j", "n", "n", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers_with_voice))
     rc4 = installer.main([
         "--no-models",

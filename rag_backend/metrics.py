@@ -25,6 +25,7 @@ _last_compaction: dict | None = None
 
 # Char/Token-Schaetzung zentral in utils; als Modul-Attribut gespiegelt (main.py liest metrics._CHARS_PER_TOKEN).
 from rag_backend.utils import CHARS_PER_TOKEN as _CHARS_PER_TOKEN
+from rag_backend.features import is_voice_available, is_web_available
 
 
 def record_request(*, ttft_ms=None, total_ms=None, completion_chars=0):
@@ -171,16 +172,8 @@ sglang_metrics = llm_metrics
 _TTS_METRICS_URL = os.getenv("TTS_METRICS_URL", "http://tts-service:8002/v1/tts/metrics")
 
 
-def _voice_available() -> bool:
-    try:
-        from rag_backend.main import is_voice_available
-        return is_voice_available()
-    except Exception:
-        return True
-
-
 async def tts_metrics():
-    if not _voice_available():
+    if not is_voice_available():
         return {"status": "aus"}
     out = {}
     try:
@@ -202,6 +195,8 @@ _searxng_cache = {"ts": 0.0, "online": False}
 
 
 async def searxng_online():
+    if not is_web_available():
+        return False
     # Echter Health-Check des SearxNG-Containers, gecacht (TTL).
     now = time.time()
     if now - _searxng_cache["ts"] < _SEARXNG_TTL:

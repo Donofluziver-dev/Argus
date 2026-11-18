@@ -829,12 +829,13 @@ async def web_search(query: str) -> str:
     task = f"Research and produce a structured factual report for the request: '{query}'"
     token = subagent_depth_var.set(depth + 1)
     try:
+        _allowed = _without_web_tools([web_search, read_webpage, deep_research, calculate, datetime_now])
         return await run_subagent_loop(
             role="WebSearcher",
             task=task,
             think=True,
             extra_instructions=_SEARCH_SUBAGENT_INSTRUCTIONS,
-            allowed_tools=[web_search, read_webpage, deep_research, calculate, datetime_now]
+            allowed_tools=_allowed,
         )
     finally:
         subagent_depth_var.reset(token)
@@ -1433,12 +1434,13 @@ async def deep_research(query: str) -> str:
     task = f"Conduct comprehensive deep research and produce a structured, well-sourced report for: '{query}'"
     token = subagent_depth_var.set(depth + 1)
     try:
+        _allowed = _without_web_tools([web_search, read_webpage, deep_research, calculate, datetime_now])
         return await run_subagent_loop(
             role="DeepSearcher",
             task=task,
             think=True,
             extra_instructions=_SEARCH_SUBAGENT_INSTRUCTIONS,
-            allowed_tools=[web_search, read_webpage, deep_research, calculate, datetime_now]
+            allowed_tools=_allowed,
         )
     finally:
         subagent_depth_var.reset(token)
@@ -2696,8 +2698,8 @@ async def research(subtopics: list[str]) -> str:
     # Research-Worker bekommen NUR Web-/Lese-Tools: kein run_powershell, kein
     # fs_write -- der Task-Text kann von Webinhalten abstammen. get_weather ist
     # ebenfalls nur lesend und trifft genau einen festen Endpunkt.
-    _research_toolset = [web_search, read_webpage, deep_research, calculate,
-                         datetime_now, get_weather, route_distance]
+    _research_toolset = _without_web_tools([web_search, read_webpage, deep_research, calculate,
+                                            datetime_now, get_weather, route_distance])
 
     results, capped, dropped = await _run_agents_in_waves(
         subtopics, role_prefix="Researcher", think=True,
@@ -4041,7 +4043,8 @@ async def agent_node(state: State):
                 "task_type": routing_res.get("task_type", "coding")
             }
 
-        if routing_res.get("needs_web_search") or routing_res.get("task_type") == "research":
+        from rag_backend.features import is_web_available
+        if (routing_res.get("needs_web_search") or routing_res.get("task_type") == "research") and is_web_available():
             route = "deep"
         else:
             route = "local"
@@ -4157,7 +4160,7 @@ async def agent_node(state: State):
         # braucht Echtzeitdaten und wird deshalb IMMER als research eingestuft --
         # ohne diesen Eintrag ist die Wetterabfrage hier gar nicht erreichbar und
         # das Modell sucht sich die Vorhersage stattdessen aus Webseiten zusammen.
-        active_tools = [deep_research, research, get_weather, route_distance]
+        active_tools = _without_web_tools([deep_research, research, get_weather, route_distance])
         # Die Dokumentsuche gehoert dazu: haelt der Router eine interne Frage
         # faelschlich fuer Web-Recherche, kommt der Agent sonst gar nicht an die
         # Dokumente und sucht Interna im Web.
@@ -4392,17 +4395,36 @@ def _effective_tool_groups(routing: dict | None) -> list | None:
 
     None (= Router-Ausfall) wird durchgereicht, damit _tools_for_groups fail-open
     greifen kann. Eine leere Liste bleibt leer, wenn nichts erzwungen wird."""
+    from rag_backend.features import is_web_available
+    web_ok = is_web_available()
     routing = routing or {}
     groups = routing.get("tool_groups")
     forced = set(_TASK_TYPE_REQUIRED_GROUPS.get(
         str(routing.get("task_type", "")).strip().lower(), set()))
-    if routing.get("needs_web_search"):
+    if routing.get("needs_web_search") and web_ok:
         forced.add("web")
     if routing.get("use_blackboard_loop"):
         forced.add("code")
+    if not web_ok:
+        forced.discard("web")
     if not isinstance(groups, (list, tuple, set)):
         return list(forced) if forced else None
-    return sorted(set(str(g).strip().lower() for g in groups) | forced)
+    effective = set(str(g).strip().lower() for g in groups) | forced
+    if not web_ok:
+        effective.discard("web")
+    return sorted(effective)
+
+
+#--- Ohne Profil web (kein SearXNG) bietet Argus kein Werkzeug an, das ins Internet
+#--- geht: die Gruppe web und get_weather. Das Cloud-Modul ist ein eigener Schalter.
+_WEB_TOOL_NAMES = _TOOL_GROUP_NAMES["web"] | {"get_weather"}
+
+
+def _without_web_tools(tool_list: list) -> list:
+    from rag_backend.features import is_web_available
+    if is_web_available():
+        return tool_list
+    return [t for t in tool_list if getattr(t, "name", "") not in _WEB_TOOL_NAMES]
 
 
 def _tools_for_groups(groups, needs_web: bool = False) -> list:
@@ -4418,8 +4440,14 @@ def _tools_for_groups(groups, needs_web: bool = False) -> list:
     needs_web erzwingt die web-Gruppe: der Router liefert das Flag ohnehin separat,
     und ein 'true' bei gleichzeitig fehlender web-Gruppe waere ein Selbstwiderspruch,
     der den Agenten ohne Suchmoeglichkeit dastehen liesse."""
+    from rag_backend.features import is_web_available
+    web_ok = is_web_available()
+    if not web_ok:
+        needs_web = False
+        if isinstance(groups, (list, tuple, set)):
+            groups = [g for g in groups if str(g).strip().lower() != "web"]
     if not isinstance(groups, (list, tuple, set)):
-        return list(tools)
+        return _without_web_tools(list(tools))
 
     wanted = set()
     unknown_only = True
@@ -4429,8 +4457,8 @@ def _tools_for_groups(groups, needs_web: bool = False) -> list:
             unknown_only = False
             wanted |= names
     if groups and unknown_only:
-        return list(tools)          # nur Unsinn geliefert -> fail-open
-    if needs_web:
+        return _without_web_tools(list(tools))     # nur Unsinn geliefert -> fail-open
+    if needs_web and web_ok:
         wanted |= _TOOL_GROUP_NAMES["web"]
 
     grouped = set().union(*_TOOL_GROUP_NAMES.values())
@@ -4438,7 +4466,7 @@ def _tools_for_groups(groups, needs_web: bool = False) -> list:
         t for t in tools
         if getattr(t, "name", "") not in grouped or getattr(t, "name", "") in wanted
     ]
-    return picked or list(tools)
+    return _without_web_tools(picked or list(tools))
 
 
 #--- Werkzeuge, die nur Administratoren angeboten werden: Cloud, Sub-Agenten (die
@@ -4455,6 +4483,7 @@ _ADMIN_ONLY_TOOLS = (
 def _tools_for_role(active: list, role: str | None) -> list:
     """Werkzeuge fuer Konten ohne Administratorrolle beschneiden. role None =
     interner Aufruf ohne Konto (Hintergrundjob) -> unveraendert."""
+    active = _without_web_tools(active)
     if role is None or role == "admin":
         return active
     return [

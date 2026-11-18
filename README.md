@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 451 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 461 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -282,7 +282,8 @@ The model is treated as an untrusted component. Prompt injection cannot be relia
 inside a model, so security rests on permissions, gates and isolation rather than on the
 model behaving well.
 
-- **Networks:** only `rag-backend` and SearXNG can reach the internet. Model, embedding,
+- **Networks:** only `rag-backend` and SearXNG can reach the internet; without the profile
+  `web` no tool that reaches the internet is offered at all. Model, embedding,
   reranker, databases, speech and tracing sit in a network without egress. With the profile
   `proxy`, `caddy` joins in its own network `edge`, shared only with `rag-backend`, and is the
   only service that publishes ports beyond 127.0.0.1 (80 and 443). `setup/check_networks.py`
@@ -347,9 +348,8 @@ These are known and not solved yet:
   to the SIEM); entries the SIEM does not receive are not re-sent.
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
   yet with Let's Encrypt.
-- Tracing (Phoenix, Elastic License) can be switched off (profile `tracing`). Web search
-  (SearXNG, AGPL) is a fixed part of the stack; for an offer to third parties it should be
-  optional or replaceable.
+- Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) can be switched off
+  (profiles `web`, `tracing`) but not replaced by other services.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the
@@ -380,7 +380,8 @@ models listed in `setup/models.json` (pinned to a Hugging Face revision, verifie
 resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
 running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
-`--tracing` / `--no-tracing`, `--bundle <dir>`, `--image-prefix` / `--image-version`,
+`--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <dir>`,
+`--image-prefix` / `--image-version`,
 `--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
 there is deliberately no EXE.
 
@@ -397,11 +398,20 @@ ghcr.io/<owner>/argus --image-version <version>`. Built services have fixed name
 the same name.
 
 Optional parts are compose profiles, set in `COMPOSE_PROFILES` in `.env` (default
-`voice,tracing`): `voice` (speech input and read-aloud, `stt-service`/`tts-service`, 4.4 GB
-on the first build), `tracing` (Phoenix) and `proxy` (Caddy). The backend detects what runs;
-without `voice` the interface hides microphone and read-aloud. An older `.env` without the key
-gets `voice,tracing` on the next run of the installer or `setup/init_stack.py`; until then
-both are off and `doctor` warns.
+`voice,tracing,web`):
+
+- `voice`: speech input and read-aloud (`stt-service`, `tts-service`, 4.4 GB on the first
+  build)
+- `tracing`: Phoenix
+- `web`: SearXNG and `local-proxy`
+- `proxy`: Caddy
+
+The backend detects what runs. Without `voice` the interface hides microphone and read-aloud.
+Without `web` Argus offers no tool that reaches the internet; only the cloud module remains,
+if it is switched on. The installer or `setup/init_stack.py` migrates an older `.env`
+(`ARGUS_ENV_VERSION=2`): a missing `COMPOSE_PROFILES` becomes `voice,tracing,web`, otherwise
+`web` is added, because SearXNG always ran before. Until then the parts concerned are off and
+`doctor` warns.
 
 The same script checks and maintains an installation: `install.cmd doctor` (or `./install.sh
 doctor`) only reads and reports Docker, GPU, `.env`, secrets and folder permissions, models

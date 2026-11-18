@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 451 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 461 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -421,7 +421,8 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
 
 **Schichten:**
 - **Netze:** Ins Internet kommen nur `rag-backend` (Websuche, Seitenabruf, optional Cloud) und
-  SearXNG. Modell, Einbettung, Reranker, Datenbanken, Sprache und Phoenix hängen im Netz
+  SearXNG. Ohne Profil `web` bietet Argus kein Werkzeug an, das ins Internet geht; dann bleibt
+  nur das Cloud-Modul, wenn es eingeschaltet ist. Modell, Einbettung, Reranker, Datenbanken, Sprache und Phoenix hängen im Netz
   `intern` ohne Ausgang. Sie erreichen weder das Internet noch SearXNG, laden also nichts nach
   und können nichts hinausschicken, auch wenn einer von ihnen kompromittiert wäre.
   `intern-proxy` leitet nur an Ziele in `intern` weiter und teilt sein Netz zum
@@ -535,9 +536,9 @@ sollte sie kennen.
 - **Betrieb:** Wer Docker auf dem Server bedienen darf, hat dort praktisch Admin-Rechte. Der
   mitgelieferte TLS-Proxy ist lokal mit eigener CA und mit eigenem Zertifikat getestet, mit
   Let's Encrypt noch nicht.
-- **Lizenzen als Module:** Die Ablaufverfolgung (Phoenix, Elastic License) lässt sich
-  abschalten (Profil `tracing`). Die Websuche (SearXNG, AGPL) gehört fest zum Stapel; für ein
-  Angebot an Dritte sollte sie abschaltbar oder austauschbar sein.
+- **Lizenzen als Module:** Websuche (SearXNG, AGPL) und Ablaufverfolgung (Phoenix, Elastic
+  License) lassen sich abschalten (Profile `web`, `tracing`), aber nicht gegen andere Dienste
+  austauschen.
 - **Lieferkette:** Python-Pakete haben keine Lock-Datei, drei Images installieren Pakete ohne
   feste Version. Die Modelle prüft die Installation per SHA-256, wer sie von Hand ablegt,
   prüft selbst.
@@ -551,7 +552,6 @@ sollte sie kennen.
   noch nicht; Bildeingabe ist aus und nicht getestet. PDFs ohne Textebene (Scans) überspringt
   die Aufnahme in die Dokumentensuche. Der vorgesehene Weg ist das multimodale Modell selbst,
   kein eigenes OCR.
-- **Websuche abschalten:** Einen Schalter, der die Websuche ganz abstellt, gibt es nicht.
 - **Grenzen der Sperre:** Vom Nutzer selbst eingefügte Bilder und Texte zählen nicht als
   Firmendaten. Der Modus `allow` vergleicht nur Fingerabdrücke (Kennungen, E-Mail, IBAN,
   Wortfolgen). Umkodierte Daten (etwa Base64) erkennt er nicht, er ist also kein Schutz gegen
@@ -599,21 +599,26 @@ Installation führt durch diese Schritte:
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
 Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
-`--tracing` / `--no-tracing`, `--bundle <ordner>`, `--image-prefix` / `--image-version`,
+`--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <ordner>`,
+`--image-prefix` / `--image-version`,
 `--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen und laden).
 
 **Profile:** `COMPOSE_PROFILES` in der `.env` schaltet die optionalen Teile ein. Vorgabe ist
-`voice,tracing`; die Installation fragt nach beiden.
+`voice,tracing,web`; die Installation fragt nach allen dreien.
 
 | Profil | Dienste | ohne das Profil |
 |---|---|---|
 | `voice` | `stt-service`, `tts-service` (Spracheingabe, Vorlesen; der erste Bau lädt 4,4 GB) | Mikrofon und Vorlesen sind ausgeblendet |
 | `tracing` | `phoenix` (Ablaufverfolgung) | der Reiter *Traces* zeigt einen Hinweis |
+| `web` | `searxng`, `local-proxy` (Websuche und Seitenabruf) | Argus geht nicht ins Internet: Websuche, Seitenabruf, Recherche, Wetter und Route werden dem Modell nicht angeboten. Das Cloud-Modul ist ein eigener Schalter. |
 | `proxy` | `caddy` (TLS-Proxy, siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)) | Port 7860 nur auf 127.0.0.1 |
 
-Das Backend erkennt selbst, welche Dienste laufen. Eine ältere `.env` ohne den Schlüssel
-bekommt `voice,tracing` beim nächsten Lauf von `install.cmd` oder `setup/init_stack.py`. Bis
-dahin sind Sprache und Ablaufverfolgung aus, und `doctor` warnt.
+Das Backend erkennt selbst, welche Dienste laufen. Eine ältere `.env` stellen `install.cmd`
+und `setup/init_stack.py` beim nächsten Lauf um (`ARGUS_ENV_VERSION=2`):
+- Fehlt `COMPOSE_PROFILES`, wird es `voice,tracing,web`.
+- Sonst kommt `web` dazu, weil SearXNG vorher immer lief.
+
+Bis dahin fehlen die betroffenen Teile, und `doctor` warnt.
 
 **Ohne Internet installieren (Offline-Paket).** Auf einem Rechner mit Internet baut
 `./install.sh bundle --with-models` (unter Windows `install.cmd bundle --with-models`) das
@@ -738,10 +743,10 @@ weniger. Weil Text und Bild in einem Modell stecken, gilt das für beides.
 | `llm` | llama.cpp mit dem Sprachmodell (GGUF); für Clients 127.0.0.1:30000 |
 | `embed`, `rerank` | bge-m3 und bge-reranker-v2-m3 (GGUF) auf der CPU für die Dokumentensuche; für Clients 127.0.0.1:30001 und :30002 |
 | `postgres`, `qdrant` | Chats und Konten; Abschnitte mit dichtem Vektor und BM25-Sparse-Vektor |
-| `searxng` | Websuche; Clients erreichen sie über `local-proxy` auf `127.0.0.1:8888` |
+| `searxng` | Profil `web`: Websuche; Clients erreichen sie über `local-proxy` auf `127.0.0.1:8888` |
 | `phoenix` | Profil `tracing`: lokale Ablaufverfolgung; UI und Empfang über `intern-proxy` auf `127.0.0.1:6006` |
 | `stt-service`, `tts-service` | Profil `voice`: Spracherkennung (Whisper), Sprachausgabe; für Clients 127.0.0.1:8003 und :8002, mit API-Key |
-| `local-proxy` | nginx vor SearXNG: lässt nur Anfragen an `localhost`/`127.0.0.1` durch, sonst 421 (Schutz gegen DNS-Rebinding) |
+| `local-proxy` | Profil `web`: nginx vor SearXNG, lässt nur Anfragen an `localhost`/`127.0.0.1` durch, sonst 421 (Schutz gegen DNS-Rebinding) |
 | `intern-proxy` | nginx vor den Diensten im Netz `intern`: Phoenix mit derselben Host-Prüfung, Modell, Einbettung, Reranker und Sprache als TCP-Durchreichung |
 | `calc-sandbox` | abgeschottete Code-Ausführung |
 | `caddy` | nur mit Profil `proxy`: TLS-Proxy vor `rag-backend` für den Server-Betrieb, Ports 80 und 443 |

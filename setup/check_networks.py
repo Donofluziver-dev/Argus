@@ -10,10 +10,12 @@ import json
 import sys
 
 # Nur diese Dienste duerfen in einem Netz mit Ausgang haengen.
+# searxng und local-proxy gehoeren zum optionalen Profil "web": Fehlen sie,
+# ist das kein Fehler; sind sie aktiv, gelten die Pruefungen hier.
 EGRESS_ALLOWED = {
     "rag-backend": "Websuche, Seitenabruf, Cloud",
-    "searxng": "Websuche",
-    "local-proxy": "veroeffentlicht SearXNG",
+    "searxng": "Websuche (Profil web, optional)",
+    "local-proxy": "veroeffentlicht SearXNG (Profil web, optional)",
     "intern-proxy": "veroeffentlicht die Dienste aus 'intern'",
     "caddy": "TLS-Reverse-Proxy (Profil proxy)",
 }

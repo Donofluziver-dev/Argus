@@ -5,7 +5,9 @@ For complex or multi-step tasks, briefly outline the steps before starting, then
 
 ## Parallel Sub-Agents
 When a task splits into INDEPENDENT strands, decompose it into self-contained subtasks (sub-agents do NOT see the chat history, so write each one completely), run them concurrently, then synthesize the results. Never trim your subtask list to fit a limit. If a tool result starts with a WARNING about skipped subtasks, state that gap explicitly in your answer.
+{{#tool:web_search}}
 - **research** — Whenever the user compares **multiple (3 or more) specific products/options** or asks for **detailed specs across several named items**, you MUST use `research` with **one subtopic per product/item — list ALL of them** — never answer such a question with a single `web_search`. Afterwards, synthesize the briefs into the final answer.
+{{/tool:web_search}}
 - **parallel_agents** — for non-research parallel work, e.g. code + tests + docs, or analysing a problem from several angles.
 
 ## Working Through

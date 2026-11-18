@@ -38,6 +38,8 @@ from rag_backend.models import User, ChatSession, Message, AuditLog, IngestedDoc
 from rag_backend.database import engine, get_db, SessionLocal
 from rag_backend.agent import agent_executor, startup_load_models, startup_mcp_and_graph, _TOOL_STATUS, sandbox_seen_ips
 from rag_backend.memory import run_reflection_cycle
+from rag_backend import features
+from rag_backend.features import is_tracing_available, is_voice_available, is_web_available
 from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
 from rag_backend import metrics
 from rag_backend.security_audit import audit_auth
@@ -300,8 +302,9 @@ async def lifespan(app: FastAPI):
     #--- niemals selbst per DNS aufloesen muss.
     app.state.sandbox_ip_task = asyncio.create_task(_sandbox_ip_watcher())
 
-    #--- Optionale Profile (voice, tracing) im Hintergrund per DNS pruefen.
-    app.state.optional_services_task = asyncio.create_task(_optional_services_watcher())
+    #--- Optionale Profile (voice, tracing, web) im Hintergrund per DNS pruefen.
+    app.state.optional_services_task = asyncio.create_task(
+        features._optional_services_watcher(on_tracing_available=_tracing_nachholen))
 
     yield
 
@@ -355,16 +358,6 @@ async def lifespan(app: FastAPI):
             pass
 
 
-def _service_hostname(url_or_host: str, default: str = "") -> str:
-    raw = (url_or_host or "").strip() or default
-    if not raw:
-        return ""
-    if "://" in raw:
-        from urllib.parse import urlsplit
-        return (urlsplit(raw).hostname or "").strip()
-    return raw.split("/")[0].split(":")[0].strip()
-
-
 def _host_resolvable(host: str) -> bool:
     h = (host or "").strip()
     if not h:
@@ -391,7 +384,7 @@ def _init_tracing() -> bool:
     if not endpoint:
         log.info("Tracing: kein PHOENIX_COLLECTOR_ENDPOINT gesetzt -- deaktiviert.")
         return False
-    host = _service_hostname(endpoint)
+    host = features._service_hostname(endpoint)
     if not _host_resolvable(host):
         log.info(
             f"Ablaufverfolgung aus: Host '{host}' nicht aufloesbar (Profil tracing nicht aktiv)."
@@ -537,72 +530,18 @@ async def _sandbox_ip_watcher():
         await asyncio.sleep(_SANDBOX_REFRESH_SECONDS)
 
 
-#--- Optionale Dienste (Profile voice und tracing): Der Anfragepfad loest NIE
-#--- selbst per DNS auf. Solange die Hintergrundaufgabe noch nicht geprueft hat
-#--- (z. B. in Tests ohne lifespan), gilt "vorhanden" -- das heutige Verhalten.
-_OPTIONAL_SERVICES: dict[str, bool] = {"voice": True, "tracing": True}
-_OPTIONAL_SERVICES_REFRESH_SECONDS = 30
-
-
-async def _can_resolve_host(host: str) -> bool:
-    h = (host or "").strip()
-    if not h:
-        return False
-    try:
-        infos = await asyncio.to_thread(socket.getaddrinfo, h, None, 0, socket.SOCK_STREAM)
-        return bool(infos)
-    except OSError:
-        return False
-
-
-async def _check_optional_services_once() -> dict[str, bool]:
-    stt_host = _service_hostname(os.getenv("STT_SERVICE_URL", "http://stt-service:8003"), "stt-service")
-    tts_host = _service_hostname(os.getenv("TTS_SERVICE_URL", "http://tts-service:8002"), "tts-service")
-    phoenix_ep = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://phoenix:6006").strip()
-    phoenix_host = _service_hostname(phoenix_ep) if phoenix_ep else ""
-    #--- Parallel: Ein Name, den es nicht gibt, kostet bei Dockers DNS rund 4 s.
-    stt_ok, tts_ok, tracing_ok = await asyncio.gather(
-        _can_resolve_host(stt_host),
-        _can_resolve_host(tts_host),
-        _can_resolve_host(phoenix_host),
-    )
-    return {
-        "voice": stt_ok and tts_ok,
-        "tracing": tracing_ok,
-    }
-
-
-async def _optional_services_watcher():
-    """Prueft alle 30 Sekunden im Hintergrund per DNS, ob stt-service, tts-service
-    und der Phoenix-Host aufloesbar sind."""
-    global _OPTIONAL_SERVICES
-    while True:
-        try:
-            _OPTIONAL_SERVICES = await _check_optional_services_once()
-            #--- Phoenix kam nach dem Start dazu (Profil spaeter eingeschaltet):
-            #--- Ablaufverfolgung jetzt einrichten statt erst beim naechsten Neustart.
-            if _OPTIONAL_SERVICES.get("tracing") and not _TRACING_ACTIVE:
-                await asyncio.to_thread(_init_tracing)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.debug(f"Optionale Dienste nicht pruefbar: {e}")
-        await asyncio.sleep(_OPTIONAL_SERVICES_REFRESH_SECONDS)
-
-
-def is_voice_available() -> bool:
-    return bool(_OPTIONAL_SERVICES.get("voice", True))
-
-
-def is_tracing_available() -> bool:
-    return bool(_OPTIONAL_SERVICES.get("tracing", True))
-
-
+#--- Optionale Dienste (Profile voice, tracing, web): Zustand und DNS-Pruefung
+#--- haelt allein das Modul features (gestartet in lifespan). Hier nur der
+#--- nachgeholte Start der Ablaufverfolgung.
 def _current_features() -> dict[str, bool]:
-    return {
-        "voice": is_voice_available(),
-        "tracing": is_tracing_available(),
-    }
+    return features.current_features()
+
+
+async def _tracing_nachholen() -> None:
+    """Phoenix kam nach dem Start dazu (Profil spaeter eingeschaltet): Ablaufverfolgung
+    jetzt einrichten statt erst beim naechsten Neustart."""
+    if not _TRACING_ACTIVE:
+        await asyncio.to_thread(_init_tracing)
 
 
 #--- Registriert wird sie weiter unten als aeusserste Schicht (nach
@@ -2076,6 +2015,11 @@ async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
     #--- Websuche fuer Argus Desktop (Argus Code): dieselbe Engine wie das Werkzeug
     #--- web_search (SearxNG -> Ranking -> Volltext, SSRF-Schutz, Injection-Check),
     #--- aber ohne Agenten-Turn. SearxNG ist bewusst nicht auf dem Host veroeffentlicht.
+    if not is_web_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Websuche ist auf diesem Server nicht eingerichtet.",
+        )
     from rag_backend.agent import _search_and_read, quellen_liste, quellen_zuruecksetzen
     q = (body.query or "").strip()[:300]
     if not q:
