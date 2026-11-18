@@ -1,0 +1,66 @@
+# Fertige Images in die GitHub Container Registry (ghcr.io/<inhaber>/argus/<dienst>:<version>).
+#
+# Laeuft NUR von Hand (Actions > Images > Run workflow) oder bei einem Tag v*, nie bei
+# einem normalen Push. Was hier landet, ist je nach Sichtbarkeit des Pakets fuer Dritte
+# abrufbar: vorher die Lizenzen in THIRD_PARTY_NOTICES.md pruefen.
+#
+# Auf dem Server dann:  ./install.sh --image-prefix ghcr.io/<inhaber>/argus --image-version <version>
+name: Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version der Images (etwa 1.0.0)"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [llm, embed, rerank, qdrant, calc-sandbox, stt-service, tts-service, rag-backend]
+    steps:
+      - uses: actions/checkout@v4
+      # Das Sprachabbild bringt 4,4 GB Modelle mit, das Modell-Abbild CUDA: Platz schaffen.
+      - name: Platz auf dem Runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+      # Eingaben nur ueber die Umgebung ins Skript, nie per ${{ }} in den Text (Einschleusung).
+      - name: Version und Ziel
+        id: ziel
+        env:
+          EINGABE_VERSION: ${{ github.event.inputs.version }}
+          INHABER: ${{ github.repository_owner }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            ver="$EINGABE_VERSION"
+          else
+            ver="${GITHUB_REF_NAME#v}"
+          fi
+          printf '%s' "$ver" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$' || { echo "Ungueltige Version"; exit 1; }
+          owner="$(printf '%s' "$INHABER" | tr '[:upper:]' '[:lower:]')"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "prefix=ghcr.io/$owner/argus" >> "$GITHUB_OUTPUT"
+      - name: Anmelden bei ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Bauen und hochladen
+        env:
+          ARGUS_IMAGE_PREFIX: ${{ steps.ziel.outputs.prefix }}
+          ARGUS_VERSION: ${{ steps.ziel.outputs.version }}
+          DIENST: ${{ matrix.service }}
+        run: |
+          touch .env
+          docker compose --profile voice --profile tracing --profile web --profile proxy build "$DIENST"
+          docker compose --profile voice --profile tracing --profile web --profile proxy push "$DIENST"

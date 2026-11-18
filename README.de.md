@@ -594,8 +594,8 @@ Installation führt durch diese Schritte:
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
 Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
-`--tracing` / `--no-tracing`, `--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen
-und laden).
+`--tracing` / `--no-tracing`, `--bundle <ordner>`, `--image-prefix` / `--image-version`,
+`--no-models`, `--no-start`, `--models-only` (nur Modelle prüfen und laden).
 
 **Profile:** `COMPOSE_PROFILES` in der `.env` schaltet die optionalen Teile ein. Vorgabe ist
 `voice,tracing`; die Installation fragt nach beiden.
@@ -609,6 +609,31 @@ und laden).
 Das Backend erkennt selbst, welche Dienste laufen. Eine ältere `.env` ohne den Schlüssel
 bekommt `voice,tracing` beim nächsten Lauf von `install.cmd` oder `setup/init_stack.py`. Bis
 dahin sind Sprache und Ablaufverfolgung aus, und `doctor` warnt.
+
+**Ohne Internet installieren (Offline-Paket).** Auf einem Rechner mit Internet baut
+`./install.sh bundle --with-models` (unter Windows `install.cmd bundle --with-models`) das
+Paket `argus-bundle-<version>/`. Darin liegen:
+
+- `images.tar`: alle Images aller Profile; die fremden werden per Digest geholt
+- `argus-src.tar`: der Quellstand des letzten Commits
+- `wheels/`: das Python-Paket, das die Installation selbst braucht
+- `models/`: die Modelle
+
+Mit Modellen sind das rund 45 GB. Auf dem Zielrechner `argus-src.tar` entpacken und dort
+`./install.sh --bundle <ordner>` starten. Die Installation prüft die Prüfsumme der Images,
+lädt sie (`docker load`), kopiert und prüft die Modelle und startet den Stapel, ohne etwas zu
+bauen oder aus dem Internet zu holen. Vorher installiert sein müssen Python ab 3.10 mit
+`venv`, Docker mit Compose und das NVIDIA Container Toolkit.
+
+**Fertige Images aus einer Registry.** Der Workflow *Images*
+(`.github/workflows/images.yml`) legt die eigenen Images unter
+`ghcr.io/<inhaber>/argus/<dienst>:<version>` ab. Er läuft nur von Hand oder bei einem Tag
+`v*`. Auf dem Server dann `./install.sh --image-prefix ghcr.io/<inhaber>/argus
+--image-version <version>`.
+
+Selbst gebaute Dienste haben feste Namen (`argus/<dienst>:local`) und `pull_policy: never`.
+Fehlt ein Image, wird es gebaut, nie aus einer Registry geholt. Sonst zöge Compose ein fremdes
+Image gleichen Namens vom Docker Hub.
 
 **Prüfen und Pflege** mit demselben Skript (`install.cmd …` unter Windows, `./install.sh …`
 unter Linux):

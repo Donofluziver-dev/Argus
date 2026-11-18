@@ -107,6 +107,17 @@ roles, administrator and user.
 
 ### Added
 
+- **Installation without internet** (`install bundle`, `install --bundle <dir>`). The bundle
+  holds every image of every profile, the source of the last commit, the Python wheels of the
+  installer and optionally the models, with a SHA-256 over the images. Third-party images are
+  pulled by digest and renamed for the bundle, because `docker save`/`load` does not keep
+  digests in every image store. On the target the installer verifies, loads and starts without
+  building or downloading anything.
+- **Images from a registry.** Workflow *Images* (manual or tag `v*`) pushes the own images to
+  ghcr.io; `install --image-prefix ... --image-version ...` uses them. Built services now have
+  fixed names (`argus/<service>:local`, independent of the project name) and
+  `pull_policy: never`: before, a missing image name could be pulled from Docker Hub instead of
+  being built.
 - **Speech and tracing are compose profiles** (`voice`: `stt-service`, `tts-service`;
   `tracing`: `phoenix`), set in `COMPOSE_PROFILES`, default `voice,tracing`. A server can do
   without the 4.4 GB speech build or without Phoenix (Elastic License). The backend detects

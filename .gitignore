@@ -23,5 +23,8 @@ documents_to_ingest/*
 proxy/certs/*
 !proxy/certs/.gitkeep
 proxy/data/
+# Offline-Paket: gebaute Pakete und die beim Laden erzeugte Compose-Ergaenzung.
+argus-bundle-*/
+docker-compose.bundle.yml
 *.log
 

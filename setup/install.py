@@ -638,8 +638,12 @@ def _load_check_networks_module(repo_root: Path):
     return net_mod
 
 
-def ensure_setup_venv(repo_root: Path) -> Path:
-    """Richtet .venv-setup ein und installiert cryptography==50.0.2."""
+SETUP_PIP_REQUIREMENT = "cryptography==50.0.2"
+
+
+def ensure_setup_venv(repo_root: Path, wheels_dir: Path | None = None) -> Path:
+    """Richtet .venv-setup ein und installiert cryptography==50.0.2 -- aus dem Netz oder,
+    beim Offline-Paket, aus dessen Ordner wheels/."""
     venv_dir = repo_root / ".venv-setup"
     if os.name == "nt":
         venv_python = venv_dir / "Scripts" / "python.exe"
@@ -655,9 +659,11 @@ def ensure_setup_venv(repo_root: Path) -> Path:
     # Pruefen ob cryptography vorhanden ist
     chk = subprocess.run([str(venv_python), "-c", "import cryptography"], capture_output=True, check=False)
     if chk.returncode != 0:
-        print("Installiere Hilfspaket 'cryptography==50.0.2' in .venv-setup...")
+        print(f"Installiere Hilfspaket '{SETUP_PIP_REQUIREMENT}' in .venv-setup...")
+        offline = ["--no-index", "--find-links", str(wheels_dir)] if wheels_dir and wheels_dir.is_dir() else []
         pip_res = subprocess.run(
-            [str(venv_python), "-m", "pip", "install", "--only-binary=:all:", "cryptography==50.0.2", "-q"],
+            [str(venv_python), "-m", "pip", "install", "--only-binary=:all:", *offline,
+             SETUP_PIP_REQUIREMENT, "-q"],
             capture_output=True, text=True, check=False
         )
         if pip_res.returncode != 0:
@@ -1766,6 +1772,22 @@ def main(argv: list[str] | None = None) -> int:
     rp_parser = subparsers.add_parser("reset-password", help="Passwort eines Kontos im Backend-Container zuruecksetzen.")
     rp_parser.add_argument("account", help="Kontoname, dessen Passwort zurueckgesetzt werden soll.")
 
+    bd_parser = subparsers.add_parser("bundle", help="Offline-Paket bauen: Images, Quellstand, auf Wunsch Modelle.")
+    bd_parser.add_argument("--out", type=str, default=None, help="Zielordner (Standard: ./argus-bundle-<version>).")
+    bd_parser.add_argument("--version", dest="bundle_version", type=str, default=None,
+                           help="Version der Images (Standard: Datum und Commit).")
+    bd_parser.add_argument("--with-models", action="store_true", help="Modelldateien mit ins Paket legen.")
+    bd_parser.add_argument("--services", type=str, default=None,
+                           help="Nur diese Dienste (Komma-getrennt), etwa zum Ausprobieren.")
+
+    #--- Fertige Images statt eigenem Bau.
+    parser.add_argument("--bundle", type=str, default=None,
+                        help="Offline-Paket (Ordner von 'bundle'): Images und Modelle daraus, ohne Internet.")
+    parser.add_argument("--image-prefix", type=str, default=None,
+                        help="Fertige Images aus einer Registry, etwa ghcr.io/firma/argus.")
+    parser.add_argument("--image-version", type=str, default=None,
+                        help="Version der Registry-Images (mit --image-prefix).")
+
     args = parser.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -1777,6 +1799,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "reset-password":
         return run_reset_password(repo_root, args.account)
+
+    if args.subcommand == "bundle":
+        return run_bundle(repo_root, args.out, args.bundle_version, args.with_models, args.services)
+
+    bundle_dir = Path(args.bundle).resolve() if args.bundle else None
+    if bundle_dir is not None and args.image_prefix:
+        print("Fehler: --bundle und --image-prefix schliessen sich aus.")
+        return 1
+    if args.image_prefix and not args.image_version:
+        print("Fehler: --image-prefix braucht --image-version.")
+        return 1
+    if bundle_dir is not None:
+        try:
+            load_bundle_manifest(bundle_dir)
+        except ValueError as exc:
+            print(f"Fehler in --bundle: {exc}")
+            return 1
 
     if args.tls_mode is not None and args.tls_mode not in VALID_TLS_MODES:
         print(f"Fehler in --tls-mode: '{args.tls_mode}' ist ungueltig (erlaubt: {', '.join(VALID_TLS_MODES)}).")
@@ -1907,7 +1946,10 @@ def main(argv: list[str] | None = None) -> int:
     # Schritt 4: Geheimnisse, .env und Laufzeit-Ordner anlegen
     # -------------------------------------------------------------------------
     print("[4/7] Erzeuge Geheimnisse und .env...")
-    venv_python = ensure_setup_venv(repo_root)
+    if bundle_dir is not None:
+        venv_python = ensure_setup_venv(repo_root, wheels_dir=bundle_dir / "wheels")
+    else:
+        venv_python = ensure_setup_venv(repo_root)
     run_init_stack(repo_root, venv_python, workspace=workspace_dir, models=models_dir)
     ensure_installation_dirs(repo_root, workspace_dir=workspace_dir, models_dir=models_dir)
 
@@ -1916,6 +1958,15 @@ def main(argv: list[str] | None = None) -> int:
     update_compose_profiles(repo_root, use_voice=use_voice, use_tracing=use_tracing)
     if selinux_enforcing():
         configure_selinux_label(repo_root, non_interactive=args.yes)
+    try:
+        if bundle_dir is not None:
+            apply_bundle(repo_root, bundle_dir)
+        elif args.image_prefix:
+            configure_registry_images(repo_root, args.image_prefix, args.image_version)
+            print(f"  Fertige Images aus {args.image_prefix}, Version {args.image_version}.")
+    except (RuntimeError, ValueError) as exc:
+        print(f"Fehler: {exc}")
+        return 1
     print("")
 
     # -------------------------------------------------------------------------
@@ -1927,6 +1978,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  Modell-Download uebersprungen (--no-models).\n")
     else:
         models_spec_path = repo_root / "setup" / "models.json"
+        if bundle_dir is not None:
+            copy_models_from_bundle(bundle_dir, Path(models_dir), models_spec_path)
         modelle_ok = _execute_models_step(models_spec_path, models_dir, non_interactive=args.yes)
         print("")
 
@@ -1937,7 +1990,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_start:
         print("  Start des Stapels uebersprungen (--no-start).\n")
     else:
-        if use_voice:
+        if bundle_dir is not None or args.image_prefix:
+            print("Hinweis: Die Images kommen fertig, gebaut wird nichts.")
+        elif use_voice:
             print("Hinweis: Der erste Bau dauert etwas, der Sprachdienst laedt dabei 4,4 GB.")
         else:
             print("Hinweis: Der erste Bau dauert etwas.")
@@ -1947,8 +2002,18 @@ def main(argv: list[str] | None = None) -> int:
         start_now = prompt_bool("Soll der Container-Stapel jetzt gebaut und gestartet werden?",
                                 default=modelle_ok, non_interactive=args.yes)
         if start_now:
-            print("Fuehre 'docker compose up -d --build' aus...")
-            c_res = subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=repo_root, check=False)
+            #--- Mit fertigen Images nichts bauen: aus dem Offline-Paket ohne Internet,
+            #--- aus der Registry vorher holen.
+            if args.image_prefix:
+                print("Fuehre 'docker compose pull' aus...")
+                if subprocess.run(["docker", "compose", "pull"], cwd=repo_root, check=False).returncode != 0:
+                    print("Fehler beim Holen der Images aus der Registry.")
+                    return 1
+            up_cmd = ["docker", "compose", "up", "-d"]
+            if bundle_dir is None and not args.image_prefix:
+                up_cmd.append("--build")
+            print(f"Fuehre '{' '.join(up_cmd)}' aus...")
+            c_res = subprocess.run(up_cmd, cwd=repo_root, check=False)
             if c_res.returncode != 0:
                 print("Fehler beim Starten des Container-Stapels mit docker compose.")
                 return 1
@@ -1995,6 +2060,254 @@ def main(argv: list[str] | None = None) -> int:
         webbrowser.open(final_url)
 
     print("\nInstallation erfolgreich abgeschlossen.")
+    return 0
+
+
+# =============================================================================
+# Fertige Images: Offline-Paket (bundle) und eigene Registry
+# =============================================================================
+
+BUNDLE_MANIFEST = "argus-bundle.json"
+BUNDLE_IMAGES = "images.tar"
+BUNDLE_OVERRIDE = "docker-compose.bundle.yml"
+#--- Ein Paket enthaelt jeden Dienst aller Profile; welche laufen, entscheidet
+#--- COMPOSE_PROFILES auf dem Zielrechner.
+BUNDLE_PROFILES = ("voice", "tracing", "web", "proxy")
+_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_IMAGE_PREFIX_RE = re.compile(r"[a-z0-9][a-z0-9._-]*(?::[0-9]+)?(?:/[a-z0-9][a-z0-9._-]*)*")
+
+
+def _profile_args(profiles=BUNDLE_PROFILES) -> list[str]:
+    out: list[str] = []
+    for p in profiles:
+        out += ["--profile", p]
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_checked(cmd: list[str], cwd: Path, env: dict | None, what: str) -> None:
+    print(f"  {what}...")
+    res = subprocess.run(cmd, cwd=cwd, env=env, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"{what} fehlgeschlagen (Exit {res.returncode}).")
+
+
+def _image_present(ref: str) -> bool:
+    return subprocess.run(["docker", "image", "inspect", ref],
+                          capture_output=True, check=False).returncode == 0
+
+
+def default_bundle_version(repo_root: Path) -> str:
+    """Datum und Commit, etwa 2026.11.18-d7e5f2f."""
+    stamp = time.strftime("%Y.%m.%d")
+    rc, out, _ = run_command(["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"])
+    return f"{stamp}-{out.strip()}" if rc == 0 and out.strip() else stamp
+
+
+def create_bundle(repo_root: Path, out_dir: Path, version: str, with_models: bool = False,
+                  services: list[str] | None = None) -> dict:
+    """Baut die eigenen Images, holt die fremden (per Digest festgelegt) und legt alles
+    unter einem Namen je Dienst (argus/<dienst>:<version>) in out_dir ab, dazu den
+    Quellstand und auf Wunsch die Modelle. Auf dem Zielrechner braucht die Installation
+    dann kein Internet: install --bundle <out_dir>.
+
+    Die fremden Images werden umbenannt statt per Digest referenziert: docker save/load
+    behaelt Digests nicht mit jedem Image-Speicher. Die Pruefsumme der images.tar sichert
+    den Weg vom Bau- zum Zielrechner."""
+    if not _VERSION_RE.fullmatch(version or ""):
+        raise ValueError("Ungueltige Version (erlaubt: Buchstaben, Ziffern, Punkt, _ und -).")
+    env = {**os.environ, "ARGUS_IMAGE_PREFIX": "argus", "ARGUS_VERSION": version,
+           "ARGUS_PULL_POLICY": "never"}
+    profile_args = _profile_args()
+    #--- Die Ausgabe enthaelt die aufgeloeste Umgebung (auch Geheimnisse aus der .env):
+    #--- nur im Speicher auswerten, nie ausgeben.
+    res = subprocess.run(["docker", "compose", *profile_args, "config", "--format", "json"],
+                         cwd=repo_root, env=env, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError("docker compose config fehlgeschlagen.")
+    all_services = json.loads(res.stdout).get("services") or {}
+    names = sorted(services) if services else sorted(all_services)
+    unknown = [n for n in names if n not in all_services]
+    if unknown:
+        raise ValueError(f"Unbekannte Dienste: {', '.join(unknown)}")
+    built = [n for n in names if all_services[n].get("build")]
+    foreign = [n for n in names if not all_services[n].get("build")]
+    targets = {n: f"argus/{n}:{version}" for n in names}
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if built:
+        _run_checked(["docker", "compose", *profile_args, "build", *built], repo_root, env,
+                     f"Eigene Images bauen ({', '.join(built)})")
+    for n in foreign:
+        ref = all_services[n]["image"]
+        if not _image_present(ref):
+            _run_checked(["docker", "pull", ref], repo_root, env, f"{ref} holen")
+        _run_checked(["docker", "tag", ref, targets[n]], repo_root, env, f"{n} als {targets[n]} markieren")
+    images_tar = out_dir / BUNDLE_IMAGES
+    _run_checked(["docker", "save", "-o", str(images_tar), *sorted(set(targets.values()))],
+                 repo_root, env, f"Images nach {images_tar} speichern")
+
+    override = ["# Erzeugt von 'install bundle': Images aus dem Offline-Paket, nie aus einer Registry.",
+                "services:"]
+    for n in names:
+        override += [f"  {n}:", f"    image: {targets[n]}", "    pull_policy: never"]
+    (out_dir / BUNDLE_OVERRIDE).write_text("\n".join(override) + "\n", encoding="utf-8")
+
+    git_commit = ""
+    if (repo_root / ".git").exists() and shutil.which("git"):
+        rc, out, _ = run_command(["git", "-C", str(repo_root), "rev-parse", "HEAD"])
+        git_commit = out.strip() if rc == 0 else ""
+        _run_checked(["git", "-C", str(repo_root), "archive", "--format=tar",
+                      "-o", str(out_dir / "argus-src.tar"), "HEAD"], repo_root, None,
+                     "Quellstand packen (argus-src.tar)")
+
+    #--- Die Installation braucht in ihrer Hilfsumgebung 'cryptography'. Ohne Internet
+    #--- kommt es aus wheels/: Linux x86_64 und Windows, Python 3.10 bis 3.14.
+    wheels = out_dir / "wheels"
+    wheel_targets = {
+        "Linux x86_64": ["manylinux_2_28_x86_64", "manylinux_2_17_x86_64", "manylinux2014_x86_64"],
+        "Windows": ["win_amd64"],
+    }
+    print(f"  Python-Pakete fuer die Installation laden ({SETUP_PIP_REQUIREMENT})...")
+    missing_wheels = []
+    for label, plats in wheel_targets.items():
+        for py in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+            plat_args = [x for p in plats for x in ("--platform", p)]
+            rc = subprocess.run([sys.executable, "-m", "pip", "download", "--quiet",
+                                 "--disable-pip-version-check", "--only-binary=:all:",
+                                 *plat_args, "--python-version", py, "--implementation", "cp",
+                                 "-d", str(wheels), SETUP_PIP_REQUIREMENT],
+                                capture_output=True, check=False).returncode
+            if rc != 0:
+                missing_wheels.append(f"{label} Python {py}")
+    if missing_wheels:
+        print(f"  Hinweis: keine Pakete fuer {', '.join(missing_wheels)}; dort braucht die Installation Internet.")
+
+    models: list[dict] = []
+    if with_models:
+        init_mod = _load_init_stack_module(repo_root)
+        env_path = repo_root / ".env"
+        env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+        models_dir = Path(_effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]
+                          or os.path.expanduser("~/argus/models"))
+        for item in load_models_spec(repo_root / "setup" / "models.json"):
+            src = models_dir / item["target"]
+            if not src.is_file() or src.stat().st_size != item["size"]:
+                raise RuntimeError(f"Modell {item['target']} fehlt in {models_dir} oder ist unvollstaendig.")
+            dst = out_dir / "models" / item["target"]
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            print(f"  Kopiere {item['target']}...")
+            shutil.copy2(src, dst)
+            models.append({"target": item["target"], "size": item["size"], "sha256": item["sha256"]})
+
+    print("  Pruefsumme der Images berechnen...")
+    manifest = {
+        "format": 1,
+        "version": version,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "git_commit": git_commit,
+        "images": targets,
+        "images_sha256": _sha256_file(images_tar),
+        "models": models,
+    }
+    (out_dir / BUNDLE_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
+
+
+def load_bundle_manifest(bundle_dir: Path) -> dict:
+    path = bundle_dir / BUNDLE_MANIFEST
+    if not path.is_file():
+        raise ValueError(f"{path} fehlt -- das ist kein Argus-Offline-Paket.")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("format") != 1 or not _VERSION_RE.fullmatch(str(manifest.get("version", ""))):
+        raise ValueError("Unbekanntes Format des Offline-Pakets.")
+    return manifest
+
+
+def apply_bundle(repo_root: Path, bundle_dir: Path) -> dict:
+    """Prueft die Images eines Offline-Pakets, laedt sie und stellt die .env darauf um:
+    Compose nimmt dann nur noch diese Images und baut oder zieht nichts."""
+    manifest = load_bundle_manifest(bundle_dir)
+    images_tar = bundle_dir / BUNDLE_IMAGES
+    print("  Pruefe die Pruefsumme der Images (dauert bei 20 GB eine Weile)...")
+    if not images_tar.is_file() or _sha256_file(images_tar) != manifest.get("images_sha256"):
+        raise ValueError(f"{images_tar} fehlt oder ist beschaedigt (Pruefsumme stimmt nicht).")
+    _run_checked(["docker", "load", "-i", str(images_tar)], repo_root, None, "Images laden")
+    missing = [ref for ref in sorted(set(manifest["images"].values())) if not _image_present(ref)]
+    if missing:
+        raise RuntimeError(f"Nach dem Laden fehlen Images: {', '.join(missing)}")
+    shutil.copy2(bundle_dir / BUNDLE_OVERRIDE, repo_root / BUNDLE_OVERRIDE)
+    init_mod = _load_init_stack_module(repo_root)
+    template_path = repo_root / ".env.example"
+    template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
+    init_mod.write_env_file(repo_root / ".env", template_text, {
+        #--- Doppelpunkt als Trenner auf jedem System (unter Windows sonst ';').
+        "COMPOSE_PATH_SEPARATOR": ":",
+        "COMPOSE_FILE": f"docker-compose.yml:{BUNDLE_OVERRIDE}",
+        "ARGUS_VERSION": manifest["version"],
+        "ARGUS_PULL_POLICY": "never",
+    })
+    print(f"  Offline-Paket {manifest['version']} geladen ({len(manifest['images'])} Images).")
+    return manifest
+
+
+def copy_models_from_bundle(bundle_dir: Path, models_dir: Path, models_spec_path: Path) -> int:
+    """Kopiert Modelle aus dem Paket, die im Modellordner fehlen. Geprueft werden sie
+    danach wie heruntergeladene (SHA-256 im Modell-Schritt)."""
+    src_root = bundle_dir / "models"
+    if not src_root.is_dir():
+        return 0
+    copied = 0
+    for item in load_models_spec(models_spec_path):
+        dst = models_dir / item["target"]
+        src = src_root / item["target"]
+        if (dst.is_file() and dst.stat().st_size == item["size"]) or not src.is_file():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  Kopiere {item['target']} aus dem Paket...")
+        shutil.copy2(src, dst)
+        copied += 1
+    return copied
+
+
+def configure_registry_images(repo_root: Path, prefix: str, version: str) -> None:
+    """Fertige Images aus einer eigenen Registry (etwa ghcr.io/firma/argus) statt Bau."""
+    if not _IMAGE_PREFIX_RE.fullmatch(prefix or ""):
+        raise ValueError("Ungueltiger Image-Praefix (klein geschrieben, etwa ghcr.io/firma/argus).")
+    if not _VERSION_RE.fullmatch(version or ""):
+        raise ValueError("Ungueltige Image-Version.")
+    init_mod = _load_init_stack_module(repo_root)
+    template_path = repo_root / ".env.example"
+    template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
+    init_mod.write_env_file(repo_root / ".env", template_text, {
+        "ARGUS_IMAGE_PREFIX": prefix,
+        "ARGUS_VERSION": version,
+        "ARGUS_PULL_POLICY": "missing",
+    })
+
+
+def run_bundle(repo_root: Path, out: str | None, version: str | None, with_models: bool,
+               services: str | None) -> int:
+    ver = version or default_bundle_version(repo_root)
+    out_dir = Path(out).resolve() if out else Path.cwd() / f"argus-bundle-{ver}"
+    svc = [s.strip() for s in services.split(",") if s.strip()] if services else None
+    print(f"Erstelle Offline-Paket {ver} in {out_dir}")
+    try:
+        manifest = create_bundle(repo_root, out_dir, ver, with_models=with_models, services=svc)
+    except (RuntimeError, ValueError) as exc:
+        print(f"Fehler: {exc}")
+        return 1
+    size_gb = sum(p.stat().st_size for p in out_dir.rglob("*") if p.is_file()) / 1024**3
+    print(f"\nFertig: {len(manifest['images'])} Images, {len(manifest['models'])} Modelle, {size_gb:.1f} GB.")
+    print("Auf dem Zielrechner: argus-src.tar entpacken, dann dort")
+    print(f"  ./install.sh --bundle {out_dir}")
     return 0
 
 

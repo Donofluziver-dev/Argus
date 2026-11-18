@@ -376,8 +376,21 @@ models listed in `setup/models.json` (pinned to a Hugging Face revision, verifie
 resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
 running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
-`--tracing` / `--no-tracing`, `--no-models`, `--no-start`, `--models-only`. `install.cmd` is
-plain batch without PowerShell; there is deliberately no EXE.
+`--tracing` / `--no-tracing`, `--bundle <dir>`, `--image-prefix` / `--image-version`,
+`--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
+there is deliberately no EXE.
+
+**Without internet:** `./install.sh bundle --with-models` builds `argus-bundle-<version>/` on a
+machine with internet. It holds every image of every profile (third-party ones pulled by
+digest), the source of the last commit, the Python wheels the installer needs and the models,
+about 45 GB in total. On the target, unpack `argus-src.tar` and run
+`./install.sh --bundle <dir>`. It checks the checksum, loads the images, copies the models and
+starts the stack without building or downloading anything. **From a registry:** the workflow
+*Images* (manual or tag `v*` only) pushes the own images to
+`ghcr.io/<owner>/argus/<service>:<version>`; then `./install.sh --image-prefix
+ghcr.io/<owner>/argus --image-version <version>`. Built services have fixed names
+(`argus/<service>:local`) with `pull_policy: never`, so Compose never pulls a foreign image of
+the same name.
 
 Optional parts are compose profiles, set in `COMPOSE_PROFILES` in `.env` (default
 `voice,tracing`): `voice` (speech input and read-aloud, `stt-service`/`tts-service`, 4.4 GB

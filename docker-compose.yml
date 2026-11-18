@@ -2,6 +2,13 @@
 # Kein Container bekommt Admin-Rechte oder einen Weg auf den Host. Bestehende
 # Installationen behalten ihren Projektnamen (und damit ihre Volumes) per
 # COMPOSE_PROJECT_NAME in der .env.
+#
+# Selbst gebaute Dienste haben feste Image-Namen (ARGUS_IMAGE_PREFIX/<dienst>:
+# ARGUS_VERSION, Vorgabe argus/<dienst>:local), unabhaengig vom Projektnamen. So
+# passen Images aus einem Offline-Paket oder einer Registry. pull_policy "never":
+# fehlt ein Image, wird es gebaut, nie aus einer Registry geholt -- sonst zoege
+# Compose ein fremdes Image gleichen Namens vom Docker Hub. Fuer fertige Images aus
+# einer eigenen Registry ARGUS_PULL_POLICY=missing (siehe README).
 name: argus
 
 #--- Netze: Ins Internet kommen nur Backend (Web-Werkzeuge, Cloud) und SearXNG.
@@ -29,6 +36,8 @@ networks:
 
 services:
   llm:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/llm:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: .
       dockerfile: Dockerfile.llm
@@ -81,6 +90,8 @@ services:
   # bge-reranker-v2-m3 (Bewertung der Treffer), beide auf der CPU, mit dem
   # LLM-API-Key. Die App erreicht sie ueber intern-proxy (127.0.0.1:30001/30002).
   embed:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/embed:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: .
       dockerfile: Dockerfile.embed
@@ -110,6 +121,8 @@ services:
       start_period: 120s
 
   rerank:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/rerank:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: .
       dockerfile: Dockerfile.embed
@@ -171,6 +184,8 @@ services:
       retries: 5
 
   qdrant:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/qdrant:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: .
       dockerfile: Dockerfile.qdrant
@@ -229,6 +244,8 @@ services:
       start_period: 30s
 
   calc-sandbox:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/calc-sandbox:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: ./calc_sandbox
       dockerfile: Dockerfile.sandbox
@@ -272,6 +289,8 @@ services:
       start_period: 15s
 
   tts-service:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/tts-service:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: ./tts_service
       dockerfile: Dockerfile.tts
@@ -321,6 +340,8 @@ services:
       start_period: 90s
 
   stt-service:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/stt-service:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: ./stt_service
       dockerfile: Dockerfile.stt
@@ -355,6 +376,8 @@ services:
       start_period: 60s
 
   rag-backend:
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/rag-backend:${ARGUS_VERSION:-local}
+    pull_policy: ${ARGUS_PULL_POLICY:-never}
     build:
       context: ./rag_backend
       dockerfile: Dockerfile.api
