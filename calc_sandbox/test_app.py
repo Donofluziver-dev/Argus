@@ -837,3 +837,223 @@ def test_sanitize_filename_parity_length_limits():
     cleaned_umlaut = sanitize_filename(long_umlaut)
     assert len(cleaned_umlaut) <= 180
     assert len(cleaned_umlaut.encode("utf-8")) <= 240
+
+
+
+# ---- Ein Code-Lauf je Container (SANDBOX_ONE_RUN)
+
+def _sandbox_mod():
+    import sys
+    return sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+
+
+def _app_recording_response(mod, events):
+    """ASGI-Huelle um die Sandbox-App: vermerkt, wann die Antwort vollstaendig
+    verschickt ist, damit die Tests die Reihenfolge zu _retire pruefen koennen."""
+    async def wrapped(scope, receive, send):
+        async def send_and_record(message):
+            await send(message)
+            if message.get("type") == "http.response.body" and not message.get("more_body", False):
+                events.append("response")
+        await mod.app(scope, receive, send_and_record)
+    return wrapped
+
+
+@pytest.fixture
+def one_run(monkeypatch):
+    """SANDBOX_ONE_RUN an, frischer Anspruchszustand, _retire und die Wartefunktion
+    ersetzt (es wird nichts beendet und nicht gewartet)."""
+    mod = _sandbox_mod()
+    monkeypatch.setenv("SANDBOX_ONE_RUN", "true")
+    monkeypatch.setattr(mod, "_CLAIMED", False)
+    monkeypatch.setattr(mod, "_RETIRED", False)
+    monkeypatch.setattr(mod, "_FALLBACK_TIMER", None)
+    events: list = []
+
+    def fake_retire():
+        events.append("retire")
+
+    async def fake_wait(seconds):
+        events.append(("wait", seconds))
+
+    monkeypatch.setattr(mod, "_retire", fake_retire)
+    monkeypatch.setattr(mod, "_retire_wait", fake_wait)
+    yield mod, events
+    timer = mod._FALLBACK_TIMER
+    if timer is not None:
+        timer.cancel()
+
+
+def test_one_run_first_run_ok_second_503_retire_once_after_response(one_run, monkeypatch):
+    from fastapi.testclient import TestClient
+    import time as _time
+    mod, events = one_run
+
+    exec_calls = []
+    real_exec = mod._exec_code
+
+    def counting_exec(*args, **kwargs):
+        exec_calls.append(args[0])
+        return real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_exec_code", counting_exec)
+    #--- Container gerade erst gestartet (vor 3 s): bis 10 s muss gewartet werden.
+    monkeypatch.setattr(mod, "_SERVICE_STARTED_AT", _time.monotonic() - 3.0)
+    client = TestClient(_app_recording_response(mod, events))
+
+    r1 = client.post("/execute", json={"code": "print(6 * 7)", "language": "python", "timeout": 5.0})
+    assert r1.status_code == 200
+    assert r1.json()["result"].strip() == "42"
+    assert exec_calls == ["print(6 * 7)"]
+
+    #--- Erst Antwort, dann Wartezeit bis zur Mindestlaufzeit, dann genau ein _retire.
+    assert [e if isinstance(e, str) else e[0] for e in events] == ["response", "wait", "retire"]
+    waited = events[1][1]
+    assert 6.0 <= waited <= 7.0 + 0.5
+
+    r2 = client.post("/execute", json={"code": "print('zweiter Lauf')", "language": "python", "timeout": 5.0})
+    assert r2.status_code == 503
+    assert r2.json() == {"error": "Sandbox wird erneuert."}
+    assert exec_calls == ["print(6 * 7)"]
+    assert events.count("retire") == 1
+
+
+def test_one_run_no_wait_when_container_ran_long_enough(one_run, monkeypatch):
+    from fastapi.testclient import TestClient
+    import time as _time
+    mod, events = one_run
+    monkeypatch.setattr(mod, "_exec_code", lambda *a, **kw: {"result": "ok\n", "files": []})
+    monkeypatch.setattr(mod, "_SERVICE_STARTED_AT", _time.monotonic() - 60.0)
+    client = TestClient(_app_recording_response(mod, events))
+
+    r = client.post("/execute", json={"code": "print('ok')"})
+    assert r.status_code == 200
+    assert events == ["response", "retire"]
+
+
+def test_one_run_failed_run_also_retires(one_run, monkeypatch):
+    from fastapi.testclient import TestClient
+    import time as _time
+    mod, events = one_run
+    monkeypatch.setattr(mod, "_SERVICE_STARTED_AT", _time.monotonic() - 60.0)
+
+    def boom(*a, **kw):
+        raise RuntimeError("kaputt")
+
+    monkeypatch.setattr(mod, "_exec_code", boom)
+    client = TestClient(_app_recording_response(mod, events))
+
+    r = client.post("/execute", json={"code": "print(1)"})
+    assert r.status_code == 200
+    assert "kaputt" in r.json()["error"]
+    assert events == ["response", "retire"]
+    r2 = client.post("/execute", json={"code": "print(1)"})
+    assert r2.status_code == 503
+    assert events.count("retire") == 1
+
+
+def test_one_run_concurrent_execute_exactly_one_runs(one_run, monkeypatch):
+    from fastapi.testclient import TestClient
+    import threading as _threading
+    import time as _time
+    mod, events = one_run
+    monkeypatch.setattr(mod, "_SERVICE_STARTED_AT", _time.monotonic() - 60.0)
+
+    release = _threading.Event()
+    exec_calls = []
+
+    def slow_exec(*args, **kwargs):
+        exec_calls.append(args[0])
+        release.wait(timeout=20)
+        return {"result": "fertig\n", "files": []}
+
+    monkeypatch.setattr(mod, "_exec_code", slow_exec)
+
+    results = []
+    results_lock = _threading.Lock()
+
+    def worker(i):
+        client = TestClient(mod.app)
+        r = client.post("/execute", json={"code": f"print({i})"})
+        with results_lock:
+            results.append((r.status_code, r.json()))
+
+    n = 6
+    threads = [_threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    #--- Alle ausser dem einen beanspruchenden Lauf kommen sofort mit 503 zurueck.
+    deadline = _time.monotonic() + 20
+    while _time.monotonic() < deadline:
+        with results_lock:
+            if len(results) >= n - 1:
+                break
+        _time.sleep(0.05)
+    release.set()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(results) == n
+    ok = [body for code, body in results if code == 200]
+    rejected = [body for code, body in results if code == 503]
+    assert len(ok) == 1 and ok[0]["result"] == "fertig\n"
+    assert len(rejected) == n - 1
+    assert all(body == {"error": "Sandbox wird erneuert."} for body in rejected)
+    assert len(exec_calls) == 1
+    assert events.count("retire") == 1
+
+
+def test_one_run_calculate_does_not_claim(one_run, monkeypatch):
+    from fastapi.testclient import TestClient
+    import time as _time
+    mod, events = one_run
+    monkeypatch.setattr(mod, "_SERVICE_STARTED_AT", _time.monotonic() - 60.0)
+    monkeypatch.setattr(mod, "_exec_code", lambda *a, **kw: {"result": "lauf\n", "files": []})
+    client = TestClient(mod.app)
+
+    for _ in range(2):
+        r = client.post("/calculate", json={"expression": "2 + 3"})
+        assert r.status_code == 200
+        assert r.json()["result"] == "Ergebnis: 5"
+    assert mod._CLAIMED is False
+    assert events == []
+
+    #--- Der Code-Lauf danach beansprucht den Container ganz normal.
+    assert client.post("/execute", json={"code": "print(1)"}).status_code == 200
+    assert events == ["retire"]
+    #--- Auch beansprucht bleibt /calculate bis zum Ende erreichbar.
+    r = client.post("/calculate", json={"expression": "2 * 4"})
+    assert r.status_code == 200 and r.json()["result"] == "Ergebnis: 8"
+    assert events == ["retire"]
+
+
+def test_one_run_retire_once_with_fallback_timer(one_run):
+    mod, events = one_run
+    assert mod._claim_container() is True
+    assert mod._claim_container() is False
+    timer = mod._FALLBACK_TIMER
+    assert timer is not None and timer.daemon
+    #--- Hintergrundaufgabe und Sicherheitsnetz: _retire trotzdem nur einmal.
+    mod._retire_once()
+    mod._retire_once()
+    assert events == ["retire"]
+    timer.join(timeout=2)
+    assert not timer.is_alive()
+
+
+def test_without_one_run_switch_execute_stays_reusable(monkeypatch):
+    from fastapi.testclient import TestClient
+    mod = _sandbox_mod()
+    monkeypatch.delenv("SANDBOX_ONE_RUN", raising=False)
+    monkeypatch.setattr(mod, "_CLAIMED", False)
+    retired = []
+    monkeypatch.setattr(mod, "_retire", lambda: retired.append(1))
+    monkeypatch.setattr(mod, "_exec_code", lambda code, *a, **kw: {"result": code + "\n", "files": []})
+    client = TestClient(mod.app)
+
+    for i in range(3):
+        r = client.post("/execute", json={"code": f"print({i})"})
+        assert r.status_code == 200
+        assert r.json()["result"] == f"print({i})\n"
+    assert mod._CLAIMED is False
+    assert retired == []

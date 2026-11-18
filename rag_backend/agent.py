@@ -1444,6 +1444,128 @@ async def deep_research(query: str) -> str:
         subagent_depth_var.reset(token)
 
 
+# ---- calc-sandbox: Aufrufe ueber alle Repliken
+
+#--- Die Sandbox laeuft in mehreren Repliken (docker-compose: deploy.replicas), jede
+#--- nimmt genau EINEN Code-Lauf an und beendet sich danach (SANDBOX_ONE_RUN). Eine
+#--- wiederverwendete Keep-alive-Verbindung aus _http_client_internal landete dabei
+#--- bei einem Container, der sich gerade beendet. Darum: alle Adressen von
+#--- SANDBOX_HOSTNAME aufloesen und der Reihe nach mit frischer Verbindung probieren.
+_SANDBOX_PORT = 8001
+_SANDBOX_RENEW_MARKER = "Sandbox wird erneuert"
+_SANDBOX_BUSY_MSG = "Sandbox ist ausgelastet, bitte gleich noch einmal versuchen."
+_SANDBOX_RETRY_PAUSE_SECONDS = 0.5
+_SANDBOX_CONNECT_TIMEOUT_SECONDS = 3.0
+#--- Alle Adressen, an die je ein Sandbox-Aufruf ging (normalisiert). main.py sperrt
+#--- Anfragen von dort zusaetzlich zu _SANDBOX_IPS: Eine neu gestartete Replik kann
+#--- eine neue IP haben, die der 30-s-Abgleich in main.py noch nicht kennt. Im Netz
+#--- "sandbox" haengen nur rag-backend und calc-sandbox, alte Eintraege sind also
+#--- unschaedlich. Wird nur durch Neuzuweisung ersetzt (Leser brauchen keine Sperre).
+_SANDBOX_SEEN_IPS: frozenset[str] = frozenset()
+
+
+class SandboxBusyError(RuntimeError):
+    """Keine Sandbox-Replik hat innerhalb von SANDBOX_WAIT_SECONDS angenommen."""
+
+
+def sandbox_seen_ips() -> frozenset[str]:
+    return _SANDBOX_SEEN_IPS
+
+
+def _remember_sandbox_ips(addrs: list[str]) -> None:
+    global _SANDBOX_SEEN_IPS
+    new: set[str] = set()
+    for raw in addrs:
+        val = (raw or "").strip().lower()
+        if not val:
+            continue
+        new.add(val)
+        try:
+            ip = ipaddress.ip_address(val)
+            new.add(ip.compressed.lower())
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+                new.add(str(ip.ipv4_mapped))
+        except ValueError:
+            pass
+    if not new <= _SANDBOX_SEEN_IPS:
+        _SANDBOX_SEEN_IPS = _SANDBOX_SEEN_IPS | new
+
+
+async def _resolve_sandbox_addresses(host: str) -> list[str]:
+    """Alle Adressen von host, Reihenfolge wie vom Resolver, ohne Dubletten."""
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, _SANDBOX_PORT, 0, socket.SOCK_STREAM)
+    except (socket.gaierror, OSError) as e:
+        #--- Zwischen Ende und Neustart aller Repliken kann der Name kurz fehlen.
+        log.debug(f"Sandbox-Hostname {host} nicht aufloesbar: {e}")
+        return []
+    addrs: list[str] = []
+    for info in infos or []:
+        sockaddr = info[4] if len(info) > 4 else None
+        if sockaddr and sockaddr[0] not in addrs:
+            addrs.append(str(sockaddr[0]))
+    return addrs
+
+
+def _new_sandbox_client(timeout: float) -> httpx.AsyncClient:
+    """Eigener Client je Aufruf, ohne Keep-alive: jede Anfrage baut eine frische
+    Verbindung auf und schliesst sie danach. Tests ersetzen diese Funktion."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=min(_SANDBOX_CONNECT_TIMEOUT_SECONDS, timeout)),
+        limits=httpx.Limits(max_keepalive_connections=0),
+        headers={"Connection": "close"},
+        trust_env=False,
+    )
+
+
+def _is_sandbox_renewing(resp: httpx.Response) -> bool:
+    if resp.status_code != 503:
+        return False
+    try:
+        return _SANDBOX_RENEW_MARKER in (resp.text or "")
+    except Exception:
+        return False
+
+
+async def _sandbox_post(path: str, payload: dict, timeout: float) -> httpx.Response:
+    """POST an die calc-sandbox ueber alle Repliken.
+
+    Naechste Adresse NUR bei Verbindungsfehler vor dem Senden (ConnectError,
+    ConnectTimeout) oder bei 503 "Sandbox wird erneuert". Timeout oder Fehler NACH dem
+    Senden werden nie wiederholt (der Code koennte schon gelaufen sein), sondern
+    weitergereicht. Nach SANDBOX_WAIT_SECONDS ohne Annahme: SandboxBusyError."""
+    host = (os.getenv("SANDBOX_HOSTNAME", "calc-sandbox") or "").strip() or "calc-sandbox"
+    try:
+        wait_s = float(os.getenv("SANDBOX_WAIT_SECONDS", "30"))
+    except ValueError:
+        wait_s = 30.0
+    deadline = time.monotonic() + max(0.0, wait_s)
+    host_header = f"{host}:{_SANDBOX_PORT}"
+
+    async with _new_sandbox_client(timeout) as client:
+        while True:
+            addrs = await _resolve_sandbox_addresses(host)
+            _remember_sandbox_ips(addrs)
+            for addr in addrs:
+                netloc = f"[{addr}]" if ":" in addr else addr
+                try:
+                    resp = await client.post(
+                        f"http://{netloc}:{_SANDBOX_PORT}{path}",
+                        json=payload,
+                        headers={"Host": host_header},
+                    )
+                except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                    log.debug(f"Sandbox {addr} nicht erreichbar: {type(e).__name__}")
+                    continue
+                if _is_sandbox_renewing(resp):
+                    continue
+                return resp
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SandboxBusyError(_SANDBOX_BUSY_MSG)
+            await asyncio.sleep(min(_SANDBOX_RETRY_PAUSE_SECONDS, remaining))
+
+
 # ---- Tool: calculate
 
 @tool
@@ -1454,9 +1576,9 @@ async def calculate(expression: str) -> str:
     'simplify((x**2-1)/(x-1))', '2.5 * sqrt(144) + pi'"""
     try:
         await _ensure_models_loaded()
-        resp = await _http_client_internal.post(
-            "http://calc-sandbox:8001/calculate",
-            json={"expression": expression},
+        resp = await _sandbox_post(
+            "/calculate",
+            {"expression": expression},
             timeout=10.0,
         )
         resp.raise_for_status()
@@ -1535,9 +1657,9 @@ async def execute_code(code: str) -> str:
             except Exception as e:
                 log.warning(f"execute_code: Fehler beim Lesen der Benutzerdateien: {e}")
 
-        resp = await _http_client_internal.post(
-            "http://calc-sandbox:8001/execute",
-            json={"code": code, "language": "python", "timeout": 15.0, "files": files_payload},
+        resp = await _sandbox_post(
+            "/execute",
+            {"code": code, "language": "python", "timeout": 15.0, "files": files_payload},
             timeout=20.0,
         )
         resp.raise_for_status()
@@ -3434,9 +3556,9 @@ async def _classify_routing_decision(text: str) -> dict:
 async def _run_code_in_sandbox(code: str, language: str = "python") -> tuple:
     """(output, error?) -- gemeinsamer calc-sandbox-Call des solver_node."""
     try:
-        r = await _http_client_internal.post(
-            "http://calc-sandbox:8001/execute",
-            json={"code": code, "language": "python", "timeout": 15.0, "files": []},
+        r = await _sandbox_post(
+            "/execute",
+            {"code": code, "language": "python", "timeout": 15.0, "files": []},
             timeout=20.0,
         )
         res_json = r.json()

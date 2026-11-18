@@ -36,7 +36,7 @@ from slowapi.errors import RateLimitExceeded
 
 from rag_backend.models import User, ChatSession, Message, AuditLog, IngestedDocument, Mission, Base
 from rag_backend.database import engine, get_db, SessionLocal
-from rag_backend.agent import agent_executor, startup_load_models, startup_mcp_and_graph, _TOOL_STATUS
+from rag_backend.agent import agent_executor, startup_load_models, startup_mcp_and_graph, _TOOL_STATUS, sandbox_seen_ips
 from rag_backend.memory import run_reflection_cycle
 from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
 from rag_backend import metrics
@@ -612,7 +612,11 @@ async def block_sandbox_requests(request: Request, call_next):
     if client_host:
         if request.url.path == "/healthz" and client_host in ("127.0.0.1", "::1", "localhost"):
             return await call_next(request)
-        if _SANDBOX_IPS and (_normalize_ip_candidates(client_host) & _SANDBOX_IPS):
+        candidates = _normalize_ip_candidates(client_host)
+        #--- Zusaetzlich alle Adressen, an die das Backend je Code geschickt hat:
+        #--- Repliken starten nach jedem Lauf neu und koennen dabei eine neue IP
+        #--- bekommen, die _SANDBOX_IPS (Abgleich alle 30 s) noch nicht kennt.
+        if (_SANDBOX_IPS and (candidates & _SANDBOX_IPS)) or (candidates & sandbox_seen_ips()):
             log.warning(f"Anfrage aus dem Sandbox-Container ({client_host}) auf {request.url.path} abgewiesen.")
             return JSONResponse(
                 {"detail": "Zugriff aus der Sandbox ist nicht erlaubt."},

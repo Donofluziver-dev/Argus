@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 430 for the backend, 73 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 451 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -115,7 +115,7 @@ model:
 | the model cannot send anything out | It runs in a network without egress; only the backend and the own search instance reach the internet. | `setup/check_networks.py`, in CI on every change |
 | company data and the internet never meet in one conversation | Once a conversation has read company data or received a file, every outbound path in it is blocked. | tests, agent measurement (security group) |
 | everyone sees only their own | Roles are checked at every backend route. Files are kept per account; the code sandbox receives only the account's own files. | tests (`test_user_files.py`) |
-| the model cannot run anything on a machine | No access to machines, no credentials in the containers. Code runs only in a sandbox without internet access, under its own unprivileged user; everything is removed after each run. | compose file, sandbox tests |
+| the model cannot run anything on a machine | No access to machines, no credentials in the containers. Code runs only in a sandbox without internet access, under its own unprivileged user, each run in a freshly started container. | compose file, sandbox tests |
 | foreign content counts as data, not as instructions | Web pages and documents pass an injection check; canary tokens raise an alarm when something protected tries to leave. | agent measurement (injection in document and web page) |
 | everything can be traced | Signed audit log, optionally forwarded to the company's SIEM ([below](#who-did-what-audit-log-and-siem)). | `GET /v1/dashboard/audit/verify`, the SIEM |
 | you do not have to take it on trust | Open source; tests and measurements are in the repository and can be repeated. | this repository |
@@ -304,10 +304,13 @@ model behaving well.
   per-account memory, is closed to the file tools.
 - **Code sandbox:** it does not mount the workspace; the backend sends it only the account's
   files. Code runs under its own unprivileged user, separate from the sandbox service, and
-  calculations under a second one. Runs execute one at a time. Before and after each run the
-  sandbox ends every process of that user, verifies that none is left and empties `/tmp`; if
-  that cannot be confirmed it stops executing. The backend rejects requests coming from the
-  sandbox.
+  calculations under a second one. **Every code run gets a freshly started container:** a
+  sandbox container accepts exactly one run and then exits, Docker restarts it (empty `/tmp`,
+  new namespaces). Two replicas stand ready (`ARGUS_SANDBOX_REPLICAS`), the backend takes the
+  next free one; no container needs the Docker socket for this. In addition the sandbox ends
+  every process of the run user before and after each run, verifies that none is left and
+  empties `/tmp` and `/dev/shm`; SysV IPC is off. If the cleanup cannot be confirmed it stops
+  executing. The backend rejects requests coming from the sandbox, also from fresh replicas.
 - **Login:** HttpOnly session cookie, Argon2, no self-registration, lockout after five failed
   attempts. The first administrator account requires the installation's setup token.
 - **Audit:** an HMAC-chained log records tool calls that write, locks after company data,
@@ -336,9 +339,10 @@ These are known and not solved yet:
   without a confirmation card.
 - Long-term memory is currently not updated during normal chat. Conversations with company
   data never enter it, and the file tools cannot write it.
-- Runs of different accounts share one sandbox container and one sandbox user; they are
-  separated by the cleanup between runs (processes, `/tmp`, `/dev/shm`; SysV IPC is switched
-  off). A container per run would be the stronger separation.
+- Every code run has its own freshly started container, but all share the host kernel; a
+  stronger separation needs a runtime such as gVisor or Kata, which Argus does not set up.
+  After a run a container is not ready for about 10 s; more back-to-back runs than replicas
+  wait (at most `SANDBOX_WAIT_SECONDS`, 30 s).
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); entries the SIEM does not receive are not re-sent.
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not

@@ -378,11 +378,13 @@ async def test_execute_code_sends_user_files_and_saves_results(tmp_path, monkeyp
 
     sent_requests = []
 
-    async def fake_post(url, **kwargs):
-        sent_requests.append(kwargs)
+    #--- Sandbox-Aufrufe laufen ueber agent._sandbox_post (Repliken, frische Verbindung).
+    async def fake_post(path, payload, timeout):
+        assert path == "/execute"
+        sent_requests.append({"json": payload, "timeout": timeout})
         return mock_resp
 
-    monkeypatch.setattr(agent, "_http_client_internal", MagicMock(post=AsyncMock(side_effect=fake_post)))
+    monkeypatch.setattr(agent, "_sandbox_post", fake_post)
 
     out = await agent.execute_code.ainvoke({"code": "print('start')"})
 

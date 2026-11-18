@@ -814,7 +814,8 @@ async def test_probe_execute_code_marks_conversation(db_env, monkeypatch):
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
     resp.json.return_value = {"result": "Gehalt Max: 98765 EUR\n"}
-    monkeypatch.setattr(agent, "_http_client_internal", MagicMock(post=AsyncMock(return_value=resp)))
+    #--- Sandbox-Aufrufe laufen ueber agent._sandbox_post (Repliken, frische Verbindung).
+    monkeypatch.setattr(agent, "_sandbox_post", AsyncMock(return_value=resp))
 
     out = await agent.execute_code.ainvoke({"code": "print(open('/app/data/gehalt.txt').read())"})
     assert "98765" in out

@@ -80,6 +80,13 @@ roles, administrator and user.
   account read-only. Now the backend sends it only the files of the requesting account, runs
   are executed one at a time, and before and after each run all leftover processes and
   everything in `/tmp` are removed. PowerShell is no longer part of the sandbox image.
+- **A fresh sandbox container for every code run.** A sandbox container accepts exactly one
+  `/execute` and exits afterwards (once the answer is sent, at the earliest 10 s after its
+  start, so Docker does not back off), Docker restarts it with an empty `/tmp` and new
+  namespaces. Two replicas (`ARGUS_SANDBOX_REPLICAS`) keep runs from waiting; the backend tries
+  them in turn on fresh connections and never repeats a request that was already sent. No
+  container gets the Docker socket. The block against requests from the sandbox also covers
+  the addresses of freshly started replicas.
 - **No SysV IPC in the sandbox.** Shared memory segments, message queues and semaphores
   survived the cleanup between runs, and all runs are the same user, so a later run of
   another account could read them. The sandbox container now gets its own IPC namespace

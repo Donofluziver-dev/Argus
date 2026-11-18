@@ -15,7 +15,8 @@ import threading
 import time
 import unicodedata
 import warnings
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import sympy
 from sympy import E, pi, I, oo
@@ -963,8 +964,93 @@ def _exec_code(
         _EXEC_LOCK.release()
 
 
+#--- Ein Code-Lauf je Container (SANDBOX_ONE_RUN, Standard aus).
+#--- An: Das erste /execute beansprucht den Container, jedes weitere bekommt sofort
+#--- 503 "Sandbox wird erneuert.". Nach dem Lauf beendet sich der Dienst (erst wenn
+#--- die Antwort verschickt ist), Docker startet den Container ueber die
+#--- Restart-Policy frisch: leeres tmpfs, neue Namensraeume, keine Reste des Laufs.
+#--- Docker verdoppelt die Wartezeit vor dem Neustart, wenn ein Container keine
+#--- 10 s lief; darum endet der Dienst fruehestens 10 s nach seinem Start und weist
+#--- bis dahin weiter ab. /calculate beansprucht nicht und bleibt bis zum Ende erreichbar.
+_SANDBOX_RENEW_MSG = "Sandbox wird erneuert."
+_ONE_RUN_MIN_LIFETIME_SEC = 10.0
+#--- Sicherheitsnetz: Laeuft die Hintergrundaufgabe nach der Antwort nie (z. B. weil
+#--- der Client mitten in der Antwort abbricht), beendet dieser Zeitgeber den
+#--- beanspruchten Container trotzdem. Groesser als Watchdog (30 + 30 + 15 s) plus
+#--- Mindestlaufzeit, damit er einen regulaeren Lauf nie abschneidet.
+_ONE_RUN_FALLBACK_SEC = 150.0
+#--- Faehrt uvicorn nach SIGTERM nicht binnen dieser Zeit herunter, harter Ausstieg.
+_RETIRE_HARD_EXIT_SEC = 30.0
+_SERVICE_STARTED_AT = time.monotonic()
+_CLAIM_LOCK = threading.Lock()
+_CLAIMED = False
+_RETIRED = False
+_FALLBACK_TIMER: threading.Timer | None = None
+
+
+def _one_run_enabled() -> bool:
+    return os.environ.get("SANDBOX_ONE_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _claim_container() -> bool:
+    """Beansprucht den Container fuer genau einen Code-Lauf. True nur beim ersten
+    Aufruf, auch bei gleichzeitigen Anfragen (Sperre _CLAIM_LOCK)."""
+    global _CLAIMED, _FALLBACK_TIMER
+    with _CLAIM_LOCK:
+        if _CLAIMED:
+            return False
+        _CLAIMED = True
+        timer = threading.Timer(_ONE_RUN_FALLBACK_SEC, _retire_once)
+        timer.daemon = True
+        _FALLBACK_TIMER = timer
+    timer.start()
+    return True
+
+
+def _retire() -> None:
+    """Beendet den Dienst. SIGTERM an sich selbst: uvicorn nimmt keine neuen
+    Verbindungen mehr an, laesst laufende Anfragen (/calculate) fertig werden und
+    endet mit Code 0. Haengt das Herunterfahren, folgt ein harter Ausstieg.
+    Tests ersetzen diese Funktion."""
+    hard_exit = threading.Timer(_RETIRE_HARD_EXIT_SEC, os._exit, args=(0,))
+    hard_exit.daemon = True
+    hard_exit.start()
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _retire_once() -> None:
+    """Ruft _retire hoechstens einmal auf (Hintergrundaufgabe und Sicherheitsnetz)."""
+    global _RETIRED
+    with _CLAIM_LOCK:
+        if _RETIRED:
+            return
+        _RETIRED = True
+        timer = _FALLBACK_TIMER
+    if timer is not None:
+        timer.cancel()
+    _retire()
+
+
+#--- Wartefunktion vor dem Beenden; Tests ersetzen sie, statt 10 s zu warten.
+_retire_wait = asyncio.sleep
+
+
+async def _retire_after_run() -> None:
+    """Laeuft als BackgroundTask, also erst nachdem die Antwort verschickt ist."""
+    remaining = _ONE_RUN_MIN_LIFETIME_SEC - (time.monotonic() - _SERVICE_STARTED_AT)
+    if remaining > 0:
+        await _retire_wait(remaining)
+    _retire_once()
+
+
 @app.post("/execute")
-async def execute(req: ExecRequest):
+async def execute(req: ExecRequest, background_tasks: BackgroundTasks):
+    if _one_run_enabled():
+        if not _claim_container():
+            return JSONResponse(status_code=503, content={"error": _SANDBOX_RENEW_MSG})
+        #--- Gilt fuer jeden Ausgang des Laufs (Erfolg, Fehler, Watchdog), denn alle
+        #--- Zweige unten liefern eine Antwort.
+        background_tasks.add_task(_retire_after_run)
     # Echter Sicherheitsrahmen = Container: Dienst als root (nicht dumpbar) mit
     # cap_drop ALL + SETUID/SETGID/KILL, Ausfuehrung als unprivilegierter Benutzer
     # runner (uid 10001) ohne Capabilities, no-new-privileges, read_only rootfs, Netz ohne Egress.

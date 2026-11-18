@@ -249,7 +249,22 @@ services:
     build:
       context: ./calc_sandbox
       dockerfile: Dockerfile.sandbox
+    # Ein frischer Container je Code-Lauf: Jede Replik nimmt genau EINEN /execute an
+    # (SANDBOX_ONE_RUN), beendet sich danach (Code 0, fruehestens 10 s nach dem Start)
+    # und Docker startet sie ueber die Restart-Policy neu -- schreibgeschuetztes
+    # Dateisystem, leeres tmpfs, neue Namensraeume. So teilen sich Laeufe verschiedener
+    # Konten weder Prozesse noch /tmp; das Aufraeumen zwischen Laeufen ist nur noch die
+    # zweite Linie. Das Backend braucht dafuer KEINEN Docker-Socket (der waere root auf
+    # dem Host). unless-stopped startet auch nach einem Ende mit Code 0 neu.
+    # Mehrere Repliken, damit der naechste Lauf nicht auf den Neustart wartet; das
+    # Backend probiert alle Adressen von calc-sandbox der Reihe nach. Kosten: je
+    # Replik bis zu mem_limit (512m) RAM und cpus (1.0), bei 2 Repliken also bis 1 GB.
+    # Kein container_name: Er vertruege sich nicht mit mehreren Repliken.
+    deploy:
+      replicas: ${ARGUS_SANDBOX_REPLICAS:-2}
     restart: unless-stopped
+    environment:
+      - SANDBOX_ONE_RUN=true
     networks:
       - sandbox
     read_only: true

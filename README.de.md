@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 430 für das Backend, 73 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 451 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -144,7 +144,7 @@ kein Schaden entsteht. Die Schutzmaßnahmen sitzen außerhalb des Modells:
 | das Modell nichts hinausschicken kann | Es läuft in einem Netz ohne Ausgang. Ins Internet kommen nur das Backend und die eigene Suchinstanz. | `setup/check_networks.py`, bei jeder Änderung im CI |
 | Firmendaten und Internet nie im selben Gespräch zusammenkommen | Hat ein Gespräch Firmendaten gelesen oder eine Datei bekommen, ist darin jeder Weg nach außen gesperrt. | Tests, Agenten-Messung (Gruppe Sicherheit) |
 | jede Person nur ihr Eigenes sieht | Rollen werden an jeder Route im Backend geprüft. Dateien liegen je Konto getrennt, die Code-Sandbox bekommt nur die Dateien des eigenen Kontos. | Tests (`test_user_files.py`) |
-| das Modell auf keinem Rechner etwas ausführen kann | Kein Zugang zu Rechnern, keine Zugangsdaten in den Containern. Code läuft nur in einer Sandbox ohne Internet, unter einem eigenen Benutzer ohne Rechte; nach jedem Lauf wird alles gelöscht. | Compose-Datei, Tests der Sandbox |
+| das Modell auf keinem Rechner etwas ausführen kann | Kein Zugang zu Rechnern, keine Zugangsdaten in den Containern. Code läuft nur in einer Sandbox ohne Internet, unter einem eigenen Benutzer ohne Rechte, jeder Lauf in einem frisch gestarteten Container. | Compose-Datei, Tests der Sandbox |
 | fremde Inhalte als Daten gelten, nicht als Anweisung | Webseiten und Dokumente laufen durch eine Prüfung auf eingeschleuste Anweisungen. Köder-Schlüssel schlagen Alarm, wenn etwas Geschütztes hinaus will. | Agenten-Messung (Injection in Dokument und Webseite) |
 | sich alles nachvollziehen lässt | Signiertes Auditprotokoll, auf Wunsch weitergegeben an das SIEM der Firma ([unten](#wer-hat-was-getan-auditprotokoll-und-siem)). | `GET /v1/dashboard/audit/verify`, das SIEM |
 | man es nicht glauben muss | Quelltext offen, Tests und Messungen liegen im Repo und lassen sich wiederholen. | dieses Repo |
@@ -457,10 +457,14 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
   `users/` ist für die Datei-Werkzeuge gesperrt, auch das Gedächtnis je Konto.
 - **Code-Sandbox:** Sie bindet den Arbeitsordner nicht ein. Das Backend schickt ihr nur die
   Dateien des Kontos. Der Code läuft unter einem eigenen Benutzer ohne Rechte, getrennt vom
-  Dienst der Sandbox; Rechnungen laufen unter einem zweiten. Die Läufe folgen nacheinander.
-  Vor und nach jedem Lauf beendet die Sandbox alle Prozesse dieses Benutzers, prüft, dass
-  keiner übrig ist, und leert `/tmp`. Lässt sich das nicht bestätigen, führt sie nichts mehr
-  aus. Anfragen aus der Sandbox weist das Backend ab.
+  Dienst der Sandbox; Rechnungen laufen unter einem zweiten. **Jeder Code-Lauf bekommt einen
+  frisch gestarteten Container:** Ein Sandbox-Container nimmt genau einen Lauf an und beendet
+  sich danach, Docker startet ihn neu (leeres `/tmp`, neue Namensräume). Zwei Repliken stehen
+  bereit (`ARGUS_SANDBOX_REPLICAS`), das Backend nimmt die nächste freie. Einen Docker-Socket
+  braucht dafür kein Container. Zusätzlich beendet die Sandbox vor und nach jedem Lauf alle
+  Prozesse des Lauf-Benutzers, prüft, dass keiner übrig ist, und leert `/tmp` und `/dev/shm`;
+  SysV-IPC ist abgeschaltet. Lässt sich das Aufräumen nicht bestätigen, führt sie nichts mehr
+  aus. Anfragen aus der Sandbox weist das Backend ab, auch von frisch gestarteten Repliken.
 - **Freigaben:** Mit dem Cloud-Modul fragt eine Mission vor dem Versand per Karte im Chat
   nach. Freigeben kann nur das Konto, das sie ausgelöst hat.
 - **Anmeldung:** Sitzung als HttpOnly-Cookie, Passwörter mit Argon2, keine
@@ -518,10 +522,11 @@ sollte sie kennen.
 - **Langzeitgedächtnis:** Die Zusammenfassung je Konto wird im normalen Chat derzeit nicht
   fortgeschrieben. Gespräche mit Firmendaten gehen nie hinein, und die Datei-Werkzeuge können
   sie nicht schreiben.
-- **Sandbox:** Läufe verschiedener Konten teilen sich einen Container und einen Benutzer der
-  Sandbox. Getrennt werden sie durch das Aufräumen zwischen den Läufen (Prozesse, `/tmp`,
-  `/dev/shm`; SysV-IPC ist ganz abgeschaltet). Ein Container je Lauf wäre die stärkere
-  Trennung.
+- **Sandbox:** Jeder Code-Lauf hat seinen eigenen, frisch gestarteten Container, aber alle
+  teilen sich den Kernel des Hosts. Wer stärker trennen will, braucht eine Laufzeit wie gVisor
+  oder Kata; das richtet Argus nicht ein. Ein Container steht nach einem Lauf rund 10 Sekunden
+  nicht bereit; folgen mehr Läufe dicht aufeinander, als es Repliken gibt, warten sie
+  (höchstens `SANDBOX_WAIT_SECONDS`, 30 s).
 - **Name in der Anrede:** Er leitet sich aus dem Kontonamen ab; mit SSO käme er aus dem
   Verzeichnis.
 - **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
@@ -898,7 +903,7 @@ zwischen Dienst und ausgeführtem Code:
 
 ```powershell
 docker build --target test -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
-docker run --rm --network none --read-only --tmpfs /tmp:size=256m,noexec --security-opt no-new-privileges:true --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL --memory 512m --cpus 1.0 --pids-limit 256 argus-sandbox-test
+docker run --rm --network none --read-only --tmpfs /tmp:size=256m,noexec --security-opt no-new-privileges:true --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL --ipc private --sysctl kernel.shmmni=0 --sysctl kernel.shmall=0 --sysctl kernel.msgmni=0 --sysctl "kernel.sem=0 0 0 0" --memory 512m --cpus 1.0 --pids-limit 256 argus-sandbox-test
 ```
 
 Im CI laufen beide bei jedem Push auf `main`, dazu die Prüfung der Compose-Dateien, der
