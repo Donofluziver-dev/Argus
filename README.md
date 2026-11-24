@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 461 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 463 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -338,8 +338,6 @@ These are known and not solved yet:
 - No source-level permissions in document search, no SSO (OIDC).
 - With the cloud module enabled, the router starts an administrator's background mission
   without a confirmation card.
-- Long-term memory is currently not updated during normal chat. Conversations with company
-  data never enter it, and the file tools cannot write it.
 - Every code run has its own freshly started container, but all share the host kernel; a
   stronger separation needs a runtime such as gVisor or Kata, which Argus does not set up.
   After a run a container is not ready for about 10 s; more back-to-back runs than replicas

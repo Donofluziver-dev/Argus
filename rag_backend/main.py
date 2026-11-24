@@ -2063,6 +2063,9 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                         content_encrypted=encrypt_msg(
                             ("[Bild angehaengt] " if images else "") + body.message)))
         db0.commit()
+    #--- Aktivitaet melden: Ohne diesen Zeitpunkt sah der Idle-Watcher nie einen
+    #--- Leerlauf, und das Langzeitgedaechtnis wurde im normalen Chat nie fortgeschrieben.
+    request.app.state.last_activity = datetime.now(timezone.utc)
 
     agent_payload = {
         "input": body.message,
@@ -2352,6 +2355,9 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                         db2.commit()
                 except Exception as e:
                     log.warning(f"Dashboard-Chat: Antwort nicht persistierbar: {e}")
+            #--- Fuer die Reflexion des Langzeitgedaechtnisses (_reflection_idle_watcher):
+            #--- Leerlauf zaehlt ab dem Ende des letzten Turns.
+            request.app.state.last_activity = datetime.now(timezone.utc)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

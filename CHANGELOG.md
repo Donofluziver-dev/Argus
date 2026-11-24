@@ -249,6 +249,10 @@ roles, administrator and user.
   now only for administrators.
 - Deleting an account left its long-term memory behind. A reflection still running while the
   account was deleted could also write it again; it now checks that the account exists.
+- **Long-term memory was never updated in normal chat.** Only following a mission recorded
+  activity, so the reflection that runs after `REFLECTION_IDLE_SECONDS` of idle time never
+  started. The chat now records the time of each turn; the reflection runs once per idle
+  phase, with the local model, and still skips conversations that hold company data.
 - Research questions were never planned by the cloud model, because the check read the
   question's category before the router had set it. Planning now runs for administrators
   with the cloud module; for users the request never leaves the machine.

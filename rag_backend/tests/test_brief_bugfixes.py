@@ -423,6 +423,50 @@ async def test_read_document_outside_workspace_names_no_windows_path():
     assert res.startswith("ERROR") and "C:\\" not in res and "Argus_Workspace" not in res
 
 
+def test_dashboard_chat_marks_activity_for_reflection(client, monkeypatch):
+    """Der normale Chat muss seine Aktivitaet melden, sonst sieht der Idle-Watcher nie
+    einen Leerlauf und das Langzeitgedaechtnis wird nie fortgeschrieben."""
+    from datetime import datetime
+    from rag_backend.tests.test_main import TestingSessionLocal
+
+    monkeypatch.setattr(main, "SessionLocal", TestingSessionLocal)
+    _make_account(client, "gedaechtnis", "einLangesPasswort", "user")
+
+    async def _fake_astream(payload):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(main.agent_executor, "astream", _fake_astream)
+    monkeypatch.setattr(main.app.state, "last_activity", None, raising=False)
+    r = client.post("/v1/dashboard/chat", headers=DASH_ORIGIN, json={"message": "Hallo"})
+    assert r.status_code == 200
+    assert isinstance(main.app.state.last_activity, datetime)
+
+
+@pytest.mark.asyncio
+async def test_idle_watcher_reflects_once_per_idle_phase(monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("REFLECTION_IDLE_SECONDS", "1")
+    monkeypatch.setenv("REFLECTION_CHECK_INTERVAL", "0")
+    cycle = AsyncMock()
+    monkeypatch.setattr(main, "run_reflection_cycle", cycle)
+    fake_app = SimpleNamespace(state=SimpleNamespace(
+        last_activity=datetime.now(timezone.utc) - timedelta(seconds=30)))
+
+    task = asyncio.create_task(main._reflection_idle_watcher(fake_app))
+    await asyncio.sleep(0.05)
+    assert cycle.await_count == 1           # einmal je Leerlaufphase, nicht in jeder Runde
+    fake_app.state.last_activity = datetime.now(timezone.utc) - timedelta(seconds=20)
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert cycle.await_count == 2           # neuer Turn -> neue Leerlaufphase
+
+
 def test_evals_endpoint_reports_host_dir(client, monkeypatch):
     monkeypatch.setenv("ARGUS_EVALS_DIR_HOST", "/srv/argus/evals")
     _make_account(client, "admin_evals", "einLangesPasswort", "admin")
