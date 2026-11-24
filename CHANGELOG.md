@@ -176,6 +176,15 @@ roles, administrator and user.
   (RFC 5424 over UDP or TCP) or `stdout` forwards every audit entry, as JSON or CEF
   (`AUDIT_SIEM_FORMAT`), without blocking a request. The monitor shows the new events by
   name.
+- **Entries the SIEM does not receive are re-sent.** When sending fails or the queue is full,
+  the entry goes to a spool file in the `rag_data` volume (`AUDIT_SIEM_SPOOL_DIR`, files
+  `0600`, at most `AUDIT_SIEM_SPOOL_MAX_MB`, 50 MB) and is re-sent, oldest first and before
+  new entries, once the SIEM answers again; after a send error Argus pauses with a growing
+  interval (up to 30 s). Delivery is at least once; the SIEM can drop duplicates by the
+  entry's HMAC signature (`hmac`), which differs for every entry. The backend and the MCP file server each write their own file; a
+  process takes over the files of a crashed one by an atomic rename, so no file is sent
+  twice at the same time. Only beyond the limit are entries counted as lost. Over UDP, losses
+  on the way go unnoticed.
 - **Default prompts in a company tone.** Argus speaks like a factual colleague, judges
   company documents (contracts, offers, policies, data sheets, test reports) against what is
   customary and names the function that should sign off at the end, instead of a disclaimer.

@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 
 # Konfiguration und globaler Zustand
 _lock = threading.Lock()
+_spool_lock = threading.Lock()
 _initialized = False
 
 _siem_mode: str = "off"
@@ -24,6 +26,10 @@ _syslog_protocol: str = "udp"
 _siem_hostname: str = ""
 _cached_version: str = "0"
 
+_siem_spool_dir: str = "/app/data/siem_spool"
+_siem_spool_max_mb: float = 50.0
+_custom_proc_id: str | None = None
+
 _MAX_QUEUE_SIZE = 10000
 _queue: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
 _dropped_count: int = 0
@@ -32,8 +38,16 @@ _last_drop_warning: float = 0.0
 _worker_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _tcp_socket: socket.socket | None = None
+#--- Pause nach einem Sendefehler (alle Modi, nicht nur TCP): bis _next_reconnect
+#--- gehen neue Eintraege in den Spool, danach zuerst der Spool, dann die Queue.
 _tcp_backoff: float = 1.0
 _next_reconnect: float = 0.0
+
+#--- Dieser Prozess hat seit der letzten Nachlieferung in seinen Spool geschrieben.
+#--- Dateien anderer (abgestuerzter) Prozesse sucht der Sender nur alle paar Sekunden.
+_spool_pending: bool = False
+_last_spool_scan: float = 0.0
+_SPOOL_SCAN_INTERVAL = 5.0
 
 
 def _load_version() -> str:
@@ -148,7 +162,7 @@ def _parse_details(details_raw: Any) -> tuple[Any, dict | None]:
 
 
 def _format_json(record: dict, iso_z: str, hostname: str, details_val: Any) -> dict:
-    return {
+    msg = {
         "type": "argus.audit",
         "ts": iso_z,
         "host": hostname,
@@ -162,6 +176,9 @@ def _format_json(record: dict, iso_z: str, hostname: str, details_val: Any) -> d
         "latency_ms": record.get("latency_ms") or 0,
         "hmac": record.get("hmac") or "",
     }
+    if "id" in record and record["id"] is not None:
+        msg["id"] = record["id"]
+    return msg
 
 
 def _format_cef(
@@ -205,13 +222,327 @@ def _format_cef(
     ext_parts.append("cs2Label=hmac")
     ext_parts.append(f"cs2={_cef_escape_value(hmac_val)}")
 
+    if "id" in record and record["id"] is not None:
+        ext_parts.append(f"externalId={_cef_escape_value(record['id'])}")
+
     return header + " ".join(ext_parts)
+
+
+def _get_process_id() -> str:
+    '''Liefert die Kennung des aktuellen Prozesses (standardmaessig die PID).'''
+    global _custom_proc_id
+    if _custom_proc_id is not None:
+        return _custom_proc_id
+    return str(os.getpid())
+
+
+def _is_pid_alive(pid_str: str) -> bool:
+    '''Prueft, ob ein Prozess anhand seiner PID noch laeuft.'''
+    try:
+        pid = int(pid_str)
+        if pid <= 0:
+            return False
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if h:
+                kernel32.CloseHandle(h)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except (ValueError, TypeError):
+        return False
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_record_id(record: dict) -> str:
+    '''Stellt sicher, dass der Datensatz eine eindeutige Kennung hat, an der das SIEM
+    Doppelte erkennt. Audit-Eintraege haben sie schon: ihre HMAC-Signatur (verkettet,
+    also je Eintrag verschieden). Nur ohne Signatur bekommt der Eintrag eine "id".'''
+    for key in ("id", "hmac"):
+        val = record.get(key)
+        if val is not None and str(val).strip():
+            return str(val)
+    new_id = uuid.uuid4().hex
+    record["id"] = new_id
+    return new_id
+
+
+def _ensure_spool_dir() -> Path:
+    '''Erstellt das Spool-Verzeichnis mit Dateirechten 0700 falls nicht vorhanden.'''
+    p = Path(_siem_spool_dir)
+    if not p.exists():
+        p.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(p, 0o700)
+    except Exception:
+        pass
+    return p
+
+
+def _get_spool_total_bytes(spool_dir: Path) -> int:
+    '''Berechnet den gesamten Speicherplatz aller Spool-Dateien in Bytes.'''
+    if not spool_dir.exists():
+        return 0
+    total = 0
+    try:
+        for entry in os.scandir(spool_dir):
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return total
+
+
+def _spool_record(record: dict) -> bool:
+    '''Schreibt einen nicht zugestellten Eintrag in die Spool-Datei.
+
+    Gibt True zurueck, wenn erfolgreich gespeichert.
+    Gibt False zurueck, wenn das Spool-Limit erreicht ist (Eintrag verloren).
+    '''
+    global _spool_pending
+    if _siem_mode == "off":
+        return False
+
+    _ensure_record_id(record)
+
+    with _spool_lock:
+        try:
+            spool_dir = _ensure_spool_dir()
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            line_bytes = line.encode("utf-8")
+            max_bytes = int(_siem_spool_max_mb * 1024 * 1024)
+
+            current_size = _get_spool_total_bytes(spool_dir)
+            if current_size + len(line_bytes) > max_bytes:
+                _count_dropped("SIEM-Spool-Obergrenze erreicht")
+                return False
+
+            pid = _get_process_id()
+            file_path = spool_dir / f"spool_{pid}.jsonl"
+
+            # Dateirechte 0600 beim Erstellen atomar setzen
+            fd = os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, line_bytes)
+            finally:
+                os.close(fd)
+
+            try:
+                os.chmod(file_path, 0o600)
+            except Exception:
+                pass
+
+            _spool_pending = True
+            return True
+        except Exception as e:
+            log.warning(f"Fehler beim Schreiben in Spool: {e}")
+            _count_dropped(f"Spool-Schreibfehler ({e})")
+            return False
+
+
+def _keep_remaining_lines(file_path: Path, remaining_lines: list[str]) -> None:
+    '''Schreibt die noch nicht zugestellten Zeilen an Ort und Stelle zurueck.
+
+    Name und Aenderungszeit bleiben, damit die Datei ihren Platz in der Reihenfolge
+    behaelt (aelteste zuerst). Scheitert das Zurueckschreiben, bleibt die Datei, wie
+    sie war: Bereits gesendete Zeilen gehen dann ein zweites Mal raus (mindestens
+    einmal, nie verloren).'''
+    tmp = file_path.with_name(file_path.name + ".part")
+    try:
+        mtime = file_path.stat().st_mtime
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            for line in remaining_lines:
+                os.write(fd, line.encode("utf-8") if isinstance(line, str) else line)
+        finally:
+            os.close(fd)
+        os.replace(tmp, file_path)
+        os.utime(file_path, (mtime, mtime))
+    except Exception as e:
+        log.warning(f"Fehler beim Sichern verbleibender Spool-Zeilen: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _drain_spool() -> bool:
+    '''Liefert Spool-Eintraege an das SIEM nach (aelteste zuerst).
+
+    Jede Datei gehoert genau einem Prozess (Name mit seiner PID). Nachgeliefert
+    werden nur eigene Dateien und solche abgestuerzter Prozesse, die per atomarem
+    Umbenennen uebernommen wurden; zwei Prozesse senden so nie dieselbe Datei. Dateien
+    eines anderen, noch laufenden Prozesses (etwa des MCP-Dateiservers) liefert der
+    selbst nach; sie halten diesen Prozess nicht auf.
+
+    Rueckgabe:
+        True: Alles Uebernommene zugestellt (oder nichts zu tun).
+        False: Senden fehlgeschlagen (SIEM noch nicht erreichbar).
+    '''
+    global _spool_pending
+    if _siem_mode == "off":
+        return True
+
+    spool_dir = Path(_siem_spool_dir)
+    if not spool_dir.exists():
+        return True
+
+    my_pid = _get_process_id()
+
+    # 1. Eigene aktive Spool-Datei rotieren, falls vorhanden und nicht leer
+    with _spool_lock:
+        _spool_pending = False
+        active_file = spool_dir / f"spool_{my_pid}.jsonl"
+        if active_file.exists():
+            try:
+                if active_file.stat().st_size > 0:
+                    ts_ms = int(time.time() * 1000)
+                    token = uuid.uuid4().hex[:6]
+                    ready_target = spool_dir / f"drain_{my_pid}_{ts_ms}_{token}.jsonl"
+                    os.rename(active_file, ready_target)
+            except OSError:
+                pass
+
+    # 2. Kandidaten-Dateien fuer Nachlieferung suchen und atomar uebernehmen
+    my_drain_files: list[Path] = []
+
+    try:
+        entries = list(os.scandir(spool_dir))
+    except Exception:
+        entries = []
+
+    for entry in entries:
+        if not (entry.is_file() and entry.name.endswith(".jsonl")):
+            continue
+        fname = entry.name
+        fpath = Path(entry.path)
+
+        # Eigene bereits beanspruchte Drain-Dateien (z. B. vor Neustart)
+        if fname.startswith(f"drain_{my_pid}_"):
+            my_drain_files.append(fpath)
+            continue
+
+        # Drain-Dateien eines anderen Prozesses
+        if fname.startswith("drain_"):
+            parts = fname.split("_")
+            other_pid = parts[1] if len(parts) > 1 else ""
+            if not _is_pid_alive(other_pid):
+                ts_ms = int(time.time() * 1000)
+                token = uuid.uuid4().hex[:6]
+                claimed_target = spool_dir / f"drain_{my_pid}_{ts_ms}_{token}.jsonl"
+                try:
+                    os.rename(fpath, claimed_target)
+                    my_drain_files.append(claimed_target)
+                except OSError:
+                    pass
+            continue
+
+        # Spool-Dateien anderer Prozesse oder verwaiste Spool-Dateien
+        if fname.startswith("spool_") and fname != f"spool_{my_pid}.jsonl":
+            other_pid = fname[len("spool_"):-len(".jsonl")]
+            if not _is_pid_alive(other_pid):
+                ts_ms = int(time.time() * 1000)
+                token = uuid.uuid4().hex[:6]
+                claimed_target = spool_dir / f"drain_{my_pid}_{ts_ms}_{token}.jsonl"
+                try:
+                    os.rename(fpath, claimed_target)
+                    my_drain_files.append(claimed_target)
+                except OSError:
+                    pass
+            continue
+
+    if not my_drain_files:
+        return True
+
+    # 3. Aelteste zuerst: nach Dateialter (mtime) sortieren
+    def _file_sort_key(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    my_drain_files.sort(key=_file_sort_key)
+
+    # 4. Dateien nacheinander abarbeiten
+    for drain_file in my_drain_files:
+        if not drain_file.exists():
+            continue
+
+        try:
+            with open(drain_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+
+        for i, line in enumerate(lines):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                record = json.loads(line_str)
+            except Exception:
+                continue
+
+            try:
+                _dispatch_record(record)
+            except Exception:
+                # Zustellung fehlgeschlagen: Rest (samt dieser Zeile) zuruecksichern
+                _keep_remaining_lines(drain_file, lines[i:])
+                return False
+
+        try:
+            os.remove(drain_file)
+        except OSError:
+            pass
+
+    return True
+
+
+def get_spool_files() -> list[Path]:
+    '''Gibt alle vorhandenen Spool- und Drain-Dateien zurueck (fuer Tests).'''
+    spool_dir_str = _siem_spool_dir if _initialized else os.getenv("AUDIT_SIEM_SPOOL_DIR", "/app/data/siem_spool").strip()
+    p = Path(spool_dir_str)
+    if not p.exists():
+        return []
+    try:
+        return [Path(e.path) for e in os.scandir(p) if e.is_file() and e.name.endswith(".jsonl")]
+    except Exception:
+        return []
+
+
+def get_spool_records() -> list[dict]:
+    '''Liest alle aktuell im Spool liegenden Eintraege (fuer Tests).'''
+    records = []
+    for fp in get_spool_files():
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    line_s = line.strip()
+                    if line_s:
+                        records.append(json.loads(line_s))
+        except Exception:
+            pass
+    return records
 
 
 def _init_siem() -> None:
     '''Liest Umgebungsvariablen ein und startet bei Bedarf den Worker-Thread.'''
     global _initialized, _siem_mode, _siem_format, _syslog_host, _syslog_port
     global _syslog_protocol, _siem_hostname, _cached_version, _worker_thread
+    global _siem_spool_dir, _siem_spool_max_mb
 
     with _lock:
         if _initialized:
@@ -227,7 +558,19 @@ def _init_siem() -> None:
         _siem_hostname = os.getenv("AUDIT_SIEM_HOSTNAME", "").strip() or socket.gethostname()
         _cached_version = _load_version()
 
+        _siem_spool_dir = os.getenv("AUDIT_SIEM_SPOOL_DIR", "/app/data/siem_spool").strip()
+        try:
+            _siem_spool_max_mb = float(os.getenv("AUDIT_SIEM_SPOOL_MAX_MB", "50").strip())
+        except ValueError:
+            _siem_spool_max_mb = 50.0
+
         if _siem_mode in ("stdout", "syslog"):
+            #--- Ohne Spool-Ordner geht die Weiterleitung trotzdem; nur was nicht
+            #--- zugestellt wird, zaehlt dann als verloren.
+            try:
+                _ensure_spool_dir()
+            except Exception as e:
+                log.warning(f"SIEM-Spool-Ordner {_siem_spool_dir} nicht nutzbar: {e}")
             _stop_event.clear()
             _worker_thread = threading.Thread(target=_worker_loop, daemon=True, name="argus-siem-worker")
             _worker_thread.start()
@@ -241,7 +584,6 @@ def _send_tcp(frame: bytes, host: str, port: int) -> None:
     now = time.time()
     if _tcp_socket is None:
         if now < _next_reconnect:
-            #--- In der Pause nach einem Fehler: Eintrag gilt als nicht zugestellt.
             raise ConnectionError("SIEM nicht erreichbar, neuer Versuch nach der Pause")
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -284,7 +626,6 @@ def _dispatch_record(record: dict) -> None:
     json_msg = _format_json(record, iso_z, _siem_hostname, details_val)
 
     if _siem_mode == "stdout":
-        # stdout: eine Zeile JSON je Eintrag auf sys.stdout (flush), ohne Syslog-Kopf
         line = json.dumps(json_msg, ensure_ascii=False) + "\n"
         out = _out_stream()
         out.write(line)
@@ -300,17 +641,18 @@ def _dispatch_record(record: dict) -> None:
             nachricht = json.dumps(json_msg, ensure_ascii=False)
 
         event_name = _syslog_token(record.get("tool"), 32)
-        # Syslog-Kopf nach RFC 5424
         header = f"<{syslog_pri}>1 {iso_z} {_syslog_token(_siem_hostname, 255)} argus - {event_name} - "
         packet = header + nachricht
 
         if _syslog_protocol == "tcp":
-            # RFC 6587 Octet-Counting ("<Laenge> <Nachricht>")
             payload = packet.encode("utf-8")
             frame = f"{len(payload)} ".encode("ascii") + payload
             _send_tcp(frame, _syslog_host, _syslog_port)
         else:
-            # UDP: ein Datagramm je Nachricht
+            # UDP: ein Datagramm je Nachricht. UDP meldet keine Verluste; das ist so.
+            # Was unterwegs verloren geht, sieht Argus nicht und liefert es nicht nach;
+            # in den Spool kommt nur, was schon beim Senden scheitert. Wer nichts
+            # verlieren darf, nimmt TCP.
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 sock.sendto(packet.encode("utf-8"), (_syslog_host, _syslog_port))
@@ -318,19 +660,54 @@ def _dispatch_record(record: dict) -> None:
                 sock.close()
 
 
+def _mark_failure() -> None:
+    '''Sendefehler: Pause bis _next_reconnect, mit wachsendem Abstand (hoechstens 30 s).
+    _send_tcp setzt die Pause selbst; dann bleibt es bei dieser.'''
+    global _tcp_backoff, _next_reconnect
+    now = time.time()
+    if _next_reconnect <= now:
+        _next_reconnect = now + _tcp_backoff
+        _tcp_backoff = min(_tcp_backoff * 2.0, 30.0)
+
+
 def _worker_loop() -> None:
     '''Hintergrund-Thread zur asynchronen Auslieferung an das SIEM.'''
+    global _last_spool_scan, _tcp_backoff
     while not _stop_event.is_set():
+        # 1. SIEM gerade nicht erreichbar: neue Eintraege hinten an den Spool, damit
+        #    die Reihenfolge stimmt; gesendet wird erst nach der Pause wieder.
+        if time.time() < _next_reconnect:
+            try:
+                record = _queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                _spool_record(record)
+            finally:
+                _queue.task_done()
+            continue
+
+        # 2. Spool nachliefern, bevor neue Eintraege aus der Queue gehen: eigene
+        #    Eintraege sofort, Dateien abgestuerzter Prozesse beim naechsten Rundgang.
+        now = time.time()
+        if _spool_pending or now - _last_spool_scan >= _SPOOL_SCAN_INTERVAL:
+            _last_spool_scan = now
+            if not _drain_spool():
+                _mark_failure()
+                continue
+
+        # 3. Neue Eintraege aus der Queue
         try:
             record = _queue.get(timeout=0.1)
         except queue.Empty:
             continue
+
         try:
             _dispatch_record(record)
-        except Exception as err:
-            #--- Nicht zugestellt: mitzaehlen, hoechstens eine Warnung je Minute.
-            #--- Massgeblich bleibt das Protokoll in der Datenbank.
-            _count_dropped(f"SIEM-Weiterleitung fehlgeschlagen ({err})")
+            _tcp_backoff = 1.0
+        except Exception:
+            _mark_failure()
+            _spool_record(record)
         finally:
             _queue.task_done()
 
@@ -356,7 +733,7 @@ def forward(record: dict) -> None:
         try:
             _queue.put_nowait(record)
         except queue.Full:
-            _count_dropped("SIEM-Warteschlange voll")
+            _spool_record(record)
     except Exception as e:
         log.warning(f"siem.forward unerwarteter Fehler: {e}")
 
@@ -385,16 +762,16 @@ def stop(timeout: float = 2.0) -> None:
 def reset(flush: bool = True, timeout: float = 2.0) -> None:
     '''Setzt die SIEM-Konfiguration und Warteschlange zurueck (fuer Tests).'''
     global _initialized, _dropped_count, _last_drop_warning, _tcp_backoff, _next_reconnect
+    global _siem_spool_dir, _siem_spool_max_mb, _custom_proc_id
+    global _spool_pending, _last_spool_scan
 
     if flush:
-        # Warten, bis offene Eintraege abgearbeitet sind
         start_wait = time.time()
         while not _queue.empty() and (time.time() - start_wait < timeout):
             time.sleep(0.02)
 
     stop(timeout=timeout)
 
-    # Verbleibende Warteschlange leeren
     while not _queue.empty():
         try:
             _queue.get_nowait()
@@ -408,3 +785,11 @@ def reset(flush: bool = True, timeout: float = 2.0) -> None:
         _last_drop_warning = 0.0
         _tcp_backoff = 1.0
         _next_reconnect = 0.0
+        _spool_pending = False
+        _last_spool_scan = 0.0
+        _siem_spool_dir = os.getenv("AUDIT_SIEM_SPOOL_DIR", "/app/data/siem_spool").strip()
+        try:
+            _siem_spool_max_mb = float(os.getenv("AUDIT_SIEM_SPOOL_MAX_MB", "50").strip())
+        except ValueError:
+            _siem_spool_max_mb = 50.0
+        _custom_proc_id = None

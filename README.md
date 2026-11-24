@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 472 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 483 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -163,8 +163,11 @@ AUDIT_SYSLOG_PROTOCOL=tcp
 
 Argus sends RFC 5424 syslog over UDP or TCP, as JSON or as CEF (Common Event Format), which
 common SIEM products read directly. Alternatively `AUDIT_SIEM=stdout` writes each entry to the
-container log for an existing log collector. Forwarding never holds up a request; if the SIEM
-is unreachable, Argus counts the undelivered entries and warns. The log contains logins of
+container log for an existing log collector. Forwarding never holds up a request. If the
+SIEM is unreachable, entries wait in a spool file in the `rag_data` volume and are re-sent,
+oldest first, once it answers again (`AUDIT_SIEM_SPOOL_DIR`, at most `AUDIT_SIEM_SPOOL_MAX_MB`,
+50 MB); beyond that limit Argus counts them as lost and warns. Over UDP, losses on the way go
+unnoticed, so use TCP where nothing may be lost. The log contains logins of
 individual people, so it belongs in the retention policy and, where there is a works council,
 in the relevant agreement. Argus does not delete audit entries on its own; the SIEM decides
 how long they are kept.
@@ -342,7 +345,8 @@ These are known and not solved yet:
   After a run a container is not ready for about 10 s; more back-to-back runs than replicas
   wait (at most `SANDBOX_WAIT_SECONDS`, 30 s).
 - An administrator can clear the audit log in the database (this is recorded and forwarded
-  to the SIEM); entries the SIEM does not receive are not re-sent.
+  to the SIEM); the log is final only in the SIEM. Over UDP, entries lost on the way to the
+  SIEM go unnoticed.
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
   yet with Let's Encrypt.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) can be switched off

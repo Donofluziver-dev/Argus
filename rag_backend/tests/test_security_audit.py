@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -330,9 +331,12 @@ def test_siem_tcp_octet_counting(monkeypatch):
         siem.reset()
 
 
-def test_siem_queue_overflow_non_blocking(monkeypatch):
-    '''Verifiziert, dass eine volle Queue nicht blockiert und Verworfene zaehlt.'''
+def test_siem_queue_overflow_non_blocking(monkeypatch, tmp_path):
+    '''Verifiziert, dass eine volle Queue nicht blockiert und in den Spool sichert
+    (bzw. bei erschoepftem Spool verworfene zaehlt).'''
+    spool_dir = tmp_path / "spool_overflow"
     monkeypatch.setenv("AUDIT_SIEM", "stdout")
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(spool_dir))
     siem.reset()
     siem._init_siem()
     siem.stop()  # Worker anhalten, damit Queue nicht entleert wird
@@ -341,13 +345,26 @@ def test_siem_queue_overflow_non_blocking(monkeypatch):
     while not siem._queue.full():
         siem._queue.put_nowait({"dummy": True})
 
-    initial_drops = siem.get_dropped_count()
     start_time = time.time()
-    # Neuer Eintrag darf nicht blockieren
+    # Neuer Eintrag darf nicht blockieren und wird in den Spool gesichert
     siem.forward({"overflow": True})
     elapsed = time.time() - start_time
 
     assert elapsed < 0.2
+    # Der Eintrag ging in den Spool und ging nicht verloren
+    assert siem.get_dropped_count() == 0
+    spool_records = siem.get_spool_records()
+    assert any(r.get("overflow") is True for r in spool_records)
+
+    # Ist auch der Spool voll (Obergrenze erreicht), wird er als verworfen gezaehlt:
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_MAX_MB", "0")
+    siem.reset()
+    siem._init_siem()
+    siem.stop()
+    while not siem._queue.full():
+        siem._queue.put_nowait({"dummy": True})
+    initial_drops = siem.get_dropped_count()
+    siem.forward({"overflow_dropped": True})
     assert siem.get_dropped_count() == initial_drops + 1
     siem.reset()
 
@@ -630,7 +647,9 @@ def test_stdout_mode_avoids_stdout_in_the_mcp_server(monkeypatch, capsys):
     siem.reset(flush=False)
 
 
-def test_unreachable_tcp_siem_counts_undelivered_records(monkeypatch):
+def test_unreachable_tcp_siem_counts_undelivered_records(monkeypatch, tmp_path):
+    '''Prueft unerreichbares TCP-Ziel: Eintraege landen im Spool und gehen nicht verloren.'''
+    spool_dir = tmp_path / "spool_unreachable"
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
@@ -639,15 +658,19 @@ def test_unreachable_tcp_siem_counts_undelivered_records(monkeypatch):
     monkeypatch.setenv("AUDIT_SYSLOG_PROTOCOL", "tcp")
     monkeypatch.setenv("AUDIT_SYSLOG_HOST", "127.0.0.1")
     monkeypatch.setenv("AUDIT_SYSLOG_PORT", str(port))
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(spool_dir))
     siem.reset(flush=False)
     for i in range(3):
         siem.forward({"ts": "2026-11-12T20:00:00Z", "tool": f"t{i}", "tool_class": "auth",
                       "status": "failed", "details": "{}"})
     deadline = time.time() + 5
-    while siem.get_dropped_count() < 3 and time.time() < deadline:
+    while len(siem.get_spool_records()) < 3 and time.time() < deadline:
         time.sleep(0.05)
-    #--- Verbindungsfehler und Eintraege in der Pause danach zaehlen beide.
-    assert siem.get_dropped_count() == 3
+    #--- Nicht zugestellte Eintraege landen im Spool und gehen nicht verloren (dropped == 0).
+    assert siem.get_dropped_count() == 0
+    records = siem.get_spool_records()
+    assert len(records) == 3
+    assert [r.get("tool") for r in records] == ["t0", "t1", "t2"]
     siem.reset(flush=False)
 
 
@@ -659,3 +682,355 @@ def test_mcp_subprocess_gets_siem_settings_but_no_secrets(monkeypatch):
     env = mcp_loader._build_stdio_env(None)
     assert env["AUDIT_SIEM"] == "syslog" and env["AUDIT_SYSLOG_HOST"] == "siem.example"
     assert "JWT_SECRET" not in env
+
+
+# ---- SIEM-Spool: Nachlieferung, mehrere Prozesse, Obergrenze -----------------
+
+class _SyslogTcpServer:
+    '''Kleines Syslog-Ziel (TCP, Octet-Counting) auf localhost fuer die Spool-Tests.
+    events: die Werkzeugnamen ("event") der empfangenen Eintraege, in Ankunftsreihenfolge.
+    ids: die Kennungen der Eintraege.'''
+
+    def __init__(self):
+        self.received: list[dict] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self.port = self._sock.getsockname()[1]
+        self._sock.listen(5)
+        self._sock.settimeout(0.2)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._sock.close()
+        self._thread.join(timeout=2.0)
+
+    @property
+    def events(self):
+        with self._lock:
+            return [r.get("event") for r in self.received]
+
+    @property
+    def ids(self):
+        with self._lock:
+            return [r.get("id") for r in self.received]
+
+    def wait_for(self, n, timeout=6.0):
+        deadline = time.time() + timeout
+        while len(self.received) < n and time.time() < deadline:
+            time.sleep(0.05)
+        return len(self.received)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._read, args=(conn,), daemon=True).start()
+
+    def _read(self, conn):
+        conn.settimeout(5.0)
+        buf = b""
+        try:
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                buf += data
+                while b" " in buf:
+                    len_str, rest = buf.split(b" ", 1)
+                    msg_len = int(len_str.decode("ascii"))
+                    if len(rest) < msg_len:
+                        break
+                    msg = rest[:msg_len].decode("utf-8")
+                    buf = rest[msg_len:]
+                    with self._lock:
+                        self.received.append(json.loads("{" + msg.split(" - {", 1)[1]))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
+def _free_port():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def _syslog_tcp(monkeypatch, port, spool_dir):
+    monkeypatch.setenv("AUDIT_SIEM", "syslog")
+    monkeypatch.setenv("AUDIT_SYSLOG_PROTOCOL", "tcp")
+    monkeypatch.setenv("AUDIT_SYSLOG_HOST", "127.0.0.1")
+    monkeypatch.setenv("AUDIT_SYSLOG_PORT", str(port))
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(spool_dir))
+
+
+def _rec(tool, **extra):
+    return {"ts": "2026-11-12T20:00:00Z", "tool": tool, "tool_class": "test",
+            "status": "ok", "details": "{}", **extra}
+
+
+def _wait_spooled(n, timeout=5.0):
+    deadline = time.time() + timeout
+    while len(siem.get_spool_records()) < n and time.time() < deadline:
+        time.sleep(0.05)
+    return len(siem.get_spool_records())
+
+
+def test_siem_spool_tcp_unreachable_stores_records_not_lost(monkeypatch, tmp_path):
+    '''TCP-Ziel nicht erreichbar -> Eintraege im Spool, mit Kennung, nicht verloren.'''
+    _syslog_tcp(monkeypatch, _free_port(), tmp_path / "spool")
+    siem.reset(flush=False)
+    try:
+        for i in range(3):
+            siem.forward(_rec(f"audit_tool_{i}"))
+        siem.forward(_rec("signed", hmac="f00d"))
+        assert _wait_spooled(4) == 4
+        assert siem.get_dropped_count() == 0
+        records = siem.get_spool_records()
+        assert [r["tool"] for r in records] == ["audit_tool_0", "audit_tool_1", "audit_tool_2", "signed"]
+        #--- Kennung fuer das Erkennen Doppelter: die Signatur, sonst eine eigene id.
+        assert all(r.get("id") for r in records[:3])
+        assert records[3]["hmac"] == "f00d" and "id" not in records[3]
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_spool_replayed_in_order_before_new_records(monkeypatch, tmp_path):
+    '''Ziel wieder da -> Spool zuerst und in der richtigen Reihenfolge, dann neue.'''
+    _syslog_tcp(monkeypatch, _free_port(), tmp_path / "spool")
+    siem.reset(flush=False)
+    try:
+        siem.forward(_rec("spool_first"))
+        siem.forward(_rec("spool_second"))
+        assert _wait_spooled(2) == 2
+        with _SyslogTcpServer() as server:
+            with siem._lock:
+                siem._syslog_port = server.port
+                siem._next_reconnect = 0.0
+            siem.forward(_rec("queue_third"))
+            assert server.wait_for(3) == 3
+            assert server.events == ["spool_first", "spool_second", "queue_third"]
+            assert siem.get_spool_records() == []
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_spool_persists_across_restart_and_is_replayed(monkeypatch, tmp_path):
+    '''Neustart (reset) -> Spool bleibt und wird vor neuen Eintraegen nachgeliefert.'''
+    spool = tmp_path / "spool"
+    _syslog_tcp(monkeypatch, _free_port(), spool)
+    siem.reset(flush=False)
+    try:
+        siem.forward(_rec("pre_restart_1"))
+        siem.forward(_rec("pre_restart_2"))
+        assert _wait_spooled(2) == 2
+        siem.reset(flush=False)
+        assert len(siem.get_spool_records()) == 2
+        with _SyslogTcpServer() as server:
+            _syslog_tcp(monkeypatch, server.port, spool)
+            siem.forward(_rec("post_restart"))
+            assert server.wait_for(3) == 3
+            assert server.events == ["pre_restart_1", "pre_restart_2", "post_restart"]
+            assert siem.get_spool_records() == []
+    finally:
+        siem.reset(flush=False)
+
+
+_DRAIN_IN_OWN_PROCESS = """
+import sys
+from rag_backend import siem
+siem._init_siem()
+siem.stop()
+sys.stdin.readline()          # beide Prozesse starten gleichzeitig
+siem._drain_spool()
+"""
+
+
+def test_siem_spool_two_processes_never_send_the_same_file(monkeypatch, tmp_path):
+    '''Zwei echte Prozesse liefern gleichzeitig nach: Die Dateien eines abgestuerzten
+    Prozesses gehen genau einmal raus, die eines laufenden fasst keiner an.'''
+    import subprocess
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    dead = spool / "spool_999999.jsonl"           # PID gibt es nicht -> abgestuerzt
+    dead.write_text("".join(json.dumps(_rec(f"dead_{i}", id=f"d-{i}")) + "\n"
+                            for i in range(20)), encoding="utf-8")
+    alive = spool / f"spool_{os.getpid()}.jsonl"  # dieser Testprozess laeuft
+    alive.write_text(json.dumps(_rec("alive", id="a-0")) + "\n", encoding="utf-8")
+
+    with _SyslogTcpServer() as server:
+        _syslog_tcp(monkeypatch, server.port, spool)
+        env = {**os.environ, "PYTHONPATH": os.getcwd()}
+        procs = [subprocess.Popen([sys.executable, "-c", _DRAIN_IN_OWN_PROCESS], env=env,
+                                  stdin=subprocess.PIPE, text=True) for _ in range(2)]
+        time.sleep(1.5)
+        for p in procs:
+            p.stdin.write("\n")
+            p.stdin.flush()
+        for p in procs:
+            assert p.wait(timeout=20) == 0
+        server.wait_for(20, timeout=3)
+        assert sorted(server.ids) == sorted(f"d-{i}" for i in range(20))
+        assert "a-0" not in server.ids
+    assert alive.exists() and not dead.exists()
+
+
+def test_siem_spool_live_foreign_file_does_not_block_delivery(monkeypatch, tmp_path):
+    '''Hat ein anderer, laufender Prozess (etwa der MCP-Dateiserver) noch Eintraege im
+    Spool, sendet dieser Prozess seine eigenen trotzdem sofort.'''
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    foreign = spool / f"spool_{os.getppid()}.jsonl"
+    foreign.write_text(json.dumps(_rec("foreign")) + "\n", encoding="utf-8")
+    with _SyslogTcpServer() as server:
+        _syslog_tcp(monkeypatch, server.port, spool)
+        siem.reset(flush=False)
+        try:
+            siem.forward(_rec("own"))
+            assert server.wait_for(1, timeout=3) == 1
+            assert server.events == ["own"]
+            assert foreign.exists()
+        finally:
+            siem.reset(flush=False)
+
+
+def test_siem_spool_partial_failure_keeps_order(monkeypatch, tmp_path):
+    '''Bricht das Nachliefern mitten in einer Datei ab, bleibt deren Rest vor den
+    juengeren Dateien.'''
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("AUDIT_SIEM", "stdout")
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(spool))
+    siem.reset(flush=False)
+    siem._init_siem()
+    siem.stop()                                    # Sender aus: hier liefert nur der Test nach
+
+    pid = os.getpid()
+    older = spool / f"drain_{pid}_1_aaaaaa.jsonl"
+    newer = spool / f"drain_{pid}_2_bbbbbb.jsonl"
+    older.write_text("".join(json.dumps(_rec(n)) + "\n" for n in ("a1", "a2", "a3")), encoding="utf-8")
+    newer.write_text(json.dumps(_rec("b1")) + "\n", encoding="utf-8")
+    os.utime(older, (1000, 1000))
+    os.utime(newer, (2000, 2000))
+    sent, fail_on = [], {"a2"}
+
+    def _dispatch(record):
+        if record["tool"] in fail_on:
+            fail_on.discard(record["tool"])
+            raise ConnectionError("SIEM weg")
+        sent.append(record["tool"])
+
+    monkeypatch.setattr(siem, "_dispatch_record", _dispatch)
+    try:
+        assert siem._drain_spool() is False
+        assert sent == ["a1"]
+        assert siem._drain_spool() is True
+        assert sent == ["a1", "a2", "a3", "b1"]       # a2 mindestens einmal, Reihenfolge bleibt
+        assert siem.get_spool_files() == []
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_udp_send_error_pauses_instead_of_spinning(monkeypatch, tmp_path):
+    '''Scheitert schon das Senden (UDP), geht der Eintrag in den Spool und der Sender
+    macht eine Pause, statt es ohne Unterbrechung erneut zu versuchen.'''
+    monkeypatch.setenv("AUDIT_SIEM", "syslog")
+    monkeypatch.setenv("AUDIT_SYSLOG_PROTOCOL", "udp")
+    monkeypatch.setenv("AUDIT_SYSLOG_HOST", "siem.invalid")
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(tmp_path / "spool"))
+    attempts = []
+
+    def _unreachable(record):
+        attempts.append(record.get("tool"))
+        raise OSError("Netz nicht erreichbar")
+
+    monkeypatch.setattr(siem, "_dispatch_record", _unreachable)
+    siem.reset(flush=False)
+    try:
+        siem.forward(_rec("udp_fail"))
+        time.sleep(1.5)
+        assert 1 <= len(attempts) <= 3                 # Pause 1 s, dann 2 s
+        assert len(siem.get_spool_records()) == 1
+        assert siem.get_dropped_count() == 0
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_unusable_spool_dir_does_not_stop_forwarding(monkeypatch, tmp_path, capsys):
+    '''Laesst sich der Spool-Ordner nicht anlegen, geht die Weiterleitung trotzdem.'''
+    blocker = tmp_path / "eine_datei"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("AUDIT_SIEM", "stdout")
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(blocker / "spool"))
+    #--- Wer vorher mcp_servers.filesystem importiert hat, lenkt sonst auf stderr um.
+    monkeypatch.delenv("ARGUS_STDOUT_RESERVED", raising=False)
+    siem.reset(flush=False)
+    try:
+        siem.forward(_rec("trotzdem"))
+        deadline = time.time() + 3
+        out = ""
+        while "trotzdem" not in out and time.time() < deadline:
+            time.sleep(0.05)
+            out += capsys.readouterr().out
+        assert '"event": "trotzdem"' in out
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_spool_max_mb_limit(monkeypatch, tmp_path):
+    '''Obergrenze AUDIT_SIEM_SPOOL_MAX_MB: Neue Eintraege zaehlen als verloren.'''
+    spool = tmp_path / "spool"
+    _syslog_tcp(monkeypatch, _free_port(), spool)
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_MAX_MB", "0.0005")
+    siem.reset(flush=False)
+    try:
+        for i in range(10):
+            siem.forward(_rec(f"flood_{i}", details="x" * 100))
+        deadline = time.time() + 5
+        while siem.get_dropped_count() == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        assert siem.get_dropped_count() > 0
+        assert siem._get_spool_total_bytes(spool) <= int(0.0005 * 1024 * 1024)
+    finally:
+        siem.reset(flush=False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-Dateirechte")
+def test_siem_spool_linux_permissions(monkeypatch, tmp_path):
+    '''Dateirechte: Ordner 0700, Dateien 0600.'''
+    spool = tmp_path / "spool"
+    _syslog_tcp(monkeypatch, _free_port(), spool)
+    siem.reset(flush=False)
+    try:
+        siem.forward(_rec("perm_test"))
+        assert _wait_spooled(1) == 1
+        assert os.stat(spool).st_mode & 0o777 == 0o700
+        files = siem.get_spool_files()
+        assert files and all(os.stat(f).st_mode & 0o777 == 0o600 for f in files)
+    finally:
+        siem.reset(flush=False)
+
+
+def test_siem_off_creates_no_spool_files(monkeypatch, tmp_path):
+    '''AUDIT_SIEM=off legt keinen Ordner, keine Datei und keinen Thread an.'''
+    spool = tmp_path / "spool_should_not_exist"
+    monkeypatch.setenv("AUDIT_SIEM", "off")
+    monkeypatch.setenv("AUDIT_SIEM_SPOOL_DIR", str(spool))
+    siem.reset(flush=False)
+    siem.forward(_rec("test_off"))
+    assert not spool.exists()
+    assert siem._worker_thread is None
+    siem.reset(flush=False)

@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 472 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 483 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -206,8 +206,11 @@ AUDIT_SYSLOG_PROTOCOL=tcp
 Argus sendet nach RFC 5424 über UDP oder TCP, als JSON oder als CEF (Common Event Format),
 das gängige SIEM-Produkte direkt einlesen. Alternativ schreibt `AUDIT_SIEM=stdout` jeden
 Eintrag ins Container-Log, wo ein vorhandener Log-Sammler ihn abholt. Die Weitergabe hält
-keine Anfrage auf. Ist das SIEM nicht erreichbar, zählt Argus die nicht zugestellten Einträge
-und warnt. Alle Schalter stehen unter [Sicherheits-Schalter](#sicherheits-schalter).
+keine Anfrage auf. Ist das SIEM nicht erreichbar, warten die Einträge in einer Datei im
+Volume `rag_data` und gehen, älteste zuerst, nach, sobald es wieder antwortet. Erst über der
+Obergrenze (`AUDIT_SIEM_SPOOL_MAX_MB`, 50 MB) zählt Argus sie als verloren und warnt. Über UDP
+bemerkt Argus Verluste unterwegs nicht; wo nichts fehlen darf, TCP nehmen. Alle Schalter
+stehen unter [Sicherheits-Schalter](#sicherheits-schalter).
 
 **Für den Betrieb:** Das Protokoll enthält Anmeldungen einzelner Personen. Wie andere
 Protokolle gehört es deshalb ins Löschkonzept und, wo es einen Betriebsrat gibt, in die
@@ -527,7 +530,7 @@ sollte sie kennen.
   Verzeichnis.
 - **Audit:** Ein Administrator kann das Protokoll in der Datenbank leeren. Das Leeren wird
   vermerkt und mit `AUDIT_SIEM` auch ans SIEM gemeldet. Unveränderlich ist das Protokoll erst
-  dort. Was das SIEM nicht erreicht, wird nicht nachgeliefert.
+  dort. Über UDP bemerkt Argus nicht, wenn ein Eintrag unterwegs verloren geht.
 - **Betrieb:** Wer Docker auf dem Server bedienen darf, hat dort praktisch Admin-Rechte. Der
   mitgelieferte TLS-Proxy ist lokal mit eigener CA und mit eigenem Zertifikat getestet, mit
   Let's Encrypt noch nicht.
@@ -859,14 +862,21 @@ Alle per `.env` änderbar:
 | `AUDIT_SIEM_FORMAT` | `json` | `json` oder `cef` (Common Event Format, etwa für Microsoft Sentinel, Falcon LogScale, QRadar). |
 | `AUDIT_SYSLOG_HOST`, `AUDIT_SYSLOG_PORT`, `AUDIT_SYSLOG_PROTOCOL` | –, `514`, `udp` | Ziel für `syslog`. Bei `tcp` mit Längenangabe je Nachricht (RFC 6587), die Verbindung wird gehalten und nach Fehlern neu aufgebaut. |
 | `AUDIT_SIEM_HOSTNAME` | Name des Containers | Rechnername im Syslog-Kopf und im Feld `host`. |
+| `AUDIT_SIEM_SPOOL_DIR` | `/app/data/siem_spool` | Ordner für Einträge, die das SIEM nicht erreicht haben (im Volume `rag_data`, Ordner `0700`, Dateien `0600`). |
+| `AUDIT_SIEM_SPOOL_MAX_MB` | `50` | Obergrenze dieses Ordners; darüber zählen neue Einträge als verloren. |
 | `ARGUS_TRUSTED_PROXIES` | leer | Adressen oder Netze (CIDR) von Proxys, deren `X-Forwarded-For` und `X-Forwarded-Proto` gelten; von allen anderen werden sie ignoriert. `*` wird nicht angenommen. Siehe [Betrieb auf einem Server](#betrieb-auf-einem-server). |
 | `AUDIT_TRUST_FORWARDED` | `false` | Schreibt zusätzlich die erste Adresse aus `X-Forwarded-For` ungeprüft ins Protokoll. Meist unnötig: Mit `ARGUS_TRUSTED_PROXIES` steht die echte Adresse schon im Feld `ip`. |
 
 Die Weitergabe ans SIEM blockiert keine Anfrage: Einträge gehen über eine Warteschlange
-(10.000 Plätze). Ist das SIEM nicht erreichbar oder die Warteschlange voll, wird der Eintrag
-nicht nachgeliefert, sondern gezählt und höchstens einmal je Minute gewarnt. Maßgeblich
-bleibt das Protokoll in der Datenbank. Jeder weitergegebene Eintrag trägt seine
-HMAC-Signatur, so lässt er sich dort wiederfinden.
+(10.000 Plätze). Ist das SIEM nicht erreichbar oder die Warteschlange voll, kommt der Eintrag
+in den Spool und geht nach, sobald das SIEM wieder antwortet: älteste zuerst und vor neuen
+Einträgen. Nach einem Sendefehler pausiert Argus mit wachsendem Abstand (bis 30 s). Zugestellt
+wird mindestens einmal; Doppelte erkennt das SIEM an der HMAC-Signatur (`hmac`), die für
+jeden Eintrag eine andere ist. Backend und MCP-Dateiserver schreiben je eine eigene Datei; die Dateien eines
+abgestürzten Prozesses übernimmt ein anderer per atomarem Umbenennen, so geht keine Datei
+gleichzeitig zweimal raus. Erst über `AUDIT_SIEM_SPOOL_MAX_MB` zählt ein Eintrag als verloren,
+mit höchstens einer Warnung je Minute. Maßgeblich bleibt das Protokoll in der Datenbank. Jeder
+weitergegebene Eintrag trägt seine HMAC-Signatur, so lässt er sich dort wiederfinden.
 | `CLOUD_AGENTS_ENABLED` | `false` | Cloud-Modelle (Gemini) als Helfer. Ohne `true` geht nichts an ein Cloud-Modell, auch wenn ein Schlüssel hinterlegt ist. |
 | `CLOUD_MISSION_AUTO_APPROVE` | `false` | Mit `true` gehen Cloud-Anfragen ohne Rückfrage raus; Schwärzung, PII-Stopp und Köder-Prüfung laufen trotzdem. In einem Gespräch mit Firmendaten nie ohne Rückfrage. Die Hilfswege ohne Karte (Recherche-Plan, Plan-Prüfung, Fehlersuche) laufen nur mit `true`. |
 | `API_DOCS` | `false` | Mit `true` ist die API-Beschreibung unter `/docs` erreichbar, ohne Anmeldung. |
