@@ -213,6 +213,18 @@ def create_mission(user_id: int, goal_redacted: str, context_redacted: str,
         return m.id
 
 
+def mission_start_unavailable() -> str | None:
+    '''Warum gerade keine Mission starten kann (Modul aus, kein Anbieter), sonst None.
+    Der Router prueft das vor der Freigabekarte: niemand soll eine Mission freigeben,
+    die danach gar nicht laufen kann.'''
+    if not cloud_enabled():
+        return "Cloud-Agenten sind deaktiviert (CLOUD_AGENTS_ENABLED=false)."
+    if not providers_mod.any_configured():
+        return ("Kein Cloud-Provider konfiguriert -- API-Key in "
+                "API_Tokens/Gemini.txt hinterlegen.")
+    return None
+
+
 async def launch_mission(goal: str, context: str, provider: str = "") -> tuple:
     '''Zentraler Mission-Start fuer agent_node (Setup2) UND StartMissionTool --
     eine Quelle fuer Checks, Redaction (fail-closed), Tripwire, Origin-Ermittlung
@@ -225,11 +237,9 @@ async def launch_mission(goal: str, context: str, provider: str = "") -> tuple:
     )
     if egress_block is not None:
         return False, egress_block
-    if not cloud_enabled():
-        return False, "Cloud-Agenten sind deaktiviert (CLOUD_AGENTS_ENABLED=false)."
-    if not providers_mod.any_configured():
-        return False, ("Kein Cloud-Provider konfiguriert -- API-Key in "
-                       "API_Tokens/Gemini.txt hinterlegen.")
+    unavailable = mission_start_unavailable()
+    if unavailable:
+        return False, unavailable
     try:
         (red_goal, red_ctx), mapping = await redactor.redact_outbound([goal, context or ""])
     except redactor.RedactionUnavailable as e:

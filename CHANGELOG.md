@@ -53,6 +53,13 @@ roles, administrator and user.
   `CLOUD_AGENTS_ENABLED=true`, `CLOUD_MISSION_AUTO_APPROVE=true` and an administrator's turn;
   otherwise Argus works locally. The switch defaults to off in the code as well; before, a
   missing `.env` entry meant on.
+- **A mission recognised by the router waits for the confirmation card.** When the router
+  classified an administrator's message as a background mission, it started the mission
+  directly, without the card that the `start_mission` tool shows. It now goes through that
+  tool: the same card with the redacted preview, the same audit entry, and nothing is sent
+  before the card is approved. Only `CLOUD_MISSION_AUTO_APPROVE=true` starts directly, and
+  never in a conversation with company data. With the cloud module off or no provider
+  configured there is no card, just the reason.
 - **The per-account memory could carry company data past the lock.** The file tools could
   write `users/<id>/MEMORY.md`, which is loaded into the system prompt of every new
   conversation, including other accounts' memory. The whole `users/` folder is now closed to

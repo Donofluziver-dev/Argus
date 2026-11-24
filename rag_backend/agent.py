@@ -3981,6 +3981,83 @@ def _build_convo_context(state: State, messages: list) -> str:
     return "\n".join(parts)
 
 
+async def _router_mission(state: State, last_text: str, convo_context: str) -> dict:
+    '''Mission, die der Router erkannt hat. Ohne CLOUD_MISSION_AUTO_APPROVE (und in
+    Gespraechen mit Firmendaten immer) laeuft der Start ueber das Werkzeug
+    start_mission und damit ueber dieselbe Freigabekarte, Vorschau und denselben
+    Audit wie ein Start durch das Modell. Die Karte kommt so in den Chat: BaseTool.run
+    meldet die offene Freigabe per adispatch_custom_event("argus_confirmation"), der
+    Ereignisstrom des Graphen gibt sie als "confirmation" an die Chat-Ansicht weiter.'''
+    from pydantic import ValidationError
+    from rag_backend.action_engine.base_tool import (
+        CURRENT_TASK, CURRENT_USER_ID, CURRENT_USER_ROLE,
+    )
+    from rag_backend.action_engine.tools.cloud_missions import (
+        StartMissionInput, StartMissionTool, _auto_approve,
+    )
+    from rag_backend.cloud_agents.missions import launch_mission, mission_start_unavailable
+
+    if _auto_approve():
+        ok, msg = await launch_mission(last_text, convo_context)
+        out = {"messages": [AIMessage(content=msg)]}
+        if ok:
+            out["task_type"] = "mission"
+        return out
+
+    #--- Keine Karte fuer eine Mission, die danach gar nicht laufen kann.
+    unavailable = mission_start_unavailable()
+    if unavailable:
+        return {"messages": [AIMessage(content=unavailable)]}
+
+    #--- Die Grenzen des Werkzeug-Schemas einhalten, ohne etwas zu verlieren:
+    #--- Was ueber das Ziel hinausgeht, kommt vorn in den Kontext.
+    props = StartMissionInput.model_json_schema()["properties"]
+    goal_min, goal_max = props["goal"]["minLength"], props["goal"]["maxLength"]
+    ctx_max = props["context"]["maxLength"]
+    goal = last_text.strip()
+    if len(goal) < goal_min:
+        return {"messages": [AIMessage(
+            content="Mission nicht gestartet: Das Ziel ist zu kurz. Beschreibe bitte "
+                    "genauer, was die Mission erledigen soll.")]}
+    overflow = goal[goal_max:]
+    goal = goal[:goal_max]
+    context = "\n\n".join(p for p in (overflow, convo_context or "") if p)[:ctx_max]
+
+    origin = request_origin_var.get() or {}
+    tokens = (
+        (CURRENT_USER_ID, CURRENT_USER_ID.set(state.get("user_id"))),
+        (CURRENT_USER_ROLE, CURRENT_USER_ROLE.set(origin.get("user_role"))),
+        #--- Wie im Werkzeugknoten (_tool_node), damit Freigabe und Audit gleich laufen.
+        (CURRENT_TASK, CURRENT_TASK.set({
+            "id": origin.get("task_id"),
+            "text": origin.get("task_text") or last_text[:200],
+            "channel": origin.get("channel") or "dashboard",
+        })),
+    )
+    try:
+        result = await StartMissionTool().run(
+            {"goal": goal, "context": context}, user_id=state.get("user_id"))
+    except ValidationError:
+        return {"messages": [AIMessage(
+            content="Mission nicht gestartet: Ziel oder Kontext passen nicht in das "
+                    "Format einer Mission.")]}
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+    if result.success:
+        return {"messages": [AIMessage(content=str(result.data))], "task_type": "mission"}
+    error = str(result.error or "")
+    if error.startswith("Action not confirmed"):
+        text = "Mission nicht gestartet: Die Freigabe wurde abgelehnt oder ist abgelaufen."
+    elif error.startswith("Operation blocked: this action needs an approval"):
+        text = ("Mission nicht gestartet: Eine Mission braucht die Freigabe auf der Karte "
+                "im Argus-Chat.")
+    else:
+        text = f"Mission nicht gestartet: {error or 'unbekannter Fehler.'}"
+    return {"messages": [AIMessage(content=text)]}
+
+
 async def agent_node(state: State):
     messages = state["messages"]
     first_hop = isinstance(messages[-1], HumanMessage)
@@ -4011,13 +4088,7 @@ async def agent_node(state: State):
         #--- Eine Mission geht an ein Cloud-Modell: nur fuer Administratoren, wie
         #--- das Werkzeug start_mission. Bei anderen Konten laeuft die Frage normal.
         if routing_res.get("task_type") == "mission" and _admin_turn:
-            # Kompletter Start-Flow lebt zentral in missions.launch_mission.
-            from rag_backend.cloud_agents.missions import launch_mission
-            ok, msg = await launch_mission(last_text, convo_context)
-            out = {"messages": [AIMessage(content=msg)]}
-            if ok:
-                out["task_type"] = "mission"
-            return out
+            return await _router_mission(state, last_text, convo_context)
 
         #--- Die Loesungs-Schleife fuehrt Code in der Sandbox aus: wie execute_code
         #--- nur fuer Administratoren.

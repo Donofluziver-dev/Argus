@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 463 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 472 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -492,7 +492,8 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
   Scheitert die Schwärzung, wird nichts gesendet.
 - **Cloud-Modelle** sind aus (`CLOUD_AGENTS_ENABLED=false`). Eingeschaltet bekommen sie nur
   geschwärzte Texte, ein PII-Stopp blockiert, wenn die Schwärzung nicht greift, und ohne
-  `CLOUD_MISSION_AUTO_APPROVE=true` fragt jeder Versand nach. Die Hilfswege ohne Karte im
+  `CLOUD_MISSION_AUTO_APPROVE=true` fragt jeder Versand nach, auch eine Mission, die der
+  Router erkannt hat. Die Hilfswege ohne Karte im
   Chat (Recherche-Plan, Plan-Prüfung, Fehlersuche beim Programmieren) laufen nur mit diesem
   Schalter; ohne ihn rechnet Argus dort lokal. Ein hinterlegter Schlüssel allein schaltet
   nichts ein.
@@ -517,9 +518,6 @@ sollte sie kennen.
 - **Rechte der Quellen:** Die Dokumentensuche kennt eine gemeinsame Wissensbasis. Für Firmen
   müsste sie die Rechte der Quelle mitprüfen (etwa SharePoint). Die Anmeldung läuft über
   eigene Konten, nicht über SSO (OIDC).
-- **Cloud-Missionen:** Erkennt der Router eine Nachricht eines Administrators als
-  Hintergrund-Auftrag, startet er die Mission ohne Karte im Chat (Schwärzung und PII-Stopp
-  laufen trotzdem). Betrifft nur Installationen mit Cloud-Modul.
 - **Sandbox:** Jeder Code-Lauf hat seinen eigenen, frisch gestarteten Container, aber alle
   teilen sich den Kernel des Hosts. Wer stärker trennen will, braucht eine Laufzeit wie gVisor
   oder Kata; das richtet Argus nicht ein. Ein Container steht nach einem Lauf rund 10 Sekunden

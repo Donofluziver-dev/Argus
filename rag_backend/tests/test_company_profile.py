@@ -186,6 +186,9 @@ async def test_router_starts_a_mission_only_for_admins(monkeypatch, _clean_origi
         await agent.agent_node(state)
     assert launched == [], "ein Benutzer hat eine Cloud-Mission gestartet"
 
+    #--- Direktstart nur mit CLOUD_MISSION_AUTO_APPROVE; sonst kommt erst die Karte
+    #--- (test_mission_router_card.py).
+    monkeypatch.setenv("CLOUD_MISSION_AUTO_APPROVE", "true")
     launched = _route(monkeypatch, decision, "admin")
     out = await agent.agent_node(state)
     assert len(launched) == 1 and out.get("task_type") == "mission"
