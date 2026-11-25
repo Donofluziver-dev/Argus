@@ -125,7 +125,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 483 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 507 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -520,7 +520,14 @@ sollte sie kennen.
   Konto gibt es nicht.
 - **Rechte der Quellen:** Die Dokumentensuche kennt eine gemeinsame Wissensbasis. Für Firmen
   müsste sie die Rechte der Quelle mitprüfen (etwa SharePoint). Die Anmeldung läuft über
-  eigene Konten, nicht über SSO (OIDC).
+  eigene Konten, nicht über SSO (OIDC). Entschiedener Weg: zuerst SSO über Entra ID, dann
+  sucht Argus in SharePoint und Teams über Microsoft Graph mit dem Zugriffsrecht der
+  angemeldeten Person (delegiert). Microsoft liefert dann nur, was diese Person sehen darf;
+  nichts wird kopiert, gelesen und beantwortet wird lokal. Die Copilot-Schnittstellen
+  (Retrieval und Chat) setzen dagegen je Person eine Microsoft-365-Copilot-Lizenz voraus
+  (Retrieval für SharePoint auch nutzungsabhängig bezahlt); das kostenlose Copilot Chat hat
+  keine Schnittstelle. Als Cloud-Modell für eine Firma passt eher Azure OpenAI im eigenen
+  Tenant als Gemini.
 - **Sandbox:** Jeder Code-Lauf hat seinen eigenen, frisch gestarteten Container, aber alle
   teilen sich den Kernel des Hosts. Wer stärker trennen will, braucht eine Laufzeit wie gVisor
   oder Kata; das richtet Argus nicht ein. Ein Container steht nach einem Lauf rund 10 Sekunden
@@ -536,7 +543,11 @@ sollte sie kennen.
   Let's Encrypt noch nicht.
 - **Lizenzen als Module:** Websuche (SearXNG, AGPL) und Ablaufverfolgung (Phoenix, Elastic
   License) lassen sich abschalten (Profile `web`, `tracing`), aber nicht gegen andere Dienste
-  austauschen.
+  austauschen. Die AGPL ist kein Hindernis: Argus nutzt SearXNG unverändert und nur intern.
+  Heikler sind die Suchmaschinen dahinter: SearXNG fragt Google, Bing und andere ohne Vertrag
+  ab, deren Nutzungsbedingungen automatisierte Abfragen meist ausschließen. Für den Einsatz in
+  einer Firma gehört deshalb eine Such-API mit Vertrag (etwa Brave Search API) als
+  austauschbarer Anbieter dazu.
 - **Lieferkette:** Python-Pakete haben keine Lock-Datei, drei Images installieren Pakete ohne
   feste Version. Die Modelle prüft die Installation per SHA-256, wer sie von Hand ablegt,
   prüft selbst.
@@ -551,9 +562,12 @@ sollte sie kennen.
   die Aufnahme in die Dokumentensuche. Der vorgesehene Weg ist das multimodale Modell selbst,
   kein eigenes OCR.
 - **Grenzen der Sperre:** Vom Nutzer selbst eingefügte Bilder und Texte zählen nicht als
-  Firmendaten. Der Modus `allow` vergleicht nur Fingerabdrücke (Kennungen, E-Mail, IBAN,
-  Wortfolgen). Umkodierte Daten (etwa Base64) erkennt er nicht, er ist also kein Schutz gegen
-  einen gezielten Angriff.
+  Firmendaten. Der Modus `allow` vergleicht Fingerabdrücke (Kennungen, E-Mail, IBAN,
+  Wortfolgen) und entschlüsselt dafür auch gängige Umkodierungen (Base64, Base32, Hex, gzip,
+  ROT13, rückwärts, Vollbreite, zeichenweise getrennt, verschachtelt); lange, zufällig
+  aussehende Folgen (verschlüsselt oder gepackt) sperrt er ganz. Was das Modell in eigene
+  Worte fasst, übersetzt oder in kleinen Stücken über viele Anfragen verteilt, erkennt er
+  nicht. Gegen einen gezielten Angriff schützt nur der Standard `block`.
 
 ## Einrichten
 
@@ -852,7 +866,7 @@ Alle per `.env` änderbar:
 | `DASHBOARD_ALLOW_REGISTER` | `false` | Selbstregistrierung neuer Konten (immer als Benutzer). |
 | `DASHBOARD_ORIGINS`, `TRUSTED_HOSTS` | `127.0.0.1`, `localhost` | Adressen, unter denen die Oberfläche aufgerufen werden darf (CSRF, DNS-Rebinding). |
 | `DASHBOARD_TRACES_URL` | `http://127.0.0.1:6006` | Adresse von Phoenix für den Reiter *Traces*; nur diese Adresse darf die Seite einbetten. Leer = der Reiter zeigt nur einen Hinweis. |
-| `EGRESS_AFTER_SENSITIVE` | `block` | Weg nach außen, nachdem ein Gespräch Firmendaten gelesen hat. `block` sperrt ihn. `allow` lässt ihn offen und sperrt nur Anfragen mit Bestandteilen der gelesenen Daten; fehlen die Fingerabdrücke (nach einem Neustart), wirkt auch `allow` wie `block`. |
+| `EGRESS_AFTER_SENSITIVE` | `block` | Weg nach außen, nachdem ein Gespräch Firmendaten gelesen hat. `block` sperrt ihn. `allow` lässt ihn offen und sperrt nur Anfragen mit Bestandteilen der gelesenen Daten, auch umkodiert (Base64, Hex, gzip und andere), sowie lange zufällig aussehende Folgen; fehlen die Fingerabdrücke (nach einem Neustart), wirkt auch `allow` wie `block`. |
 | `WEB_INJECTION_GUARD` | `true` | Prüft Websuche und Seitenabruf auf eingeschleuste Anweisungen: der ganze Text in Abschnitten von 16.000 Zeichen; mehr als sechs Abschnitte gelten als verdächtig. Ist die Prüfung nicht möglich, wird der Inhalt nicht übernommen. |
 | `TRACE_CONTENT` | `redacted` | Was Phoenix sieht: `redacted` (Inhalte mit geschwärzten Schlüsseln und PII) oder `metadata` (nur Ablauf, Dauer, Token-Zahlen, Werkzeugnamen). Einen Klartext-Modus gibt es nicht. |
 | `CANARY_TOKENS` | von `init_stack.py` erzeugt | Köder-Schlüssel (Komma-getrennt, je ab 12 Zeichen). Taucht einer in einer Cloud-Anfrage, Websuche, URL oder in Werkzeug-Parametern auf, wird blockiert, als Fehler protokolliert und im Audit vermerkt. |

@@ -100,7 +100,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 483 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 507 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -339,7 +339,12 @@ These are known and not solved yet:
 
 - Files in the per-account areas are separated inside Argus, not encrypted per account: whoever
   operates the server or Docker can read them.
-- No source-level permissions in document search, no SSO (OIDC).
+- No source-level permissions in document search, no SSO (OIDC). The chosen way is SSO
+  through Entra ID, then searching SharePoint and Teams through Microsoft Graph with the
+  signed-in person's delegated rights, so Microsoft returns only what that person may see and
+  nothing is copied. The Copilot APIs need a Microsoft 365 Copilot license per person; the
+  free Copilot Chat has no API. For a company, Azure OpenAI in its own tenant fits better as
+  the cloud model than Gemini.
 - Every code run has its own freshly started container, but all share the host kernel; a
   stronger separation needs a runtime such as gVisor or Kata, which Argus does not set up.
   After a run a container is not ready for about 10 s; more back-to-back runs than replicas
@@ -350,7 +355,11 @@ These are known and not solved yet:
 - The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
   yet with Let's Encrypt.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) can be switched off
-  (profiles `web`, `tracing`) but not replaced by other services.
+  (profiles `web`, `tracing`) but not replaced by other services. The AGPL is no obstacle:
+  Argus runs SearXNG unmodified and internally. The engines behind it are the issue: SearXNG
+  queries Google, Bing and others without a contract, and their terms usually rule out
+  automated queries. For company use a search API under contract (such as the Brave Search
+  API) belongs in as a replaceable provider.
 - No lock file for Python packages. The installer verifies the models by SHA-256.
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the

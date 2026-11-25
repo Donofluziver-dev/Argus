@@ -11,13 +11,19 @@ IBANs und 4-Wort-Folgen) unterzogen.
 """
 from __future__ import annotations
 
+import base64
+import codecs
 import contextlib
+import gzip
 import hashlib
 import html
 import json
 import logging
+import math
 import os
 import re
+import unicodedata
+import zlib
 from collections import OrderedDict
 from contextvars import ContextVar
 from typing import Any
@@ -519,28 +525,248 @@ def mark_sensitive_source(source_name: str, content: Any = None) -> EgressState:
     return state
 
 
+_FORMATTED_HEX_RES = (
+    re.compile(r"(?:\\x[0-9a-fA-F]{2}){8,}"),
+    re.compile(r"(?:0x[0-9a-fA-F]{2}[ ,:]*){8,}"),
+    re.compile(r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){7,}\b"),
+    re.compile(r"\b[0-9a-fA-F]{2}(?: [0-9a-fA-F]{2}){7,}\b"),
+)
+_HEX_CLEAN_RE = re.compile(r"0x|\\x|[: ,]")
+_SPACED_ID_RE = re.compile(
+    r"(?<![a-zA-Z0-9äöüÄÖÜß])([a-zA-Z0-9äöüÄÖÜß](?:([^a-zA-Z0-9äöüÄÖÜß])[a-zA-Z0-9äöüÄÖÜß])(?:\2[a-zA-Z0-9äöüÄÖÜß]){3,})(?![a-zA-Z0-9äöüÄÖÜß])"
+)
+_CONTIGUOUS_TOKEN_RE = re.compile(r"[A-Za-z0-9+/_-]{16,}={0,6}")
+_URL_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)+$")
+
+
+def _entropy_bits_per_char(text: str) -> float:
+    if not text:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in text:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(text)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _looks_random(token: str, pure_hex: bool) -> bool:
+    '''Sieht eine lange, nicht lesbar dekodierbare Folge nach verschluesselten oder
+    gepackten Daten aus? Woerter, Pfade und URL-Titel ("mittelstand-investiert-in-...")
+    bestehen auch aus Zeichen des Base64-Alphabets, haben aber deutlich weniger Entropie
+    (Text um 4 Bit je Zeichen, zufaelliges Base64 ueber 5) und selten alle drei
+    Zeichenklassen. Zufaellige Kennungen ab 64 Zeichen (etwa Tracking-Parameter) sperrt
+    die Regel in markierten Gespraechen mit: Von verschluesselten Daten sind sie nicht zu
+    unterscheiden.'''
+    body = token.rstrip("=")
+    if pure_hex:
+        return len(body) >= 72 and _entropy_bits_per_char(body.lower()) >= 3.5
+    if len(body) < 64 or _URL_SLUG_RE.fullmatch(token):
+        return False
+    if re.fullmatch(r"[A-Z2-7]+", body):                       # Base32
+        return _entropy_bits_per_char(body) >= 4.2
+    mixed = (any(c.islower() for c in body) and any(c.isupper() for c in body)
+             and any(c.isdigit() for c in body))
+    return mixed and _entropy_bits_per_char(body) >= 4.8
+
+
+def _is_predominantly_printable(text: str, min_ratio: float = 0.85) -> bool:
+    if not text:
+        return False
+    if "\x00" in text:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable() or ch in "\r\n\t")
+    return (printable / len(text)) >= min_ratio
+
+
+class _Oversized(Exception):
+    '''Gepackte Daten ergeben mehr als die Obergrenze: der Rest bliebe ungeprueft.'''
+
+
+def _decompress_up_to_1mb(data: bytes, max_out: int = 1_048_576) -> bytes | None:
+    '''Entpackt gzip, zlib oder raw deflate, hoechstens max_out Bytes (Zip-Bomben).
+    Ist dann noch etwas uebrig, wirft es _Oversized: Hinter 1 MB Fuellmaterial koennten
+    Firmendaten stehen, die sonst nie geprueft wuerden.'''
+    attempts = []
+    if data.startswith(b"\x1f\x8b"):
+        attempts.append(16 + zlib.MAX_WBITS)
+    if len(data) >= 2 and (data[0] & 0x0F) == 8 and (data[0] * 256 + data[1]) % 31 == 0:
+        attempts.append(zlib.MAX_WBITS)
+    if len(data) >= 4:
+        attempts.append(-zlib.MAX_WBITS)
+    for wbits in attempts:
+        try:
+            d = zlib.decompressobj(wbits)
+            out = d.decompress(data, max_out)
+        except Exception:
+            continue
+        if not out:
+            continue
+        if len(out) >= max_out and (d.unconsumed_tail or not d.eof):
+            raise _Oversized()
+        return out
+    return None
+
+
+def _decoded_text(decode, raw: str) -> str | None:
+    '''Dekodiert raw (Hex, Base64, Base32) und macht lesbaren Text daraus. Passt raw nicht
+    zur Kodierung: None. _Oversized geht bewusst durch (sperrt den Aufruf).'''
+    try:
+        data = decode(raw)
+    except ValueError:              # binascii.Error ist ein ValueError
+        return None
+    return _try_decode_to_printable_text(data)
+
+
+def _try_decode_to_printable_text(data: bytes) -> str | None:
+    decompressed = _decompress_up_to_1mb(data)
+    b = decompressed if decompressed is not None else data
+    if not b:
+        return None
+    try:
+        t = b.decode("utf-8")
+        if _is_predominantly_printable(t):
+            return t
+    except Exception:
+        pass
+    try:
+        t = b.decode("latin-1")
+        if _is_predominantly_printable(t):
+            return t
+    except Exception:
+        pass
+    return None
+
+
 def check_egress_content(args: Any, state: EgressState | None = None) -> tuple[bool, str]:
     """Prüft Argumente eines ausgehenden Aufrufs gegen die Fingerabdrücke des Gesprächs.
     Liefert (True, 'content_match:<kategorie>') bei Treffer, sonst (False, '')."""
     if state is None:
         state = get_current_egress_state()
-    if not state.marked or not state.fingerprints:
+    if not state.marked:
         return False, ""
 
-    candidate_hashes = extract_sensitive_hashes(args)
-    # Deterministische Reihenfolge der Kategorien für klare Audit-Gründe
-    priority = {"iban": 0, "email": 1, "id": 2, "phrase": 3}
-    matched_kinds: list[str] = []
-    for h, cand_kind in candidate_hashes.items():
-        if h in state.fingerprints:
-            kind = state.fingerprint_kinds.get(h, cand_kind)
-            matched_kinds.append(kind)
+    try:
+        raw_strings = _flatten_strings(args)
+        total_size = sum(len(s.encode("utf-8", errors="ignore")) for s in raw_strings)
+        if total_size > 200_000:
+            return True, "content_match:too_large"
 
-    if matched_kinds:
-        matched_kinds.sort(key=lambda k: priority.get(k, 99))
-        return True, f"content_match:{matched_kinds[0]}"
+        matched_kinds: list[str] = []
+        has_encoded_blob: bool = False
+        seen_variants: set[str] = set()
+        current_queue: list[str] = [s for s in raw_strings if s]
 
-    return False, ""
+        priority = {"iban": 0, "email": 1, "id": 2, "phrase": 3}
+
+        for depth in range(4):
+            if not current_queue:
+                break
+            next_queue: list[str] = []
+
+            for s in current_queue:
+                if s in seen_variants:
+                    continue
+                if len(seen_variants) >= 200:
+                    return True, "content_match:too_large"
+                seen_variants.add(s)
+
+                if state.fingerprints:
+                    for h, cand_kind in extract_sensitive_hashes(s).items():
+                        if h in state.fingerprints:
+                            kind = state.fingerprint_kinds.get(h, cand_kind)
+                            matched_kinds.append(kind)
+
+                if depth >= 3:
+                    continue
+
+                for v in _decode_variants(s):
+                    if v != s and v not in seen_variants:
+                        next_queue.append(v)
+
+                norm = unicodedata.normalize("NFKC", s)
+                if norm != s and norm not in seen_variants:
+                    next_queue.append(norm)
+
+                for m in _SPACED_ID_RE.finditer(s):
+                    compact_id = m.group(1).replace(m.group(2), "")
+                    if compact_id not in seen_variants:
+                        next_queue.append(compact_id)
+
+                compact_s = _SPACED_ID_RE.sub(lambda m: m.group(1).replace(m.group(2), ""), s)
+                if compact_s != s and compact_s not in seen_variants:
+                    next_queue.append(compact_s)
+
+                rot = codecs.encode(s, "rot_13")
+                if rot != s and rot not in seen_variants:
+                    next_queue.append(rot)
+
+                rev = s[::-1]
+                if rev != s and rev not in seen_variants:
+                    next_queue.append(rev)
+
+                for pat in _FORMATTED_HEX_RES:
+                    for m in pat.finditer(s):
+                        clean_hex = _HEX_CLEAN_RE.sub("", m.group(0))
+                        txt = None
+                        if len(clean_hex) >= 16 and len(clean_hex) % 2 == 0:
+                            txt = _decoded_text(bytes.fromhex, clean_hex)
+                        if txt is not None:
+                            if txt not in seen_variants:
+                                next_queue.append(txt)
+                        elif _looks_random(clean_hex, pure_hex=True):
+                            has_encoded_blob = True
+
+                for m in _CONTIGUOUS_TOKEN_RE.finditer(s):
+                    tok = m.group(0)
+                    clean_hex = tok.rstrip("=")
+                    is_pure_hex = bool(re.fullmatch(r"[0-9a-fA-F]+", clean_hex))
+                    blob_candidate = _looks_random(tok, pure_hex=is_pure_hex)
+                    decoded_any = False
+
+                    texts: list[str | None] = []
+                    if is_pure_hex and len(clean_hex) % 2 == 0:
+                        texts.append(_decoded_text(bytes.fromhex, clean_hex))
+
+                    clean_b64 = tok.rstrip("=")
+                    if len(clean_b64) % 4 != 1:
+                        pad_len = (4 - len(clean_b64) % 4) % 4
+                        std_b64 = (clean_b64 + "=" * pad_len).replace("-", "+").replace("_", "/")
+                        texts.append(_decoded_text(
+                            lambda v: base64.b64decode(v, validate=True), std_b64))
+
+                    clean_b32 = tok.rstrip("=").upper()
+                    if re.fullmatch(r"[A-Z2-7]+", clean_b32) and len(clean_b32) % 8 in (0, 2, 4, 5, 7):
+                        padded_b32 = clean_b32 + "=" * ((8 - len(clean_b32) % 8) % 8)
+                        texts.append(_decoded_text(
+                            lambda v: base64.b32decode(v, casefold=True), padded_b32))
+
+                    for txt in texts:
+                        if txt is not None:
+                            decoded_any = True
+                            if txt not in seen_variants:
+                                next_queue.append(txt)
+
+                    if not decoded_any and blob_candidate:
+                        has_encoded_blob = True
+
+            if matched_kinds:
+                matched_kinds.sort(key=lambda k: priority.get(k, 99))
+                return True, f"content_match:{matched_kinds[0]}"
+
+            current_queue = next_queue
+
+        if has_encoded_blob:
+            return True, "content_match:encoded_blob"
+
+        return False, ""
+
+    except _Oversized:
+        return True, "content_match:too_large"
+    except Exception as e:
+        log.warning(f"check_egress_content failed: {e}", exc_info=True)
+        if state.marked:
+            return True, "content_match:check_failed"
+        return False, ""
 
 
 def _log_and_audit_block(tool_name: str, conversation_key: str, reason: str) -> None:

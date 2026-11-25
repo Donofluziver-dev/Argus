@@ -105,6 +105,16 @@ roles, administrator and user.
   code in the sandbox and read the mounted workspace. Inherited from the earlier edition. The evaluator now
   rejects strings, attribute access, non-ASCII characters, backslashes and comments, and
   runs without Python builtins.
+- **The lock after company data also sees re-encoded data.** With
+  `EGRESS_AFTER_SENSITIVE=allow`, outbound requests were compared with the fingerprints of
+  the company data only as plain, URL- or HTML-encoded text, so a hijacked model could send
+  the data as Base64. Outbound arguments are now also decoded from Base64 (standard and
+  URL-safe), Base32, hex, gzip, zlib and deflate (at most 1 MB; anything beyond blocks),
+  ROT13, reversed text, full-width characters and characters separated one by one, nested up
+  to three levels. Long random-looking sequences (encrypted or packed) block in a marked
+  conversation; ordinary URLs, UUIDs and hashes do not. A request above 200 kB or a failed
+  check blocks as well. Paraphrase, translation or splitting over many requests is still not
+  recognised; the default `block` is unaffected.
 - **Attached files lock the conversation from the start.** A message that names a file in
   the uploads folder marks the conversation as holding company data before the agent runs.
   Before, the model could search the web with the file name (a case number, a customer
