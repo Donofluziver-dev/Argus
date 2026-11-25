@@ -194,6 +194,13 @@ roles, administrator and user.
   and logs a warning. **Update note:** `init_stack.py` adds `LLM_MMPROJ_FILE` to an existing
   `.env` that uses the default model, and `LLM_MMPROJ_OFFLOAD`; the file itself comes with the
   installer's model step.
+- **Scan measurement (`eval/scans`).** Eleven fictional test pages generated in code (fax,
+  phone photo, dense table, handwriting, form with ticks, technical drawing, two columns,
+  stamp over an amount, an instruction to AI systems inside the image, a photo without text)
+  and stress series on one test report table (resolution, blur, JPEG, faint print, rotation,
+  print size, harder handwriting). Checks count values and words of every table row
+  separately. Result with Qwen3.6: 111 of 111 checks; wrong digits, unmarked, only below
+  150 dpi or with 4 pt print. `--abschriften` re-scores saved transcriptions without the model.
 - **Audit of logins and account changes, forwarding to a SIEM.** Logins (successful, failed,
   locked), API logins, logouts, setup, password changes and every account change by an
   administrator go into the HMAC-chained audit log, with account, address and reason but

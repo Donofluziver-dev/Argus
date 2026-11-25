@@ -103,7 +103,8 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
-| Automated tests | 507 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Transcribing scans, photos and handwriting | 111 of 111 checks on 11 test pages; wrong digits only below 150 dpi or with 4 pt print | fax, phone photo, form, drawing, stamp and stress series, `eval/scans` |
+| Automated tests | 534 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -252,12 +253,16 @@ document search, `read_document` and the monitor. The result counts as company d
 document text, and everything goes to the local model, never to a cloud model. Without the
 projector file Argus runs as before, without image input, and scans stay empty.
 
-Checked with Qwen3.6 on a skewed, noisy scanned invoice and a photo of a type plate: invoice
-number, amounts, IBAN, table and serial number came out right, one word lost a letter. A page
-takes a little over 10 s; the encoder sits in RAM and needs no GPU memory
-(`LLM_MMPROJ_OFFLOAD`, see [README.de.md](README.de.md#stellschrauben-env)). Whether the model
-reads poor scans, handwriting or dense tables as reliably as a dedicated OCR model still has to
-be shown by a measurement with real company pages, like the agent evaluation does for text.
+Measured with Qwen3.6 (`eval/scans`): the model read eleven fictional test pages without an
+error, among them a fax, a skewed phone photo, handwriting, a form with ticked boxes, a
+technical drawing and an amount under a stamp. An instruction to "AI systems" inside the image
+was transcribed, not followed. In stress series on a test report table the values stayed right
+under blur, heavy compression, faint print and rotation. At 100 dpi and below, or with 4 pt
+print, the model changed single digits without marking them (0.82 instead of 0.62). More than
+150 dpi does not reach the model, which sees an A4 page at about 137 dpi. A page takes 10 to
+15 s; the encoder sits in RAM and needs no GPU memory (`LLM_MMPROJ_OFFLOAD`, see
+[README.de.md](README.de.md#stellschrauben-env)). Real handwriting and real company pages have
+not been measured yet.
 
 ## Architecture
 
@@ -376,9 +381,11 @@ These are known and not solved yet:
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the
   installer sets `ARGUS_MOUNT_LABEL=,z`; this has not been tried on a real SELinux system.
-- Images and scans are read by the model itself and checked on test pages; a measurement with
-  real company pages (poor scans, handwriting, dense tables, drawings) is missing. Scanned
-  pages are read one after another, at most 30 pages and 15 minutes per file.
+- Images and scans are read by the model itself, measured on fictional test pages
+  (`eval/scans`). Below 150 dpi or with very small print it silently changes single digits;
+  values from such scans that decide a release should be checked against the original. A
+  measurement with real company pages and real handwriting is missing. Scanned pages are read
+  one after another, at most 30 pages and 15 minutes per file.
 
 Details: [README.de.md](README.de.md#offen-für-einen-einsatz-im-unternehmen).
 
@@ -470,6 +477,8 @@ text and images are one model, this covers both.
 - Document search (`eval/retrieval`, 60 questions over 30 fictional documents): correct
   document in first place 67 % → 96 %, 3.5 s per search on CPU.
 - Agent (`eval/agent`, real model, three rounds): 73 of 78 main tasks.
+- Scans (`eval/scans`, 11 fictional pages and stress series): 111 of 111 checks; single digits
+  silently wrong only below 150 dpi or with 4 pt print.
 - Model throughput on an RTX 5070 Ti 16 GB with Qwen3.6-35B-A3B: 79 tokens/s.
 
 ## Tests

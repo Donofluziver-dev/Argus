@@ -129,7 +129,8 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
-| Automatische Tests | 507 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Scans, Fotos und Handschrift abschreiben | 111 von 111 Prüfungen auf 11 Testseiten; falsche Zahlen erst unter 150 dpi oder bei 4 pt Schrift | Fax, Handyfoto, Formular, Zeichnung, Stempel und Belastungsreihen, `eval/scans` |
+| Automatische Tests | 534 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -336,12 +337,15 @@ Monitor. Was dabei herauskommt, zählt wie jeder Dokumenttext als Firmendaten. A
 über das lokale Modell, nie über ein Cloud-Modell. Fehlt die Zusatzdatei, läuft Argus wie
 vorher ohne Bildeingabe, und Scans bleiben leer.
 
-Geprüft mit Qwen3.6 an einer schief gescannten, verrauschten Rechnung und einem Foto eines
-Typenschilds: Rechnungsnummer, Beträge, IBAN, Tabelle und Seriennummer kamen richtig heraus,
-ein Wort mit einem fehlenden Buchstaben. Eine Seite dauert gut 10 s. Der Encoder liegt im RAM
-und braucht keinen Grafikspeicher (Stellschrauben unten). Ob das Modell schlechte Scans,
-Handschrift oder dichte Tabellen so sicher liest wie ein eigenes OCR-Modell, muss noch eine
-Messung mit echten Firmenseiten zeigen, so wie die Agenten-Messung für Text.
+Gemessen mit Qwen3.6 (`eval/scans`): Elf erfundene Testseiten las das Modell ohne Fehler,
+darunter ein Fax, ein schräges Handyfoto, Handschrift, ein Formular mit Kreuzen, eine
+technische Zeichnung und einen Betrag unter einem Stempel. Eine Anweisung an „KI-Systeme“ im
+Bild schrieb es nur ab. In Belastungsreihen mit einer Prüftabelle blieben die Werte bei
+Unschärfe, starker Kompression, blasser Schrift und Drehung richtig. Bei 100 dpi und weniger
+oder 4 pt Schrift verfälschte es dagegen einzelne Ziffern, ohne es kenntlich zu machen
+(0,82 statt 0,62). Mehr als 150 dpi kommt beim Modell nicht an, es sieht A4 mit rund 137 dpi.
+Eine Seite dauert 10 bis 15 s; der Encoder liegt im RAM und braucht keinen Grafikspeicher
+(Stellschrauben unten). Echte Handschrift und echte Firmenseiten sind noch nicht gemessen.
 
 ## Was bis zum Einsatz fehlt
 
@@ -570,9 +574,11 @@ sollte sie kennen.
   gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) setzt die
   Installation `ARGUS_MOUNT_LABEL=,z`; auf einem echten SELinux-System ist das noch nicht
   ausprobiert.
-- **Bilder und Scans:** Das Modell liest Scans und Bilder selbst, geprüft an Testseiten. Eine
-  Messung mit echten Firmenseiten fehlt: schlechte Scans, Handschrift, dichte Tabellen,
-  Zeichnungen. Gescannte Seiten liest es nacheinander, je Datei höchstens 30 Seiten und
+- **Bilder und Scans:** Das Modell liest Scans und Bilder selbst, gemessen an erfundenen
+  Testseiten (`eval/scans`). Bei weniger als 150 dpi oder sehr kleiner Schrift verfälscht es
+  einzelne Ziffern still; Werte aus solchen Scans, die über eine Freigabe entscheiden, gehören
+  gegen das Original geprüft. Eine Messung mit echten Firmenseiten und echter Handschrift
+  fehlt. Gescannte Seiten liest es nacheinander, je Datei höchstens 30 Seiten und
   15 Minuten. Große Scan-Archive brauchen dafür Zeit oder einen eigenen Durchlauf.
 - **Grenzen der Sperre:** Vom Nutzer selbst eingefügte Bilder und Texte zählen nicht als
   Firmendaten. Der Modus `allow` vergleicht Fingerabdrücke (Kennungen, E-Mail, IBAN,
