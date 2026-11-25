@@ -60,6 +60,9 @@ an audit log that can go to the company's SIEM ([Why Argus is secure](#why-argus
   meaning (bge-m3) and keywords (BM25) and ranks hits with a reranker; identifiers such as
   part numbers match literally. Above the answer the chat lists the documents the passages
   were found in. That list comes from the search, not from the model's text.
+- **Images and scanned PDFs:** the local model reads a page without a text layer itself and
+  transcribes it, as well as image files (PNG, JPG, WebP). The text goes into document search
+  like any other. In the chat an image can be attached with a question.
 - **Web research** with sources through its own SearXNG instance, separate from conversations
   with company data.
 - **Dropping or attaching a file in the chat:** a PDF, spreadsheet or other document is stored
@@ -240,12 +243,21 @@ separate OCR step and no second model for images are needed, and the GPU holds o
 instead of two. For the image part the model service loads a small projector file (mmproj),
 published next to the model on Hugging Face: 0.9 GB for Qwen3.6, 1.2 GB for Gemma 4.
 
-State in Argus: interface and backend already pass images to the model
-(`LLM_ENABLE_MULTIMODAL`). The model service does not load the mmproj file yet, so image input
-is off and not measured. PDFs without a text layer (pure scans) are not indexed by document
-search today. Whether a model of this size reads poor scans, handwriting or dense tables as
-reliably as a dedicated OCR model has to be shown by a measurement with real pages, like the
-agent evaluation does for text.
+How Argus uses it: the installer downloads the projector file (`LLM_MMPROJ_FILE`), the model
+service loads it at start, and the backend asks the model service whether it accepts images;
+then the chat offers an image button. A PDF page with fewer than 20 characters of text but
+with an image counts as a scan: the model transcribes it, tables as tables, and the text takes
+the page's place, marked as read from the image. Image files are read the same way, for
+document search, `read_document` and the monitor. The result counts as company data like any
+document text, and everything goes to the local model, never to a cloud model. Without the
+projector file Argus runs as before, without image input, and scans stay empty.
+
+Checked with Qwen3.6 on a skewed, noisy scanned invoice and a photo of a type plate: invoice
+number, amounts, IBAN, table and serial number came out right, one word lost a letter. A page
+takes a little over 10 s; the encoder sits in RAM and needs no GPU memory
+(`LLM_MMPROJ_OFFLOAD`, see [README.de.md](README.de.md#stellschrauben-env)). Whether the model
+reads poor scans, handwriting or dense tables as reliably as a dedicated OCR model still has to
+be shown by a measurement with real company pages, like the agent evaluation does for text.
 
 ## Architecture
 
@@ -364,9 +376,9 @@ These are known and not solved yet:
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the
   installer sets `ARGUS_MOUNT_LABEL=,z`; this has not been tried on a real SELinux system.
-- Image input is not switched on yet (the model service does not load the mmproj file), and
-  PDFs without a text layer (scans) are skipped when documents are indexed. The intended way
-  is the multimodal model itself, not a separate OCR.
+- Images and scans are read by the model itself and checked on test pages; a measurement with
+  real company pages (poor scans, handwriting, dense tables, drawings) is missing. Scanned
+  pages are read one after another, at most 30 pages and 15 minutes per file.
 
 Details: [README.de.md](README.de.md#offen-für-einen-einsatz-im-unternehmen).
 

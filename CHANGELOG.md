@@ -179,6 +179,21 @@ roles, administrator and user.
   (`python -m rag_backend.admin_cli`), also for the last administrator. The password is read
   from standard input, all sessions of the account end and the reset is audited.
 - **OpenDocument text (`.odt`)** is read and indexed.
+- **Images and scanned PDFs.** The model service loads the model's image encoder
+  (`LLM_MMPROJ_FILE`, `mmproj-Qwen3.6-35B-A3B-F16.gguf`, 0.9 GB, downloaded and checked by
+  SHA-256 by the installer). A PDF page with fewer than 20 characters of text and an image is
+  treated as a scan: the local model transcribes it and the text takes the page's place,
+  marked as read from the image. Image files (PNG, JPG, WebP) are read the same way, in
+  document search, `read_document` and the monitor upload. The text counts as company data.
+  At most `SCAN_MAX_PAGES` (30) pages and `SCAN_MAX_SECONDS` (900) per file; an unreadable page
+  does not stop the file. The backend asks the model service whether it accepts images
+  (`/props`), so the chat's image button appears by itself; `LLM_ENABLE_MULTIMODAL` still
+  forces it, the old name `SGLANG_ENABLE_MULTIMODAL` is no longer read. The encoder sits in
+  RAM by default (`LLM_MMPROJ_OFFLOAD=false`): on a 16 GB card VRAM stays at about 14.4 GB and
+  an image takes about 11 s. Without the file the model service starts without image input
+  and logs a warning. **Update note:** `init_stack.py` adds `LLM_MMPROJ_FILE` to an existing
+  `.env` that uses the default model, and `LLM_MMPROJ_OFFLOAD`; the file itself comes with the
+  installer's model step.
 - **Audit of logins and account changes, forwarding to a SIEM.** Logins (successful, failed,
   locked), API logins, logouts, setup, password changes and every account change by an
   administrator go into the HMAC-chained audit log, with account, address and reason but
@@ -245,6 +260,9 @@ roles, administrator and user.
 
 ### Fixed
 
+- Indexing an upload in the monitor reported every file as "0 Chunks": the interface read a
+  field the server did not send. The server now returns the number of chunks, and a failed
+  file shows its reason.
 - **The stack could not start on Linux.** The secrets were created with mode `0600`; the
   model services run as root without capabilities and the backend and speech services as uid
   1000, so none of them could read them unless the installing user happened to be uid 1000.

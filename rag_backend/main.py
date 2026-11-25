@@ -43,7 +43,7 @@ from rag_backend.features import is_tracing_available, is_voice_available, is_we
 from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
 from rag_backend import metrics
 from rag_backend.security_audit import audit_auth
-from rag_backend.utils import cloud_enabled, get_env_first
+from rag_backend.utils import cloud_enabled
 from rag_backend.schema_utils import (ensure_message_performance_columns, ensure_user_role_column,
                                       ensure_user_token_version_column, ensure_sensitive_session_columns)
 
@@ -1393,17 +1393,15 @@ async def cancel_mission_endpoint(mission_id: int, current_user: User = Depends(
 #--- jedes angemeldete Konto, Depends(dashboard_admin) = nur Administratoren.
 
 
-def _dashboard_config() -> dict:
+def _dashboard_config(multimodal: bool = False) -> dict:
     return {
         "embedding_model": os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
         "rag_k": int(os.getenv("K_RERANKED", "5")),
         "web_timeout_ms": int(float(os.getenv("WEB_SEARCH_TIMEOUT", "25.0")) * 1000),
         #--- Steuert, ob der Argus-Chat den Anhang-Knopf anbietet. Im reinen
         #--- Textbetrieb saehe die Antwort sonst so aus, als haette die Engine das
-        #--- Bild angesehen.
-        "multimodal": get_env_first(
-            "LLM_ENABLE_MULTIMODAL", "SGLANG_ENABLE_MULTIMODAL", default="false"
-        ).lower() == "true",
+        #--- Bild angesehen. Kommt aus vision.vision_available() (fragt den LLM-Server).
+        "multimodal": multimodal,
         "max_images": _MAX_IMAGES,
         #--- Fuer die Fusszeile des Anhang-Dialogs: womit indexiert wird, soll man
         #--- sehen, BEVOR man auf Ingestieren drueckt.
@@ -1419,7 +1417,9 @@ def _dashboard_config() -> dict:
 @app.get("/v1/dashboard/config", tags=["Dashboard"])
 async def dashboard_config(user: User = Depends(dashboard_user)):
     #--- Schlanke Variante der Kennzahlen fuer die Chat-Ansicht.
-    return {"model": os.getenv("OAI_MODEL"), "config": _dashboard_config()}
+    from rag_backend.vision import vision_available
+    multimodal = await asyncio.to_thread(vision_available)
+    return {"model": os.getenv("OAI_MODEL"), "config": _dashboard_config(multimodal)}
 
 
 @app.get("/v1/dashboard/summary", tags=["Dashboard"])
@@ -1437,9 +1437,11 @@ async def dashboard_summary(admin: User = Depends(dashboard_admin)):
         engine_metrics["kv_pool_tokens"] = _serving_budget()
     except Exception as e:
         log.debug(f"KV-Poolgroesse nicht ermittelbar: {e}")
+    from rag_backend.vision import vision_available
+    multimodal = await asyncio.to_thread(vision_available)
     return {"model": os.getenv("OAI_MODEL"), "backend": snap, "engine": engine_metrics,
             "tts": tts_metrics_data, "searxng_online": searxng_up,
-            "config": _dashboard_config()}
+            "config": _dashboard_config(multimodal)}
 
 @app.get("/v1/dashboard/missions", tags=["Dashboard"])
 async def dashboard_missions(db: Session = Depends(get_db),
@@ -2530,11 +2532,19 @@ _UPLOAD_EXTENSIONS = {
     ".html", ".htm", ".json", ".yaml", ".yml", ".csv", ".xlsx", ".pptx",
     ".png", ".jpg", ".jpeg", ".gif", ".webp",
 }
-#--- Dateitypen, aus denen die Indexierung Text ziehen kann.
+#--- Dateitypen, aus denen die Indexierung Text ziehen kann. Bilder kommen dazu, wenn
+#--- das Modell sie lesen kann (_ingestable_extensions).
 _INGESTABLE_EXTENSIONS = {
     ".pdf", ".docx", ".odt", ".pptx", ".xlsx", ".epub", ".txt", ".md",
     ".html", ".htm", ".json", ".yaml", ".yml", ".csv",
 }
+
+
+async def _ingestable_extensions() -> set:
+    from rag_backend.vision import IMAGE_EXTENSIONS, vision_available
+    if await asyncio.to_thread(vision_available):
+        return _INGESTABLE_EXTENSIONS | IMAGE_EXTENSIONS
+    return _INGESTABLE_EXTENSIONS
 
 
 def _safe_upload_name(raw: str) -> str:
@@ -2563,14 +2573,14 @@ def _upload_path(name: str) -> Path:
     return target
 
 
-def _upload_entry(p: Path) -> dict:
+def _upload_entry(p: Path, ingestable_exts: set = _INGESTABLE_EXTENSIONS) -> dict:
     st = p.stat()
     return {
         "name": p.name,
         "size": st.st_size,
         "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
         "is_dir": p.is_dir(),
-        "ingestable": p.is_dir() or p.suffix.lower() in _INGESTABLE_EXTENSIONS,
+        "ingestable": p.is_dir() or p.suffix.lower() in ingestable_exts,
     }
 
 
@@ -2578,10 +2588,11 @@ def _upload_entry(p: Path) -> dict:
 async def dashboard_uploads(admin: User = Depends(dashboard_admin)):
     if not _UPLOAD_DIR.is_dir():
         return {"dir": str(_UPLOAD_DIR), "files": []}
+    exts = await _ingestable_extensions()
     entries = []
     for p in sorted(_UPLOAD_DIR.iterdir(), key=lambda x: x.name.lower()):
         try:
-            entries.append(_upload_entry(p))
+            entries.append(_upload_entry(p, exts))
         except OSError:
             continue
     entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
@@ -2638,7 +2649,7 @@ async def dashboard_upload(request: Request, file: UploadFile = File(...),
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
     log.info(f"Upload durch '{admin.email}': {target.name} ({written} Bytes)")
-    return {"status": "ok", **_upload_entry(target)}
+    return {"status": "ok", **_upload_entry(target, await _ingestable_extensions())}
 
 
 @app.post("/v1/dashboard/uploads/ingest_all", tags=["Dashboard"])
@@ -2652,9 +2663,10 @@ async def dashboard_upload_ingest_all(admin: User = Depends(dashboard_admin),
     nicht als Fehler gemeldet.'''
     if not _UPLOAD_DIR.is_dir():
         return {"status": "ok", "verarbeitet": 0, "indexiert": 0, "ergebnisse": []}
+    exts = await _ingestable_extensions()
     kandidaten = sorted(
         (p for p in _UPLOAD_DIR.iterdir()
-         if p.is_dir() or p.suffix.lower() in _INGESTABLE_EXTENSIONS),
+         if p.is_dir() or p.suffix.lower() in exts),
         key=lambda p: p.name.lower(),
     )
     ergebnisse, indexiert = [], 0
@@ -2703,8 +2715,11 @@ async def dashboard_upload_ingest(name: str, admin: User = Depends(dashboard_adm
             msg = await _store_text_in_qdrant(
                 label, text, source=f"Uploads/{name}")
             failed = msg.startswith("ERROR")
+            #--- Die Oberflaeche zeigt die Zahl der Abschnitte; vorher fehlte das Feld,
+            #--- und jede Datei stand dort mit "0 Chunks".
+            found = re.search(r"\((\d+) chunks\)", msg)
             results.append({"file": label, "status": "fehler" if failed else "ok",
-                            "message": msg})
+                            "message": msg, "chunks": int(found.group(1)) if found else 0})
             if not failed:
                 ok_count += 1
         except Exception as e:

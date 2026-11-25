@@ -82,6 +82,10 @@ kann ([Warum Argus sicher ist](#warum-argus-sicher-ist)).
   einem Reranker. Kennungen wie `RK-2025-0041` oder Teilenummern trifft sie wörtlich.
   Über der Antwort steht, in welchen Dokumenten die Textstellen gefunden wurden. Diese Angabe
   kommt aus der Suche, nicht aus dem Text des Modells, kann also nicht erfunden sein.
+- **Bilder und gescannte PDFs:** Eine Seite ohne Textebene liest das lokale Modell selbst und
+  schreibt sie ab, ebenso Bilddateien (PNG, JPG, WebP). Der Text landet in der Dokumentensuche
+  wie jeder andere. Im Chat lässt sich ein Bild anhängen und dazu eine Frage stellen
+  ([Text und Bild](#das-modell-ist-austauschbar)).
 - **Web-Recherche** mit Quellen über eine eigene Suchinstanz, getrennt von Gesprächen mit
   Firmendaten ([Absicherung](#warum-websuche-und-wie-sie-abgesichert-ist)).
 - **Datei in den Chat ziehen oder anhängen:** Eine PDF, eine Tabelle oder ein anderes Dokument
@@ -307,9 +311,12 @@ LLM_MODEL_FILE=gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
 LLM_MTP_MODEL_FILE=mtp-gemma-4-26B-A4B-it.gguf
 LLM_N_CPU_MOE=14
 OAI_MODEL=gemma-4-26b-a4b
+LLM_MMPROJ_FILE=
 ```
 
-Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`.
+Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`. Der Bild-Encoder
+von Qwen passt nicht zu Gemma, daher `LLM_MMPROJ_FILE` leer lassen oder auf Gemmas eigene
+Zusatzdatei aus demselben Ordner setzen; mit Gemma ist die Bildeingabe nicht getestet.
 
 **Ein Modell für Text und Bild.** Alle Modelle in der Tabelle sind multimodal
 (Vision-Language): Sie lesen Text und Bilder mit denselben Gewichten. Eine gescannte Seite, ein
@@ -319,12 +326,22 @@ Bilder sind dafür nicht nötig, und die Karte muss nur ein Modell im Speicher h
 zwei. Für den Bildteil lädt der Modell-Dienst eine kleine Zusatzdatei (mmproj), die bei
 Hugging Face neben dem Modell liegt: 0,9 GB bei Qwen3.6, 1,2 GB bei Gemma 4.
 
-Stand in Argus: Oberfläche und Backend geben Bilder schon an das Modell weiter
-(`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die mmproj-Datei noch nicht, Bildeingabe ist
-deshalb aus und nicht gemessen. PDFs ohne Textebene, also reine Scans, nimmt die
-Dokumentensuche heute nicht auf. Ob ein Modell dieser Größe schlechte Scans, Handschrift oder
-dichte Tabellen so sicher liest wie ein eigenes OCR-Modell, muss eine Messung mit echten Seiten
-zeigen, so wie die Agenten-Messung für Text.
+So arbeitet Argus damit: Die Installation lädt die Zusatzdatei mit (`LLM_MMPROJ_FILE`), der
+Modell-Dienst lädt sie beim Start, und das Backend fragt ihn, ob er Bilder annimmt. Dann
+erscheint im Chat der Knopf für Bilder. Eine PDF-Seite mit weniger als 20 Zeichen Text, aber mit
+einem Bild, gilt als Scan: Das Modell schreibt sie ab, Tabellen als Tabellen, und der Text steht
+an der Stelle der Seite, gekennzeichnet als „aus dem Bild gelesen“. Bilddateien liest es
+genauso. Das gilt für die Aufnahme in die Dokumentensuche, für `read_document` und für den
+Monitor. Was dabei herauskommt, zählt wie jeder Dokumenttext als Firmendaten. Alles läuft
+über das lokale Modell, nie über ein Cloud-Modell. Fehlt die Zusatzdatei, läuft Argus wie
+vorher ohne Bildeingabe, und Scans bleiben leer.
+
+Geprüft mit Qwen3.6 an einer schief gescannten, verrauschten Rechnung und einem Foto eines
+Typenschilds: Rechnungsnummer, Beträge, IBAN, Tabelle und Seriennummer kamen richtig heraus,
+ein Wort mit einem fehlenden Buchstaben. Eine Seite dauert gut 10 s. Der Encoder liegt im RAM
+und braucht keinen Grafikspeicher (Stellschrauben unten). Ob das Modell schlechte Scans,
+Handschrift oder dichte Tabellen so sicher liest wie ein eigenes OCR-Modell, muss noch eine
+Messung mit echten Firmenseiten zeigen, so wie die Agenten-Messung für Text.
 
 ## Was bis zum Einsatz fehlt
 
@@ -333,9 +350,6 @@ vielen Personen fehlen vor allem:
 
 - **Anmeldung über das Firmenverzeichnis (SSO)** statt eigener Konten.
 - **Rechte der Quellen:** Die Wissensbasis ist für alle Konten dieselbe.
-- **Bilder und Scans:** Die Modelle können Bilder lesen, in Argus ist das noch nicht
-  eingeschaltet. Gescannte PDFs ohne Textebene werden nicht aufgenommen
-  ([Text und Bild](#das-modell-ist-austauschbar)).
 - **Betrieb:** ein Modell-Dienst für viele gleichzeitige Nutzer. Eine geführte Installation
   und einen TLS-Proxy gibt es (siehe [Einrichten](#einrichten) und
   [Betrieb auf einem Server](#betrieb-auf-einem-server)).
@@ -556,11 +570,10 @@ sollte sie kennen.
   gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) setzt die
   Installation `ARGUS_MOUNT_LABEL=,z`; auf einem echten SELinux-System ist das noch nicht
   ausprobiert.
-- **Bilder und Scans:** Oberfläche und Backend können Bilder an das Modell weitergeben
-  (`LLM_ENABLE_MULTIMODAL`). Der Modell-Dienst lädt die dafür nötige Zusatzdatei (mmproj)
-  noch nicht; Bildeingabe ist aus und nicht getestet. PDFs ohne Textebene (Scans) überspringt
-  die Aufnahme in die Dokumentensuche. Der vorgesehene Weg ist das multimodale Modell selbst,
-  kein eigenes OCR.
+- **Bilder und Scans:** Das Modell liest Scans und Bilder selbst, geprüft an Testseiten. Eine
+  Messung mit echten Firmenseiten fehlt: schlechte Scans, Handschrift, dichte Tabellen,
+  Zeichnungen. Gescannte Seiten liest es nacheinander, je Datei höchstens 30 Seiten und
+  15 Minuten. Große Scan-Archive brauchen dafür Zeit oder einen eigenen Durchlauf.
 - **Grenzen der Sperre:** Vom Nutzer selbst eingefügte Bilder und Texte zählen nicht als
   Firmendaten. Der Modus `allow` vergleicht Fingerabdrücke (Kennungen, E-Mail, IBAN,
   Wortfolgen) und entschlüsselt dafür auch gängige Umkodierungen (Base64, Base32, Hex, gzip,
@@ -780,6 +793,17 @@ bisher nur Qwen3.6-35B-A3B; die Werte unten gelten für dieses Modell auf einer 
 - `LLM_MTP=true`, `LLM_MTP_DRAFT=3` – spekulatives Dekodieren über den MTP-Kopf des Modells.
   Qwen3.6 trägt ihn in der Modelldatei. Bringt ein Modell ihn als eigene Datei mit (Gemma 4:
   `mtp-gemma-4-26B-A4B-it.gguf`), steht ihr Name in `LLM_MTP_MODEL_FILE`.
+- `LLM_MMPROJ_FILE` – Bild-Encoder des Modells (Zusatzdatei im Modellordner). Leer heißt:
+  keine Bildeingabe. Fehlt die Datei, startet der Modell-Dienst ohne Bildeingabe und meldet
+  das im Log. Ob Bilder gehen, fragt das Backend selbst beim Modell-Dienst ab (`/props`);
+  `LLM_ENABLE_MULTIMODAL=true` oder `false` erzwingt es.
+- `LLM_MMPROJ_OFFLOAD=false` – der Encoder liegt im RAM. So bleibt es bei ~14,4 GB VRAM, und
+  ein Bild dauert ~11 s. Mit `true` liegt er auf der Karte, ein Bild dauert ~5 s. Dann
+  zusätzlich `LLM_N_CPU_MOE=26`, sonst steigt der VRAM auf ~15,6 GB. Mit 26 sind es ~15,1 GB,
+  das Einlesen ist ~2,5 % langsamer, das Schreibtempo gleich.
+- `SCAN_MAX_PAGES=30`, `SCAN_MAX_SECONDS=900` – Obergrenzen je Datei für gescannte Seiten.
+  Darüber steht im Text, dass Seiten fehlen. `VISION_MAX_SIDE=1600` (Pixel, längste Seite),
+  `VISION_MAX_TOKENS=4096` und `VISION_TIMEOUT_SECONDS=180` gelten je Bild.
 - `LLM_TEMPERATURE`, `LLM_TOP_P`, `LLM_TOP_K`, `PRESENCE_PENALTY` – Sampling der Antworten.
   Leer gelten die Werte für Qwen (0,6 mit Denken, 0,7 ohne; top_k 20; presence_penalty 1,5).
   Für ein anderes Modell die Werte aus seiner Modellkarte eintragen, für Gemma 4 etwa

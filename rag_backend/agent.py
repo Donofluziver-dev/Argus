@@ -1975,12 +1975,17 @@ async def read_document(path: str) -> str:
         if not cpath.is_file():
             return "ERROR: Document not found or access denied." if user_role not in (None, "admin") else f"ERROR: Path does not exist or is invalid: {path}"
 
-        #--- Unterscheidung: Bild vs. nicht unterstuetzter Dateityp vs. leer/Scan
-        from rag_backend.ingest import READABLE_EXTENSIONS as _readable_exts
+        #--- Unterscheidung: Bild vs. nicht unterstuetzter Dateityp vs. leer/Scan.
+        #--- Mit der Bildeingabe des Modells liest load_file Bilder und Scans selbst.
+        from rag_backend import vision
+        from rag_backend.ingest import readable_extensions
+        vision_on = await asyncio.to_thread(vision.vision_available)
+        _readable_exts = readable_extensions(vision_on)
         _img_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         suffix = cpath.suffix.lower()
-        if suffix in _img_exts:
-            return f"ERROR: '{cpath.name}' is an image. Images cannot be read as text documents."
+        if suffix in _img_exts and suffix not in _readable_exts:
+            return (f"ERROR: '{cpath.name}' is an image. Images cannot be read as text documents "
+                    f"without the model's image input (LLM_MMPROJ_FILE), which is off.")
         if suffix not in _readable_exts:
             ext_list = ", ".join(sorted(_readable_exts))
             return (f"ERROR: File type '{suffix or 'unknown'}' is not supported. "
@@ -1992,8 +1997,11 @@ async def read_document(path: str) -> str:
             return "ERROR: Failed to read document."
 
         if not text or not text.strip():
+            hint = ("" if vision_on else
+                    " Scans can only be read with the model's image input (LLM_MMPROJ_FILE), "
+                    "which is off.")
             return (f"ERROR: No text could be extracted from '{cpath.name}' -- scanned/image "
-                    f"PDF or empty document. OCR is not available.")
+                    f"PDF or empty document.{hint}")
 
         #--- Deckel gegen Kontext-Ueberlauf. Der Rest der Unterhaltung braucht auch
         #--- Platz; was abgeschnitten wurde, steht im Kopf, damit das Modell es weiss

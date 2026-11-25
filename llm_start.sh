@@ -21,6 +21,22 @@ if [ -n "${LLM_CTX_PER_SLOT:-}" ]; then
   PER_SLOT="--kv-unified-per-slot ${LLM_CTX_PER_SLOT}"
 fi
 
+# Bildeingabe: Die Zusatzdatei (mmproj) bringt den Bild-Encoder des Modells. Fehlt
+# sie, startet das Modell ohne Bildeingabe statt gar nicht; das Backend fragt /props.
+# Standard: Encoder im RAM (~1 GB VRAM gespart, ein Bild ~11 statt ~5 s auf der
+# 16-GB-Karte). LLM_MMPROJ_OFFLOAD=true legt ihn auf die Grafikkarte.
+VISION=""
+if [ -n "${LLM_MMPROJ_FILE:-}" ]; then
+  if [ -f "/models/${LLM_MMPROJ_FILE}" ]; then
+    VISION="--mmproj /models/${LLM_MMPROJ_FILE}"
+    if [ "${LLM_MMPROJ_OFFLOAD:-false}" != "true" ]; then
+      VISION="$VISION --no-mmproj-offload"
+    fi
+  else
+    echo "WARNUNG: /models/${LLM_MMPROJ_FILE} fehlt, Bildeingabe bleibt aus." >&2
+  fi
+fi
+
 # --load-mode none (kein mmap): das Modell liegt auf einem Windows-Bind-Mount;
 # mmap wuerde ausgelagerte Experten ueber das langsame Dateisystem nachladen.
 exec /app/llama-server \
@@ -39,4 +55,4 @@ exec /app/llama-server \
   --jinja --reasoning-format deepseek \
   --load-mode none \
   --metrics \
-  $SPEC
+  $SPEC $VISION

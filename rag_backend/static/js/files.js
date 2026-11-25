@@ -143,7 +143,7 @@
       try {
         const res = await apiPost('/v1/dashboard/uploads/' + encodeURIComponent(name) + '/ingest');
         (res.results || []).forEach(function (r) {
-          zeilen.push(name + ': ' + (r.status === 'ok' ? (r.chunks || 0) + ' Chunks' : (r.error || r.status)));
+          zeilen.push((r.file || name) + ': ' + (r.status === 'ok' ? (r.chunks || 0) + ' Chunks' : (r.message || r.status)));
         });
         if (!(res.results || []).length) zeilen.push(name + ': ' + (res.status || 'ok'));
       } catch (e) {

@@ -293,6 +293,27 @@ def test_ingest_all_nimmt_nur_lesbare_dateien(client, tmp_path, monkeypatch):
     assert gesehen == ["notiz.txt"]
 
 
+def test_upload_ingest_meldet_die_zahl_der_abschnitte(client, tmp_path, monkeypatch):
+    #--- Die Oberflaeche zeigt "<n> Chunks"; frueher fehlte das Feld und es stand
+    #--- immer "0 Chunks" da.
+    from rag_backend import main as m
+    import rag_backend.agent as ag
+
+    _make_account(client, "chef", "einLangesPasswort", "admin")
+    ordner = tmp_path / "Uploads"
+    ordner.mkdir()
+    (ordner / "notiz.txt").write_text("Inhalt fuer den Index.", encoding="utf-8")
+    monkeypatch.setattr(m, "_UPLOAD_DIR", ordner)
+
+    async def _fake_store(name, text, source=None):
+        return f"Successfully indexed: {name} (3 chunks)."
+
+    monkeypatch.setattr(ag, "_store_text_in_qdrant", _fake_store)
+    r = client.post("/v1/dashboard/uploads/notiz.txt/ingest", headers=DASH_ORIGIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["chunks"] == 3
+
+
 def test_ingest_all_braucht_admin_und_csrf(client, tmp_path, monkeypatch):
     from rag_backend import main as m
 

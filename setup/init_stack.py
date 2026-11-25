@@ -394,6 +394,15 @@ def main(argv: list[str] | None = None) -> int:
             prof_list.append("web")
         values["COMPOSE_PROFILES"] = ",".join(prof_list)
         values["ARGUS_ENV_VERSION"] = "2"
+    #--- Bildeingabe: Wer das Standardmodell nutzt und den Schluessel noch gar nicht
+    #--- hat, bekommt dessen Zusatzdatei (mmproj) eingetragen. Ein bewusst leerer
+    #--- Eintrag bleibt leer; zu einem eigenen Modell passt die Datei nicht.
+    template_env = parse_env(template)
+    if ("LLM_MMPROJ_FILE" not in current and template_env.get("LLM_MMPROJ_FILE")
+            and current.get("LLM_MODEL_FILE") == template_env.get("LLM_MODEL_FILE")):
+        values["LLM_MMPROJ_FILE"] = template_env["LLM_MMPROJ_FILE"]
+    if "LLM_MMPROJ_OFFLOAD" not in current and "LLM_MMPROJ_OFFLOAD" in template_env:
+        values["LLM_MMPROJ_OFFLOAD"] = template_env["LLM_MMPROJ_OFFLOAD"]
     if os.name != "nt":
         uid, gid = resolve_linux_ugid()
         if not current.get("ARGUS_UID"):

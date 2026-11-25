@@ -13,6 +13,12 @@
           "target": "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf",
           "size": 22853663008,
           "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
+        },
+        {
+          "path": "mmproj-F16.gguf",
+          "target": "mmproj-Qwen3.6-35B-A3B-F16.gguf",
+          "size": 899283584,
+          "sha256": "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160"
         }
       ]
     },

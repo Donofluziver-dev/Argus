@@ -15,6 +15,8 @@ from qdrant_client.http.models import PointStruct, Filter, FieldCondition, Match
 import docx
 import pypdfium2 as pdfium
 
+from rag_backend import vision
+
 # Fallbacks spiegeln Setup2.LLM_CONFIG und muessen mit dem on-demand-Ingest
 # in agent.py uebereinstimmen.
 CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE", 1536))
@@ -296,6 +298,14 @@ READABLE_EXTENSIONS = frozenset({
 })
 
 
+def readable_extensions(vision_on: bool | None = None) -> frozenset:
+    '''READABLE_EXTENSIONS plus Bilder, wenn das Modell Bilder lesen kann. vision_on
+    vorgeben, wo die Abfrage schon gemacht ist (sie dauert bis zu 2 s).'''
+    if vision_on is None:
+        vision_on = vision.vision_available()
+    return READABLE_EXTENSIONS | vision.IMAGE_EXTENSIONS if vision_on else READABLE_EXTENSIONS
+
+
 def load_file(filepath: Path) -> Optional[str]:
     try:
         if not filepath.is_file():
@@ -317,14 +327,27 @@ def load_file(filepath: Path) -> Optional[str]:
         if suffix == ".pdf":
             try:
                 doc = pdfium.PdfDocument(str(filepath))
-                parts = []
-                for i in range(len(doc)):
-                    page = doc[i]
-                    tp = page.get_textpage()
-                    parts.append(tp.get_text_range())
-                    tp.close()
-                    page.close()
-                doc.close()
+                try:
+                    parts, scan_pages = [], []
+                    for i in range(len(doc)):
+                        page = doc[i]
+                        tp = page.get_textpage()
+                        page_text = tp.get_text_range()
+                        tp.close()
+                        #--- Seite ohne Textebene, aber mit Bild: ein Scan.
+                        if len(page_text.strip()) < 20 and vision.page_has_images(page):
+                            scan_pages.append(i)
+                        parts.append(page_text)
+                        page.close()
+                    if scan_pages and vision.vision_available():
+                        n = vision.fill_scanned_pages(doc, parts, scan_pages, filepath.name)
+                        print(f"  -> {filepath.name}: {n} von {len(scan_pages)} Scan-Seite(n) "
+                              f"mit der Bildeingabe gelesen.")
+                    elif scan_pages:
+                        print(f"  -> {filepath.name}: {len(scan_pages)} Scan-Seite(n) ohne Text; "
+                              f"lesbar erst mit der Bildeingabe des Modells (LLM_MMPROJ_FILE).")
+                finally:
+                    doc.close()
                 text_content = "\n".join(parts)
             except Exception:
                 import pdfplumber
@@ -380,6 +403,12 @@ def load_file(filepath: Path) -> Optional[str]:
         elif suffix in {".txt", ".md", ".json", ".yaml", ".yml", ".csv",
                         ".py", ".ini", ".cfg"}:
             text_content = filepath.read_text("utf-8", errors="ignore")
+
+        elif suffix in vision.IMAGE_EXTENSIONS:
+            if not vision.vision_available():
+                print(f"  -> Bild {filepath.name} uebersprungen: Bildeingabe des Modells ist aus.")
+                return None
+            text_content = vision.read_image_file(filepath)
 
         else:
             print(f"  -> Unbekannter Dateityp uebersprungen: {filepath.name}")
