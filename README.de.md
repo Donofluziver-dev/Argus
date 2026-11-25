@@ -111,10 +111,14 @@ kann ([Warum Argus sicher ist](#warum-argus-sicher-ist)).
 
 ![Ein Benutzer hängt eine Tabelle an: Argus liest sie, wertet sie in der Sandbox aus und legt das Ergebnis als CSV zum Herunterladen ab](docs/images/datei-auswertung.png)
 
+![Ein Foto im Chat: Argus liest das Typenschild eines Motors und nennt Typ, Seriennummer, Leistung und Nennstrom](docs/images/bild-im-chat.png)
+
+![Frage an ein gescanntes Prüfprotokoll ohne Textebene: Die Suche findet den Scan, Argus nennt die zwei Merkmale außerhalb der Toleranz und rechnet die Abweichung aus](docs/images/scan-im-chat.png)
+
 ![Monitor für Administratoren: Durchsatz, Auslastung, Werkzeugaufrufe, Dokumente, Auditprotokoll](docs/images/monitor.png)
 
 *Die Aufnahmen zeigen den Stand dieses Repos mit dem Modell Qwen3.6-35B-A3B. Dokumente,
-Firmen und Namen darin sind erfunden (`eval/retrieval/corpus`).*
+Firmen und Namen darin sind erfunden (`eval/retrieval/corpus`, `eval/scans`).*
 
 ## Gemessen
 
@@ -621,7 +625,7 @@ Installation führt durch diese Schritte:
    welchem Zertifikat (siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
 5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
    `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte.
-6. **Modelle laden** (rund 25 GB): jede Datei aus `setup/models.json`, festgelegt auf eine
+6. **Modelle laden** (rund 27 GB, darin 0,9 GB Bild-Encoder): jede Datei aus `setup/models.json`, festgelegt auf eine
    Revision bei Hugging Face und nach dem Laden per SHA-256 geprüft. Abgebrochene Downloads
    setzen beim nächsten Lauf fort. Vorhandene Dateien werden nur geprüft.
 7. **Stapel bauen und starten** und warten, bis Argus antwortet. Am Ende kopiert sie unter
@@ -699,7 +703,32 @@ Konto wird Administrator und legt weitere Konten unter *Monitor › Konten* an.
 
 **Dokumente:** Als Administrator Dateien im Monitor hochladen, dann unter *Monitor ›
 Überblick* „Ingest starten“. Zum Ausprobieren eignen sich die 30 erfundenen Dokumente in
-`eval/retrieval/corpus`.
+`eval/retrieval/corpus`. Gescannte PDFs und Bilder gehen denselben Weg: Eine Seite mit weniger
+als 20 Zeichen Text und einem Bild schreibt das Modell ab, je Datei höchstens 30 Seiten
+(`SCAN_MAX_PAGES`).
+
+**Bilder und Scans in einer bestehenden Installation einschalten.** Eine neue Installation
+bringt die Bildeingabe von selbst mit. Bei einer älteren:
+
+1. Den neuen Stand holen (`git pull` oder ein neues Paket).
+2. `install.cmd` beziehungsweise `./install.sh` erneut starten. Schritt 5 trägt
+   `LLM_MMPROJ_FILE` und `LLM_MMPROJ_OFFLOAD` in die `.env` ein, Schritt 6 lädt den
+   Bild-Encoder (`mmproj-Qwen3.6-35B-A3B-F16.gguf`, 0,9 GB) und prüft ihn per SHA-256,
+   Schritt 7 baut und startet neu. Wer nur die Datei laden will: `--models-only`, danach
+   `docker compose up -d --build llm rag-backend`.
+3. Prüfen: Im Chat steht neben der Büroklammer ein Knopf für Bilder, und das Log des
+   Modell-Dienstes meldet `loaded multimodal model`. Fehlt die Datei, steht dort eine Warnung,
+   und Argus läuft ohne Bildeingabe weiter.
+
+Mit einem anderen Modell als Qwen3.6 trägt das Update nichts ein; dessen eigene Zusatzdatei
+gehört dann von Hand in `LLM_MMPROJ_FILE` (siehe [Modell](#das-modell-ist-austauschbar)).
+
+Was das kostet, gemessen auf der 16-GB-Karte: Der Encoder liegt im RAM (rund 1 GB), der
+Grafikspeicher bleibt bei rund 14,4 GB. Ein Bild oder eine Scan-Seite dauert 10 bis 15 s und
+lastet dabei alle Kerne der CPU aus. Auf der Karte geht es in rund 5 s
+(`LLM_MMPROJ_OFFLOAD=true` und `LLM_N_CPU_MOE=26`, dann rund 15,1 GB). Scanner auf 150 bis
+200 dpi stellen: Mehr kommt beim Modell nicht an, weniger kostet Ziffern
+([Messung](eval/scans/README.md)).
 
 ### Von Hand
 
@@ -708,8 +737,8 @@ Konto wird Administrator und legt weitere Konten unter *Monitor › Konten* an.
    `C:\Argus_Models`). Legt `API_Tokens/` und die `.env` an.
 2. `.env` prüfen: Modell und `LLM_N_CPU_MOE` passend zur Grafikkarte.
 3. Die Modelle aus `setup/models.json` nach `ARGUS_MODELS_DIR` legen (Repo, Revision, Datei
-   und Prüfsumme stehen dort). Die Dienste hängen in einem Netz ohne Ausgang und laden selbst
-   nichts nach.
+   und Prüfsumme stehen dort), auch den Bild-Encoder (`mmproj-…`). Die Dienste hängen in
+   einem Netz ohne Ausgang und laden selbst nichts nach.
 4. `docker compose up -d --build`. Der erste Bau dauert, weil der Sprachdienst seine Modelle
    (4,4 GB) lädt und übersetzt. Ohne Sprache: `COMPOSE_PROFILES=tracing` in der `.env`.
 

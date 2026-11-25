@@ -85,10 +85,14 @@ an audit log that can go to the company's SIEM ([Why Argus is secure](#why-argus
 
 ![A user attaches a table: Argus reads it, analyses it in the sandbox and offers the result as a CSV download](docs/images/datei-auswertung.png)
 
+![A photo in the chat: Argus reads the type plate of a motor and names type, serial number, power and rated current](docs/images/bild-im-chat.png)
+
+![Question about a scanned test report without a text layer: search finds the scan, Argus names the two characteristics out of tolerance and computes the deviation](docs/images/scan-im-chat.png)
+
 ![Monitor for administrators: throughput, load, tool calls, documents, audit log](docs/images/monitor.png)
 
 *Screenshots show this repository's state with the model Qwen3.6-35B-A3B. Documents, companies
-and names in them are invented (`eval/retrieval/corpus`).*
+and names in them are invented (`eval/retrieval/corpus`, `eval/scans`).*
 
 ## Measured
 
@@ -399,7 +403,8 @@ the mounted secrets while other users of the machine cannot. Install without `su
 member of the `docker` group; the installer says so when the group is missing and warns when
 it runs under `sudo`. With SELinux enforcing it offers the `:z` label for all bind mounts
 (`ARGUS_MOUNT_LABEL=,z`) and refuses it for system folders or a whole home directory. Requirements: an NVIDIA GPU
-(measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models.
+(measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models (27 GB, including
+the 0.9 GB image encoder).
 
 **Guided setup:** run `install.cmd` on Windows (double-click) or `./install.sh` on Linux. It
 finds or installs Python (asking first), checks Docker (on Windows it offers to install Docker
@@ -453,6 +458,20 @@ Then open `http://127.0.0.1:7860`. The page asks for a user name, a password and
 token from `.env` (`DASHBOARD_SETUP_TOKEN`). This account becomes the administrator; it creates
 further accounts under *Monitor › Konten*. Manual setup without the installer: see
 [README.de.md](README.de.md#von-hand).
+
+**Images and scans in an existing installation.** A new installation has image input from the
+start. For an older one: get the new state (`git pull` or a new bundle) and run `install.cmd`
+or `./install.sh` again. It adds `LLM_MMPROJ_FILE` and `LLM_MMPROJ_OFFLOAD` to `.env`,
+downloads the image encoder (`mmproj-Qwen3.6-35B-A3B-F16.gguf`, 0.9 GB, checked by SHA-256)
+and rebuilds and restarts the stack; `--models-only` followed by
+`docker compose up -d --build llm rag-backend` does only the file. Afterwards the chat shows an
+image button next to the paper clip, and the model service logs `loaded multimodal model`.
+With a model other than Qwen3.6 nothing is added; its own projector file goes into
+`LLM_MMPROJ_FILE` by hand. Cost on the 16 GB card: the encoder sits in RAM (about 1 GB), GPU
+memory stays at about 14.4 GB, an image or scanned page takes 10 to 15 s with all CPU cores
+busy; on the GPU it takes about 5 s (`LLM_MMPROJ_OFFLOAD=true` with `LLM_N_CPU_MOE=26`, about
+15.1 GB). Scan at 150 to 200 dpi: more does not reach the model, less costs digits
+([measurement](eval/scans/README.md)).
 
 For a server with several users the stack brings Caddy as a TLS proxy (compose profile
 `proxy`, off by default). The installer sets it up when it is given a server address, for

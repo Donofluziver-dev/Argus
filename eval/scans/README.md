@@ -21,6 +21,8 @@ eval/scans/
 Die Seiten entstehen aus Code, damit keine Bilddateien im Repo liegen und jede Messung
 dieselben Seiten sieht. `--ablage <Ordner>` legt Seitenbilder und Abschriften zum Nachsehen ab.
 
+![Ausschnitte aus sechs Testseiten: Fax, Lieferschein als Handyfoto, Prüfprotokoll mit dichter Tabelle, handschriftliche Telefonnotiz, technische Zeichnung, Brief mit Eingangsstempel über dem Betrag](../../docs/images/scan-testseiten.png)
+
 | Seite | Was sie prüft |
 |---|---|
 | `01_rechnung_sauber` | sauberer Scan, Tabelle, Beträge, IBAN (Vergleichswert) |
