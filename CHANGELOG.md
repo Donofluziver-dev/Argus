@@ -143,6 +143,16 @@ roles, administrator and user.
   card with room to spare it also gets `LLM_UBATCH=2048` for its full image token budget. `doctor`,
   the offline bundle and `--models-only` follow the model in `.env`; a model that is not in
   `setup/models.json` is left alone.
+- **Document search and speech on the GPU or the CPU.** The installer asks for both
+  (`--suche gpu|cpu`, `--sprache gpu|cpu`) and suggests the GPU when the language model still
+  fits on the card entirely; their GPU memory is subtracted before the model is split. GPU
+  variants as separate images: embedding and reranker on the CUDA build of llama.cpp (same base
+  as the model service), speech recognition with NVIDIA's cuBLAS and cuDNN wheels
+  (`WHISPER_DEVICE=cuda`, warmed up at start), read-aloud with qwentts.cpp built for CUDA. They
+  come in through `compose/gpu-suche.yml` and `compose/gpu-sprache.yml` in `COMPOSE_FILE`; an
+  offline bundle records which variants it was built with. Measured on an RTX 5070 Ti: search
+  0.17 s instead of 3.5 s with identical hits, recognition about 8 times and read-aloud about
+  4 times faster. CI checks both files with `docker compose config` and the network rules.
 - **GPU split from the GPU memory.** The installer computes `LLM_N_CPU_MOE` and
   `LLM_MMPROJ_OFFLOAD` from the GPU memory and the model's needs in `setup/models.json`: on 16 GB
   the measured 25 layers in RAM, on a large card (about 31 GB and up for Qwen) everything on the

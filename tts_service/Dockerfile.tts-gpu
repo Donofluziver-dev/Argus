@@ -1,0 +1,81 @@
+# Vorlesen auf der Grafikkarte: qwentts.cpp mit CUDA gebaut. Die Installation bindet es ueber
+# compose/gpu-sprache.yml ein (Frage "Sprache: Grafikkarte oder CPU", --sprache gpu).
+# Bau im CUDA-Entwicklungs-Image von NVIDIA; Laufzeit auf der CUDA-Variante von llama.cpp,
+# derselben Basis wie der Modell-Dienst (Ubuntu 24.04, CUDA 12.8 mit cuBLAS).
+#
+# Build-Argumente:
+#   MODELLE_AUS  woher die 4,4 GB Sprachmodelle kommen: Vorgabe ist der Download; mit
+#                argus/tts-service:local aus einem vorhandenen CPU-Image (spart den Download)
+#   BUILD_JOBS   parallele Compiler-Laeufe (Vorgabe: alle Kerne)
+ARG MODELLE_AUS=modelle-laden
+
+FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb AS modelle-laden
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# GGUF-Modelle wie im CPU-Image, gleicher Commit.
+ARG GGUF_COMMIT=e0f336a048a3de02b29b8ad92969217d9ecffe3e
+ARG GGUF_URL=https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF/resolve/${GGUF_COMMIT}
+RUN mkdir -p /app/models \
+    && wget -qO /app/models/qwen-tokenizer-12hz-Q8_0.gguf          "${GGUF_URL}/qwen-tokenizer-12hz-Q8_0.gguf" \
+    && wget -qO /app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf "${GGUF_URL}/qwen-talker-1.7b-customvoice-Q8_0.gguf" \
+    && wget -qO /app/models/qwen-talker-1.7b-base-Q8_0.gguf        "${GGUF_URL}/qwen-talker-1.7b-base-Q8_0.gguf"
+
+FROM ${MODELLE_AUS} AS modelle
+
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:520292dbb4f755fd360766059e62956e9379485d9e073bbd2f6e3c20c270ed66 AS bau
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git cmake build-essential python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY tts-server.patched.cpp /tmp/tts-server.patched.cpp
+COPY patch_backend.py /tmp/patch_backend.py
+ARG QWENTTS_COMMIT=0bf4a18b22e8bb8718d95294e9f7f45c0d4270a4
+# Ampere (86), Ada (89), Blackwell (120), dazu PTX fuer aeltere Karten ab 80.
+ARG CUDA_ARCHITECTURES="80-virtual;86-real;89-real;120a-real"
+ARG BUILD_JOBS=""
+RUN git clone https://github.com/ServeurpersoCom/qwentts.cpp.git /build/qwentts \
+    && cd /build/qwentts \
+    && git checkout ${QWENTTS_COMMIT} \
+    && git submodule update --init --recursive \
+    && cp /tmp/tts-server.patched.cpp tools/tts-server.cpp \
+    && python3 /tmp/patch_backend.py \
+    && cmake -S . -B build -DGGML_CUDA=ON -DGGML_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF \
+         -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
+    && cmake --build build --config Release -j"${BUILD_JOBS:-$(nproc)}" \
+    && mkdir -p /out/bin /out/lib \
+    && find build -maxdepth 3 -type f '(' -name tts-server -o -name qwen-tts -o -name qwen-codec ')' -exec cp {} /out/bin/ ';' \
+    && ( find build -maxdepth 3 -name 'lib*.so*' -exec cp -P {} /out/lib/ ';' || true )
+
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b11977@sha256:0283744a35a6e7698b4f7a2d63360233dc769ece51e84bdba7aa187a33978276
+USER 0
+# /app enthaelt llama-server und dessen ggml-Bibliotheken. Weg damit: qwentts.cpp sucht beim
+# Start Backends auch im Arbeitsordner und wuerde sonst eine fremde ggml-Version laden.
+RUN rm -rf /app && mkdir -p /app/models
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-pip ffmpeg wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn httpx
+
+COPY --from=modelle /app/models/ /app/models/
+COPY --from=bau /out/bin/ /usr/local/bin/
+COPY --from=bau /out/lib/ /usr/local/lib/
+RUN ldconfig
+
+COPY app.py /app/app.py
+# Das Ubuntu-Image bringt einen Nutzer mit uid 1000 mit; ttsuser bekommt dieselbe uid wie
+# im CPU-Image.
+RUN (id -u ubuntu >/dev/null 2>&1 && userdel -r ubuntu || true) && useradd -m -u 1000 ttsuser
+RUN pip install --no-cache-dir --break-system-packages cryptography
+USER ttsuser
+ENV QWEN_TALKER=/app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf \
+    QWEN_BASE_TALKER=/app/models/qwen-talker-1.7b-base-Q8_0.gguf \
+    QWEN_CODEC=/app/models/qwen-tokenizer-12hz-Q8_0.gguf \
+    QWEN_LANG=auto \
+    QWEN_VOICE= \
+    QWEN_SERVER_PORT=8080 \
+    OMP_NUM_THREADS=1 \
+    GGML_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=1
+ENTRYPOINT []
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]

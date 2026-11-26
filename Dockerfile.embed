@@ -1,7 +1,10 @@
 # Embedding (bge-m3) und Reranking (bge-reranker-v2-m3) fuer die Dokumentensuche der
-# Desktop-App. Dasselbe llama.cpp-Build wie Dockerfile.llm, aber die CPU-Variante:
-# der Grafikspeicher bleibt fuer Qwen und seinen Kontext.
-FROM ghcr.io/ggml-org/llama.cpp:server-b11977@sha256:01c2bc28d51291536df2ccebe5c6af1cdec9ea9b2bd98ac59556408caf96d3f8
+# Desktop-App. Dasselbe llama.cpp-Build wie Dockerfile.llm, als Vorgabe die CPU-Variante:
+# der Grafikspeicher bleibt fuer das Sprachmodell. Auf einer grossen Karte bindet die
+# Installation compose/gpu-suche.yml ein; das baut auf der CUDA-Variante desselben Builds
+# (= Basis von Dockerfile.llm) und setzt EMBED_GPU_LAYERS.
+ARG BASE_IMAGE=ghcr.io/ggml-org/llama.cpp:server-b11977@sha256:01c2bc28d51291536df2ccebe5c6af1cdec9ea9b2bd98ac59556408caf96d3f8
+FROM ${BASE_IMAGE}
 USER 0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-cryptography \

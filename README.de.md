@@ -128,13 +128,13 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Was | Wert | Wie gemessen |
 |---|---|---|
 | Dokumentensuche: richtiges Dokument an erster Stelle | 96 % (vor dem Umbau 67 %) | 60 Fragen an 30 Dokumente, `eval/retrieval` |
-| Dauer einer Dokumentensuche | 3,5 s (vorher 19,9 s) | ebenda, Suche und Bewertung auf der CPU |
+| Dauer einer Dokumentensuche | 3,5 s (vorher 19,9 s), auf der Grafikkarte 0,17 s | ebenda, Suche und Bewertung auf der CPU oder [auf der Grafikkarte](#dokumentensuche-und-sprache-auf-der-grafikkarte) |
 | Aufgaben, die der ganze Agent richtig löst | 91 von 96 (mit Gemma 4: 94 von 96, [Vergleich](#das-modell-ist-austauschbar)) | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
 | Scans, Fotos und Handschrift abschreiben | 111 von 111 Prüfungen auf 11 Testseiten; falsche Zahlen erst unter 150 dpi oder bei 4 pt Schrift | Fax, Handyfoto, Formular, Zeichnung, Stempel und Belastungsreihen, `eval/scans` |
-| Automatische Tests | 544 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 554 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -660,7 +660,9 @@ Geheimnisse und Daten, wie sie sind.
 Grafikspeicher: Die Installation liest ihn aus und verteilt das Modell selbst. Auf 16 GB liegen
 bei Qwen 25 Schichten mit ihren Experten im RAM und der Bild-Encoder ebenfalls; ab rund 31 GB
 (Gemma: 24 GB) liegt alles auf der Karte, Gemma bekommt ab rund 26 GB dazu das volle Budget an
-Bild-Token. Ein Server mit großer Karte (etwa 94 GB) braucht also nichts einzustellen. Eigene Werte in der `.env` bleiben bei einem zweiten Lauf, solange das Modell
+Bild-Token. Auf einer großen Karte schlägt sie außerdem vor, Dokumentensuche und Sprache auf
+die Grafikkarte zu legen ([GPU oder CPU](#dokumentensuche-und-sprache-auf-der-grafikkarte)).
+Ein Server mit großer Karte (etwa 94 GB) braucht also nichts einzustellen. Eigene Werte in der `.env` bleiben bei einem zweiten Lauf, solange das Modell
 gleich bleibt.
 
 ### Geführte Installation
@@ -675,7 +677,8 @@ Installation führt durch diese Schritte:
    Anleitung und prüft das NVIDIA Container Toolkit, installiert aber nichts selbst.
 3. **Grafikkarte und Arbeitsspeicher** prüfen und vor zu wenig davon warnen.
 4. **Fragen:** Arbeitsordner, Modellordner, Sprachmodell (Qwen3.6 oder Gemma 4), Betrieb nur
-   auf diesem Rechner oder als Server.
+   auf diesem Rechner oder als Server, und ob Dokumentensuche und Sprache auf der Grafikkarte
+   oder der CPU laufen ([GPU oder CPU](#dokumentensuche-und-sprache-auf-der-grafikkarte)).
    Als Server fragt sie nach der Adresse, ob der mitgelieferte TLS-Proxy laufen soll und mit
    welchem Zertifikat (siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
 5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
@@ -689,7 +692,8 @@ Installation führt durch diese Schritte:
    Windows auf Wunsch den Einrichtungs-Schlüssel in die Zwischenablage und öffnet den Browser.
 
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
-Optionen: `--yes` (alle Vorgaben annehmen), `--llm qwen|gemma`, `--workspace`, `--models`, `--server-url`,
+Optionen: `--yes` (alle Vorgaben annehmen), `--llm qwen|gemma`, `--suche gpu|cpu`,
+`--sprache gpu|cpu`, `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
 `--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <ordner>`,
 `--image-prefix` / `--image-version`,
@@ -786,6 +790,40 @@ lastet dabei alle Kerne der CPU aus. Auf der Karte geht es in rund 5 s
 (`LLM_MMPROJ_OFFLOAD=true` und `LLM_N_CPU_MOE=26`, dann rund 15,1 GB). Scanner auf 150 bis
 200 dpi stellen: Mehr kommt beim Modell nicht an, weniger kostet Ziffern
 ([Messung](eval/scans/README.md)).
+
+### Dokumentensuche und Sprache auf der Grafikkarte
+
+Einbettung, Reranker, Spracherkennung und Vorlesen laufen als Vorgabe auf der CPU, weil auf
+einer 16-GB-Karte das Sprachmodell den Grafikspeicher braucht. Auf einer großen Karte kommen
+sie auf Wunsch dazu. Die Installation fragt für die Dokumentensuche (Einbettung und Reranker)
+und für die Sprache (Erkennung und Vorlesen) je „Grafikkarte oder CPU“ (`--suche gpu|cpu`,
+`--sprache gpu|cpu`). Vorgeschlagen wird die Grafikkarte, wenn danach das Sprachmodell noch
+ganz auf die Karte passt; auf 16 GB also die CPU, auf einer Karte mit 94 GB beides. Was die
+Dienste belegen, zieht sie von der Aufteilung des Sprachmodells ab.
+
+Gemessen auf der RTX 5070 Ti, das Sprachmodell dafür mit mehr Schichten im RAM:
+
+| | CPU | Grafikkarte | Grafikspeicher |
+|---|---|---|---|
+| Dokumentensuche, eine Suche (Median, 60 Fragen) | 3,5 s | 0,17 s | 2,0 GB für beide |
+| 30 Dokumente einlesen | 35 s | 2 s | |
+| Treffer an erster Stelle | 96 % | 96 % | |
+| 12 s Sprache erkennen | 2,4 bis 4 s | 0,3 s | 2,2 GB |
+| Vorlesen, je Sekunde Sprache | 1,3 s | 0,35 s | 2,2 GB, beim Sprechen rund 3 GB |
+
+Die Spracherkennung richtet sich auf der Grafikkarte beim Start ein (rund 10 s), damit der
+erste Aufruf nicht wartet. Die Werte für die Vorschläge der Installation haben etwas Luft:
+Suche 2,5 GB, Sprache 5,5 GB.
+
+Technisch sind das eigene Images (`…-gpu`) und je Gruppe eine Compose-Datei
+(`compose/gpu-suche.yml`, `compose/gpu-sprache.yml`), die die Installation über
+`COMPOSE_FILE` in der `.env` einbindet. Einbettung und Reranker nutzen dasselbe llama.cpp in
+der CUDA-Variante (das Basis-Image des Modell-Dienstes), die Spracherkennung faster-whisper
+mit den CUDA-Bibliotheken von NVIDIA (rund 1,5 GB mehr im Image), das Vorlesen qwentts.cpp
+mit CUDA gebaut. Dessen erster Bau lädt das CUDA-Entwicklungs-Image von NVIDIA (rund 4 GB)
+und kompiliert einige Minuten. Fertige Images aus einer Registry gibt es nur für die CPU; ein
+Offline-Paket enthält die GPU-Varianten, wenn es auf einem Rechner mit dieser Einstellung
+gebaut wurde.
 
 ### Von Hand
 

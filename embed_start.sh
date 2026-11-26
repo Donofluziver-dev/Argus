@@ -11,6 +11,12 @@ case "${EMBED_MODE:-}" in
   *) echo "EMBED_MODE muss embedding oder reranking sein" >&2; exit 1 ;;
 esac
 
+# Auf der Grafikkarte (compose/gpu-suche.yml, CUDA-Image): alle Schichten dorthin.
+GPU=""
+if [ "${EMBED_GPU_LAYERS:-0}" -gt 0 ] 2>/dev/null; then
+  GPU="--n-gpu-layers ${EMBED_GPU_LAYERS}"
+fi
+
 # Nicht-kausale Modelle brauchen jede Eingabe vollstaendig in einem Micro-Batch:
 # ubatch = ctx = 8192 Token (Hoechstlaenge von bge-m3).
 exec /app/llama-server \
@@ -22,4 +28,5 @@ exec /app/llama-server \
   --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 \
   --parallel 1 \
   --threads "${EMBED_THREADS:-4}" \
-  --load-mode none
+  --load-mode none \
+  $GPU

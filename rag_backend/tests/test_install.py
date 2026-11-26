@@ -930,9 +930,10 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     assert env2.get("COMPOSE_PROFILES", "") == "voice,tracing,web"
     assert env2.get("ARGUS_TRUSTED_PROXIES", "") == ""
 
-    # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme -> Sprache Ja -> Tracing Ja -> Web Ja)
+    # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme -> Sprache Ja -> Tracing Ja
+    #    -> Web Ja -> Suche CPU -> Sprache CPU)
     (repo / ".env").unlink()
-    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "j", "j", "j", "n", "n"])
+    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "j", "j", "j", "2", "2", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     rc3 = installer.main([
         "--no-models", "--no-start",

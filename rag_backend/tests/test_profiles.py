@@ -491,9 +491,10 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     assert env2["COMPOSE_PROFILES"] == "proxy,voice"
 
     # 3. 4,4-GB-Hinweis nur mit Profil voice (ohne --no-start, Start-Frage mit 'n' beantwortet)
-    # Eingaben: 1 = lokal, Stimme = n, Tracing = j, Web = n, Start = n, Token-Zwischenablage = n, Browser = n
+    # Eingaben: 1 = lokal, Stimme = n, Tracing = j, Web = n, Suche = CPU, Start = n,
+    # Token-Zwischenablage = n, Browser = n (ohne Stimme keine Frage zur Sprache)
     capsys.readouterr()
-    answers_no_voice = iter(["1", "n", "j", "n", "n", "n", "n"])
+    answers_no_voice = iter(["1", "n", "j", "n", "2", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers_no_voice))
     (repo / ".env").unlink()
     rc3 = installer.main([
@@ -506,8 +507,9 @@ def test_installer_voice_and_tracing_switches_and_prompts(tmp_path, monkeypatch,
     env3 = init_mod.parse_env((repo / ".env").read_text(encoding="utf-8"))
     assert env3["COMPOSE_PROFILES"] == "tracing"
 
-    # Eingaben: 1 = lokal, Stimme = j, Tracing = n, Web = n, Start = n, Token-Zwischenablage = n, Browser = n
-    answers_with_voice = iter(["1", "j", "n", "n", "n", "n", "n"])
+    # Eingaben: 1 = lokal, Stimme = j, Tracing = n, Web = n, Suche = CPU, Sprache = CPU,
+    # Start = n, Token-Zwischenablage = n, Browser = n
+    answers_with_voice = iter(["1", "j", "n", "n", "2", "2", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers_with_voice))
     rc4 = installer.main([
         "--no-models",

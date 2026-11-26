@@ -460,6 +460,82 @@ def tune_llm_for_gpu(speicher: dict, vram_mib: int) -> dict[str, str]:
     return {"LLM_N_CPU_MOE": str(ohne), "LLM_MMPROJ_OFFLOAD": "false"}
 
 
+#--- Dienste, die auf Wunsch auf die Grafikkarte kommen, je Gruppe eine Compose-Datei.
+#--- gb = Grafikspeicher mit etwas Luft; gemessen auf der RTX 5070 Ti: Suche 2,0 GB,
+#--- Erkennung 2,2 GB, Vorlesen 2,2 GB im Leerlauf und rund 3 GB beim Sprechen.
+GPU_GRUPPEN = {
+    "suche": {"titel": "Dokumentensuche (Einbettung und Reranker)",
+              "datei": "compose/gpu-suche.yml", "gb": 2.5,
+              "nutzen": "eine Suche 0,2 s statt 3,5 s"},
+    "sprache": {"titel": "Sprache (Erkennung und Vorlesen)",
+                "datei": "compose/gpu-sprache.yml", "gb": 5.5,
+                "nutzen": "Vorlesen etwa 4-mal, Erkennen etwa 8-mal so schnell"},
+}
+_BASIS_COMPOSE = "docker-compose.yml"
+
+
+def compose_files_from_env(env_data: dict) -> list[str]:
+    raw = (env_data.get("COMPOSE_FILE") or "").strip()
+    if not raw:
+        return []
+    sep = env_data.get("COMPOSE_PATH_SEPARATOR") or (";" if os.name == "nt" else ":")
+    return [p.strip() for p in raw.split(sep) if p.strip()]
+
+
+def gpu_groups_from_env(env_data: dict) -> list[str]:
+    """Welche Dienstgruppen die .env auf die Grafikkarte legt (an COMPOSE_FILE erkannt)."""
+    files = compose_files_from_env(env_data)
+    return [g for g, d in GPU_GRUPPEN.items() if d["datei"] in files]
+
+
+def compose_file_value(env_data: dict, gpu: list[str]) -> str | None:
+    """Neuer Wert fuer COMPOSE_FILE: die Basis, die GPU-Dateien, andere Dateien (etwa das
+    Override des Offline-Pakets) zuletzt, damit sie gewinnen. None = nichts zu setzen."""
+    files = compose_files_from_env(env_data)
+    gpu_dateien = {d["datei"] for d in GPU_GRUPPEN.values()}
+    rest = [f for f in files if f != _BASIS_COMPOSE and f not in gpu_dateien]
+    if not files and not gpu:
+        return None
+    return ":".join([_BASIS_COMPOSE] + [GPU_GRUPPEN[g]["datei"] for g in GPU_GRUPPEN if g in gpu] + rest)
+
+
+def set_gpu_groups(repo_root: Path, gpu: list[str]) -> None:
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    template_text = (repo_root / ".env.example").read_bytes().decode("utf-8")
+    current = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+    value = compose_file_value(current, gpu)
+    if value is None:
+        return
+    #--- Doppelpunkt als Trenner auf jedem System (unter Windows sonst ';').
+    init_mod.write_env_file(env_path, template_text, {"COMPOSE_PATH_SEPARATOR": ":", "COMPOSE_FILE": value})
+
+
+def llm_need_gb(entry: dict | None) -> float:
+    """Grafikspeicher, wenn das ganze Sprachmodell samt Bild-Encoder auf der Karte liegt."""
+    s = (entry or {}).get("speicher") or {}
+    if not s:
+        return 0.0
+    encoder = float(s["encoder"]) if (entry or {}).get("env", {}).get("LLM_MMPROJ_FILE") else 0.0
+    return float(s["basis"]) + int(s["schichten"]) * float(s["je_schicht"]) + encoder
+
+
+def default_gpu_groups(vram_mib: int, entry: dict | None, use_voice: bool) -> list[str]:
+    """Vorschlag: Eine Gruppe kommt auf die Grafikkarte, wenn danach das Sprachmodell noch
+    ganz auf die Karte passt. Auf 16 GB also keine, auf einer grossen Karte beide."""
+    if vram_mib <= 0 or not entry:
+        return []
+    frei = vram_mib / 1024 - _VRAM_RESERVE_GB - llm_need_gb(entry)
+    out = []
+    for g, d in GPU_GRUPPEN.items():
+        if g == "sprache" and not use_voice:
+            continue
+        if frei >= d["gb"]:
+            out.append(g)
+            frei -= d["gb"]
+    return out
+
+
 def apply_llm_choice(repo_root: Path, entry: dict, vram_mib: int, modell_gewechselt: bool) -> dict[str, str]:
     """Traegt das gewaehlte Sprachmodell in die .env ein und, passend zum Grafikspeicher,
     die Aufteilung zwischen Karte und RAM. Beim Wechsel gilt alles neu. Bleibt das Modell,
@@ -1882,6 +1958,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
     parser.add_argument("--llm", type=str, default=None,
                         help="Sprachmodell: qwen (Qwen3.6-35B-A3B, Vorgabe) oder gemma (Gemma 4 26B-A4B).")
+    parser.add_argument("--suche", choices=["gpu", "cpu"], default=None,
+                        help="Dokumentensuche (Einbettung, Reranker) auf der Grafikkarte oder der CPU.")
+    parser.add_argument("--sprache", choices=["gpu", "cpu"], default=None,
+                        help="Sprache (Erkennung, Vorlesen) auf der Grafikkarte oder der CPU.")
 
     subparsers = parser.add_subparsers(dest="subcommand")
     doc_parser = subparsers.add_parser("doctor", help="Installation und Umgebung lesend pruefen.")
@@ -2098,6 +2178,35 @@ def main(argv: list[str] | None = None) -> int:
             default=True,
             non_interactive=args.yes,
         )
+
+    #--- Dokumentensuche und Sprache: Grafikkarte oder CPU. Vorschlag: die Grafikkarte, wenn
+    #--- danach das Sprachmodell noch ganz darauf passt; bei einem zweiten Lauf der bisherige Stand.
+    gpu: list[str] = []
+    if bundle_dir is not None:
+        gpu = [g for g in load_bundle_manifest(bundle_dir).get("gpu", []) if g in GPU_GRUPPEN]
+    elif args.image_prefix:
+        if args.suche == "gpu" or args.sprache == "gpu":
+            print("  Hinweis: Fertige Images aus einer Registry gibt es nur fuer die CPU.")
+    else:
+        llm_entry = choices.get(llm) if llm else None
+        vorschlag = (gpu_groups_from_env(env_now) if env_now.get("COMPOSE_FILE")
+                     else default_gpu_groups(gpu_vram_mib if has_gpu else 0, llm_entry, use_voice))
+        for g, d in GPU_GRUPPEN.items():
+            if g == "sprache" and not use_voice:
+                continue
+            wahl = getattr(args, g)
+            if wahl is None and has_gpu and not args.yes:
+                gb = f"{d['gb']:.1f}".replace(".", ",")
+                nr = prompt_choice(f"{d['titel']} auf [1 = Grafikkarte, bis {gb} GB, "
+                                   f"{d['nutzen']}; 2 = CPU]", choices=["1", "2"],
+                                   default="1" if g in vorschlag else "2", non_interactive=args.yes)
+                wahl = "gpu" if nr == "1" else "cpu"
+            elif wahl is None:
+                wahl = "gpu" if (has_gpu and g in vorschlag) else "cpu"
+            if wahl == "gpu":
+                gpu.append(g)
+    if gpu:
+        print("  Auf der Grafikkarte: " + ", ".join(GPU_GRUPPEN[g]["titel"] for g in gpu))
     print("")
 
     # -------------------------------------------------------------------------
@@ -2111,11 +2220,12 @@ def main(argv: list[str] | None = None) -> int:
     run_init_stack(repo_root, venv_python, workspace=workspace_dir, models=models_dir)
     ensure_installation_dirs(repo_root, workspace_dir=workspace_dir, models_dir=models_dir)
     if llm is not None:
-        gesetzt = apply_llm_choice(repo_root, choices[llm], gpu_vram_mib if has_gpu else 0,
-                                   modell_gewechselt=(llm != llm_bisher))
+        #--- Was Suche und Sprache auf der Karte belegen, steht dem Sprachmodell nicht zur Verfuegung.
+        vram_llm = max(0, int(gpu_vram_mib - sum(GPU_GRUPPEN[g]["gb"] for g in gpu) * 1024)) if has_gpu else 0
+        gesetzt = apply_llm_choice(repo_root, choices[llm], vram_llm, modell_gewechselt=(llm != llm_bisher))
         if "LLM_N_CPU_MOE" in gesetzt:
             auf_karte = "auf der Grafikkarte" if gesetzt["LLM_MMPROJ_OFFLOAD"] == "true" else "im RAM"
-            print(f"  Aufteilung fuer {gpu_vram_mib / 1024:.0f} GB Grafikspeicher: "
+            print(f"  Aufteilung fuer {vram_llm / 1024:.0f} GB Grafikspeicher: "
                   f"{gesetzt['LLM_N_CPU_MOE']} Schichten mit Experten im RAM, Bild-Encoder {auf_karte}.")
 
     if server_url:
@@ -2129,6 +2239,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.image_prefix:
             configure_registry_images(repo_root, args.image_prefix, args.image_version)
             print(f"  Fertige Images aus {args.image_prefix}, Version {args.image_version}.")
+        if bundle_dir is None:
+            set_gpu_groups(repo_root, gpu)
     except (RuntimeError, ValueError) as exc:
         print(f"Fehler: {exc}")
         return 1
@@ -2310,6 +2422,11 @@ def create_bundle(repo_root: Path, out_dir: Path, version: str, with_models: boo
     if built:
         _run_checked(["docker", "compose", *profile_args, "build", *built], repo_root, env,
                      f"Eigene Images bauen ({', '.join(built)})")
+    for n in built:
+        #--- Mit einer GPU-Datei heisst der Bau etwa argus/embed-gpu:<version>.
+        ref = all_services[n].get("image", targets[n])
+        if ref != targets[n]:
+            _run_checked(["docker", "tag", ref, targets[n]], repo_root, env, f"{n} als {targets[n]} markieren")
     for n in foreign:
         ref = all_services[n]["image"]
         if not _image_present(ref):
@@ -2383,6 +2500,9 @@ def create_bundle(repo_root: Path, out_dir: Path, version: str, with_models: boo
         "images": targets,
         "images_sha256": _sha256_file(images_tar),
         "models": models,
+        #--- Mit welchen GPU-Varianten gebaut wurde; der Zielrechner nimmt dieselben.
+        "gpu": gpu_groups_from_env(_load_init_stack_module(repo_root).parse_env(
+            (repo_root / ".env").read_bytes().decode("utf-8")) if (repo_root / ".env").exists() else {}),
     }
     (out_dir / BUNDLE_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
@@ -2414,10 +2534,13 @@ def apply_bundle(repo_root: Path, bundle_dir: Path) -> dict:
     init_mod = _load_init_stack_module(repo_root)
     template_path = repo_root / ".env.example"
     template_text = template_path.read_bytes().decode("utf-8") if template_path.exists() else ""
+    #--- GPU-Varianten, mit denen das Paket gebaut wurde: ihre Compose-Dateien vor dem
+    #--- Paket-Override, das die Image-Namen festlegt.
+    gpu_dateien = [GPU_GRUPPEN[g]["datei"] for g in GPU_GRUPPEN if g in manifest.get("gpu", [])]
     init_mod.write_env_file(repo_root / ".env", template_text, {
         #--- Doppelpunkt als Trenner auf jedem System (unter Windows sonst ';').
         "COMPOSE_PATH_SEPARATOR": ":",
-        "COMPOSE_FILE": f"docker-compose.yml:{BUNDLE_OVERRIDE}",
+        "COMPOSE_FILE": ":".join([_BASIS_COMPOSE, *gpu_dateien, BUNDLE_OVERRIDE]),
         "ARGUS_VERSION": manifest["version"],
         "ARGUS_PULL_POLICY": "never",
     })

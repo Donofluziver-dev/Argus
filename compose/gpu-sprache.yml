@@ -1,0 +1,37 @@
+# Sprache auf der Grafikkarte: Spracherkennung (faster-whisper mit CUDA) und Vorlesen
+# (qwentts.cpp mit CUDA). Die Installation bindet diese Datei ueber COMPOSE_FILE in der .env
+# ein, wenn die Sprache auf die Grafikkarte soll (Frage "Sprache: Grafikkarte oder CPU",
+# --sprache gpu). Nur mit dem Profil voice wirksam.
+# Eigene Image-Namen (…-gpu), damit CPU- und GPU-Bau sich nicht ueberschreiben.
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  stt-service:
+    <<: *gpu
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/stt-service-gpu:${ARGUS_VERSION:-local}
+    build:
+      context: ./stt_service
+      dockerfile: Dockerfile.stt
+      args:
+        GPU: "1"
+    environment:
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
+    #--- Die CUDA-Bibliotheken (cuBLAS, cuDNN) belegen beim Laden zusaetzlich RAM.
+    mem_limit: 6g
+
+  tts-service:
+    <<: *gpu
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/tts-service-gpu:${ARGUS_VERSION:-local}
+    build:
+      context: ./tts_service
+      dockerfile: Dockerfile.tts-gpu
+    environment:
+      - GGML_NUM_THREADS=4

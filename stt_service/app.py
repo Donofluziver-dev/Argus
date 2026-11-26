@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3-turbo")
+#--- cpu (Vorgabe) oder cuda (compose/gpu-sprache.yml, Image mit CUDA-Bibliotheken).
+DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 DEFAULT_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "de")
 MAX_UPLOAD_MB = 25
@@ -65,9 +67,19 @@ async def _load_model():
         if _model is not None:
             return _model
         from faster_whisper import WhisperModel
-        _model = await asyncio.to_thread(
-            WhisperModel, MODEL_NAME, device="cpu", compute_type=COMPUTE_TYPE,
+        model = await asyncio.to_thread(
+            WhisperModel, MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE,
         )
+        if DEVICE == "cuda":
+            #--- Der erste Lauf auf der Grafikkarte dauert ~10 s (CUDA und cuDNN richten
+            #--- sich ein). Das passiert hier beim Start, nicht beim ersten Nutzer.
+            import numpy as np
+
+            def _warm():
+                segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language=DEFAULT_LANGUAGE)
+                list(segments)
+            await asyncio.to_thread(_warm)
+        _model = model
     return _model
 
 @asynccontextmanager

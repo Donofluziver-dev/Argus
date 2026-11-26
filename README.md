@@ -108,7 +108,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
 | Transcribing scans, photos and handwriting | 111 of 111 checks on 11 test pages; wrong digits only below 150 dpi or with 4 pt print | fax, phone photo, form, drawing, stamp and stress series, `eval/scans` |
-| Automated tests | 544 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 554 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -439,8 +439,16 @@ builds and starts the stack and waits until Argus answers. Gemma reads clean sca
 Qwen and about three times faster, but is less reliable on difficult ones (with a page skewed by
 10° it shifted table columns by one row, swapping pass and fail; see `eval/scans`), so Qwen is
 the safer choice where scanned values matter. Every step asks first; running it again is harmless
-and keeps own values in `.env` as long as the model stays. Options: `--yes`, `--llm qwen|gemma`,
-`--workspace`, `--models`, `--server-url`,
+and keeps own values in `.env` as long as the model stays. It also asks whether document search
+(embedding, reranker) and speech (recognition, read-aloud) run on the GPU or the CPU; the GPU is
+suggested when the language model still fits on the card entirely (16 GB: CPU; 94 GB: both).
+Measured on the RTX 5070 Ti: a search takes 0.17 s instead of 3.5 s with the same hits,
+indexing 30 documents 2 s instead of 35 s, recognising 12 s of speech 0.3 s instead of 2.4 to
+4 s, reading aloud 0.35 s per second of speech instead of 1.3 s; search needs about 2 GB of GPU
+memory, speech about 5 GB. The GPU variants are separate images (`…-gpu`) added through
+`compose/gpu-suche.yml` and `compose/gpu-sprache.yml` in `COMPOSE_FILE`; the read-aloud build
+downloads NVIDIA's CUDA development image (about 4 GB) once. Options: `--yes`,
+`--llm qwen|gemma`, `--suche gpu|cpu`, `--sprache gpu|cpu`, `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
 `--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <dir>`,
 `--image-prefix` / `--image-version`,

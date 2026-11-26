@@ -1,0 +1,36 @@
+# Dokumentensuche auf der Grafikkarte: Einbettung (bge-m3) und Reranker
+# (bge-reranker-v2-m3) im CUDA-Build von llama.cpp. Die Installation bindet diese Datei
+# ueber COMPOSE_FILE in der .env ein, wenn die Suche auf die Grafikkarte soll
+# (Frage "Dokumentensuche: Grafikkarte oder CPU", --suche gpu).
+# Eigene Image-Namen (embed-gpu, rerank-gpu), damit CPU- und GPU-Bau sich nicht ueberschreiben.
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  embed:
+    <<: *gpu
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/embed-gpu:${ARGUS_VERSION:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+      args:
+        BASE_IMAGE: ghcr.io/ggml-org/llama.cpp:server-cuda-b11977@sha256:0283744a35a6e7698b4f7a2d63360233dc769ece51e84bdba7aa187a33978276
+    environment:
+      - EMBED_GPU_LAYERS=99
+
+  rerank:
+    <<: *gpu
+    image: ${ARGUS_IMAGE_PREFIX:-argus}/rerank-gpu:${ARGUS_VERSION:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.embed
+      args:
+        BASE_IMAGE: ghcr.io/ggml-org/llama.cpp:server-cuda-b11977@sha256:0283744a35a6e7698b4f7a2d63360233dc769ece51e84bdba7aa187a33978276
+    environment:
+      - EMBED_GPU_LAYERS=99
