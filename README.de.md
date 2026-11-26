@@ -134,7 +134,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
 | Scans, Fotos und Handschrift abschreiben | 111 von 111 Prüfungen auf 11 Testseiten; falsche Zahlen erst unter 150 dpi oder bei 4 pt Schrift | Fax, Handyfoto, Formular, Zeichnung, Stempel und Belastungsreihen, `eval/scans` |
-| Automatische Tests | 534 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 545 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -309,7 +309,11 @@ weil sich das Modell im Denken im Kreis drehte. Mit den ruhigeren Werten, die Ar
 nutzt, und einer Strafe für Wiederholungen ergab sich die Tabelle oben. Bei einem neuen
 Modell also beides messen.
 
-Gemma 4 einstellen (`.env`), Sampling-Werte leer lassen:
+Gemma 4 wählt die Installation auf Wunsch selbst: die Frage nach dem Sprachmodell
+beantworten oder `install.sh --llm gemma` (unter Windows `install.cmd --llm gemma`). Sie lädt
+Modell und MTP-Kopf, trägt beides in die `.env` ein und stellt die Aufteilung auf den
+Grafikspeicher ein; ein zweiter Lauf mit `--llm qwen` stellt zurück. Von Hand in der `.env`,
+Sampling-Werte leer lassen:
 
 ```ini
 LLM_MODEL_FILE=gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
@@ -320,8 +324,9 @@ LLM_MMPROJ_FILE=
 ```
 
 Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`. Der Bild-Encoder
-von Qwen passt nicht zu Gemma, daher `LLM_MMPROJ_FILE` leer lassen oder auf Gemmas eigene
-Zusatzdatei aus demselben Ordner setzen; mit Gemma ist die Bildeingabe nicht getestet.
+von Qwen passt nicht zu Gemma, daher bleibt `LLM_MMPROJ_FILE` leer: Mit Gemma läuft Argus
+vorerst ohne Bildeingabe. Gemmas eigene Zusatzdatei liegt im selben Ordner, ist aber noch
+nicht getestet.
 
 **Ein Modell für Text und Bild.** Alle Modelle in der Tabelle sind multimodal
 (Vision-Language): Sie lesen Text und Bilder mit denselben Gewichten. Eine gescannte Seite, ein
@@ -373,7 +378,7 @@ Die vollständige Liste steht unter
 | `rag_backend/static/` | Browser-Oberfläche (reines HTML, CSS, JavaScript, ohne Build-Schritt) |
 | `alembic/` | Datenbank-Migrationen |
 | `docker-compose.yml` | der Stapel |
-| `setup/` | Einrichtung (`init_stack.py`), Prüfung der Netze (`check_networks.py`) |
+| `setup/` | Einrichtung (`install.py`, `init_stack.py`, `bootstrap.sh` für Linux-Server, `models.json`), Prüfung der Netze (`check_networks.py`) |
 | `stt_service/`, `tts_service/`, `calc_sandbox/` | Sprache und abgeschottete Code-Ausführung |
 | `local_proxy/`, `searxng_config/` | die beiden Proxys auf 127.0.0.1, Websuche |
 | `proxy/` | TLS-Proxy für den Server (Caddy, Profil `proxy`): `Caddyfile`, `certs/` für ein eigenes Zertifikat |
@@ -609,6 +614,50 @@ Home-Ordner (etwa `/home/anna` als Arbeitsordner) lehnt sie das ab, weil Docker 
 **Voraussetzungen:** eine NVIDIA-Karte (gemessen mit 16 GB), 32 GB Arbeitsspeicher, rund
 30 GB Platz für die Modelle.
 
+### Linux-Server mit einem Befehl
+
+Auf einem Linux-Server mit Docker reicht ein Befehl, als normaler Nutzer in der Gruppe
+`docker`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Donofluziver-dev/Argus/main/setup/bootstrap.sh | bash
+```
+
+`setup/bootstrap.sh` prüft zuerst alles und sagt, was fehlt:
+- CPU-Art, Grafikkarte und Treiber (ab 570, das Modell-Image braucht CUDA 12.8);
+- Docker mit Compose und das NVIDIA Container Toolkit (ein Test-Container muss die Karte sehen);
+- Arbeitsspeicher und Platz für Images (rund 35 GB) und Modelle (rund 27 GB);
+- einen Proxy und ob GitHub, Hugging Face, Docker Hub, ghcr.io, PyPI und die Debian-Quellen erreichbar sind.
+
+Danach holt das Skript den Code nach `~/argus/app` (mit `git`, sonst als Archiv) und startet
+die [geführte Installation](#geführte-installation). Die fragt nach dem Sprachmodell, lädt es,
+stellt die Aufteilung auf den Grafikspeicher ein und baut und startet den Stapel. Modelle und
+Arbeitsordner liegen unter `~/argus`. Ein zweiter Lauf aktualisiert den Code und lässt `.env`,
+Geheimnisse und Daten, wie sie sind.
+
+- **Ohne `curl | bash`:** das Skript erst laden und ansehen, dann starten:
+  `curl -fsSLO https://raw.githubusercontent.com/Donofluziver-dev/Argus/main/setup/bootstrap.sh`
+  und `bash bootstrap.sh`. Oder das Repo selbst holen (`git clone`, oder das ZIP von GitHub per
+  `scp` auf den Server) und dort `./install.sh` starten. Modelle und Images lädt die
+  Installation in jedem Fall selbst.
+- **Optionen** gehen an die Installation: `bash bootstrap.sh --llm gemma`, mit `curl | bash` als
+  `… | bash -s -- --llm gemma`. `ARGUS_NUR_PRUEFEN=1` macht nur die Vorprüfung, `ARGUS_DIR`
+  wählt einen anderen Ordner für den Code.
+- **Zugriff:** Im Betriebsmodus „nur dieser Rechner“ hört Argus nur auf dem Server selbst
+  (127.0.0.1:7860). Vom eigenen PC geht es dann über einen SSH-Tunnel,
+  `ssh -L 7860:127.0.0.1:7860 <nutzer>@<server>`, und im Browser `http://127.0.0.1:7860`. Für
+  mehrere Personen den Servermodus mit TLS-Proxy wählen
+  ([Betrieb auf einem Server](#betrieb-auf-einem-server)).
+- **Ohne Internet** hilft das nicht: Dann das [Offline-Paket](#geführte-installation)
+  auf einem Rechner mit Internet bauen. Seine Images passen nur zur CPU-Art, auf der es gebaut
+  wurde (von einem Windows-PC aus x86_64).
+
+Grafikspeicher: Die Installation liest ihn aus und verteilt das Modell selbst. Auf 16 GB liegen
+bei Qwen 25 Schichten mit ihren Experten im RAM und der Bild-Encoder ebenfalls; ab rund 31 GB
+(Gemma: 23 GB) liegt alles auf der Karte. Ein Server mit großer Karte (etwa 94 GB) braucht also nichts
+einzustellen. Eigene Werte in der `.env` bleiben bei einem zweiten Lauf, solange das Modell
+gleich bleibt.
+
 ### Geführte Installation
 
 Unter Windows `install.cmd` per Doppelklick starten, unter Linux `./install.sh`. Die
@@ -620,19 +669,22 @@ Installation führt durch diese Schritte:
    installieren, und startet Docker Desktop, wenn es nicht läuft. Unter Linux nennt sie die
    Anleitung und prüft das NVIDIA Container Toolkit, installiert aber nichts selbst.
 3. **Grafikkarte und Arbeitsspeicher** prüfen und vor zu wenig davon warnen.
-4. **Fragen:** Arbeitsordner, Modellordner, Betrieb nur auf diesem Rechner oder als Server.
+4. **Fragen:** Arbeitsordner, Modellordner, Sprachmodell (Qwen3.6 oder Gemma 4), Betrieb nur
+   auf diesem Rechner oder als Server.
    Als Server fragt sie nach der Adresse, ob der mitgelieferte TLS-Proxy laufen soll und mit
    welchem Zertifikat (siehe [Betrieb auf einem Server](#betrieb-auf-einem-server)).
 5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
-   `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte.
-6. **Modelle laden** (rund 27 GB, darin 0,9 GB Bild-Encoder): jede Datei aus `setup/models.json`, festgelegt auf eine
+   `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte. Dazu das gewählte
+   Sprachmodell und seine Aufteilung zwischen Grafikkarte und RAM, passend zum Grafikspeicher.
+6. **Modelle laden** (mit Qwen rund 27 GB, darin 0,9 GB Bild-Encoder; mit Gemma rund 20 GB):
+   jede Datei aus `setup/models.json`, vom Sprachmodell nur das gewählte, festgelegt auf eine
    Revision bei Hugging Face und nach dem Laden per SHA-256 geprüft. Abgebrochene Downloads
    setzen beim nächsten Lauf fort. Vorhandene Dateien werden nur geprüft.
 7. **Stapel bauen und starten** und warten, bis Argus antwortet. Am Ende kopiert sie unter
    Windows auf Wunsch den Einrichtungs-Schlüssel in die Zwischenablage und öffnet den Browser.
 
 Jeder Schritt fragt vorher. Ein zweiter Lauf ist harmlos: Vorhandenes bleibt, wie es ist.
-Optionen: `--yes` (alle Vorgaben annehmen), `--workspace`, `--models`, `--server-url`,
+Optionen: `--yes` (alle Vorgaben annehmen), `--llm qwen|gemma`, `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
 `--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <ordner>`,
 `--image-prefix` / `--image-version`,

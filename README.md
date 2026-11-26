@@ -108,7 +108,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
 | Transcribing scans, photos and handwriting | 111 of 111 checks on 11 test pages; wrong digits only below 150 dpi or with 4 pt print | fax, phone photo, form, drawing, stamp and stress series, `eval/scans` |
-| Automated tests | 534 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 545 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -406,13 +406,39 @@ it runs under `sudo`. With SELinux enforcing it offers the `:z` label for all bi
 (measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models (27 GB, including
 the 0.9 GB image encoder).
 
+**Linux server in one command:** as a normal user in the `docker` group run
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Donofluziver-dev/Argus/main/setup/bootstrap.sh | bash
+```
+
+`setup/bootstrap.sh` first checks and reports what is missing: CPU architecture, GPU and driver
+(570 or newer, the model image needs CUDA 12.8), Docker with Compose, the NVIDIA Container
+Toolkit (a test container must see the GPU), RAM, disk space for images (about 35 GB) and models
+(about 27 GB), a proxy, and whether GitHub, Hugging Face, Docker Hub, ghcr.io, PyPI and the
+Debian mirrors are reachable. It then fetches the code to `~/argus/app` (with `git`, otherwise as
+an archive) and starts the guided setup below. Running it again updates the code and keeps
+`.env`, secrets and data. Without `curl | bash`: download the script, read it, run
+`bash bootstrap.sh`, or clone the repository (or copy GitHub's ZIP to the server) and run
+`./install.sh`; models and images are downloaded by the installer either way. Options are passed
+on (`bash bootstrap.sh --llm gemma`, or `… | bash -s -- --llm gemma`); `ARGUS_NUR_PRUEFEN=1`
+only runs the check. In single-machine mode Argus listens on 127.0.0.1:7860 of the server only;
+from your own PC use an SSH tunnel (`ssh -L 7860:127.0.0.1:7860 <user>@<server>`). Without any
+internet access use the offline bundle below; its images only fit the CPU architecture it was
+built on.
+
 **Guided setup:** run `install.cmd` on Windows (double-click) or `./install.sh` on Linux. It
 finds or installs Python (asking first), checks Docker (on Windows it offers to install Docker
-Desktop and WSL via `winget`), checks GPU and RAM, asks for the workspace and model folders and
-whether this is a single machine or a server, creates the secrets and `.env`, downloads the
-models listed in `setup/models.json` (pinned to a Hugging Face revision, verified by SHA-256,
-resumable), builds and starts the stack and waits until Argus answers. Every step asks first;
-running it again is harmless. Options: `--yes`, `--workspace`, `--models`, `--server-url`,
+Desktop and WSL via `winget`), checks GPU and RAM, asks for the workspace and model folders, the
+language model (Qwen3.6, the default, or Gemma 4) and whether this is a single machine or a
+server, creates the secrets and `.env`, sets how the model is split between GPU and RAM from the
+GPU memory (16 GB: 25 Qwen layers with their experts in RAM; from about 31 GB, Gemma 23 GB,
+everything on the GPU), downloads the models listed in `setup/models.json`, of the language
+models only the chosen one (pinned to a Hugging Face revision, verified by SHA-256, resumable),
+builds and starts the stack and waits until Argus answers. Gemma runs without image input for
+now; its projector file is not tested yet. Every step asks first; running it again is harmless
+and keeps own values in `.env` as long as the model stays. Options: `--yes`, `--llm qwen|gemma`,
+`--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
 `--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <dir>`,
 `--image-prefix` / `--image-version`,

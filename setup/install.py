@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -400,13 +401,95 @@ def check_docker_environment(non_interactive: bool = False) -> None:
 # Modelle laden und pruefen
 # =============================================================================
 
-def load_models_spec(models_json_path: Path) -> list[dict]:
-    """Liest models.json und liefert eine flache Liste aller Zieldateien."""
+def llm_choices(models_json_path: Path) -> list[dict]:
+    """Die waehlbaren Sprachmodelle aus models.json (Eintraege mit 'auswahl')."""
+    data = json.loads(models_json_path.read_text(encoding="utf-8"))
+    return [m for m in data.get("models", []) if m.get("auswahl")]
+
+
+def default_llm_choice(models_json_path: Path) -> str | None:
+    choices = llm_choices(models_json_path)
+    if not choices:
+        return None
+    return next((m["auswahl"] for m in choices if m.get("standard")), choices[0]["auswahl"])
+
+
+def llm_choice_from_env(models_json_path: Path, env_data: dict) -> str | None:
+    """Welches Sprachmodell eine .env nutzt, erkannt an LLM_MODEL_FILE. Ohne Eintrag die
+    Vorgabe; ein eigenes Modell, das nicht in models.json steht, ergibt None (dann laedt
+    und prueft die Installation kein Sprachmodell)."""
+    model_file = (env_data.get("LLM_MODEL_FILE") or "").strip()
+    if not model_file:
+        return default_llm_choice(models_json_path)
+    for m in llm_choices(models_json_path):
+        if m.get("env", {}).get("LLM_MODEL_FILE") == model_file:
+            return m["auswahl"]
+    return None
+
+
+#--- Freier Grafikspeicher, der neben dem Modell bleibt (Desktop, CUDA, Spitzen beim
+#--- Einlesen). Mit 1,5 GB ergibt die Rechnung auf der 16-GB-Karte die gemessenen 25.
+_VRAM_RESERVE_GB = 1.5
+
+
+def tune_llm_for_gpu(speicher: dict, vram_mib: int) -> dict[str, str]:
+    """Wie viele Schichten ihre Experten in den RAM legen (LLM_N_CPU_MOE) und ob der
+    Bild-Encoder auf die Karte kommt (LLM_MMPROJ_OFFLOAD), aus dem Grafikspeicher und dem
+    Bedarf des Modells (models.json 'speicher'). Ohne bekannten Speicher: nichts."""
+    if not speicher or vram_mib <= 0:
+        return {}
+    frei = vram_mib / 1024 - _VRAM_RESERVE_GB
+    schichten = int(speicher["schichten"])
+    basis, je, encoder = float(speicher["basis"]), float(speicher["je_schicht"]), float(speicher["encoder"])
+
+    def im_ram(mit_encoder: bool) -> int:
+        platz = frei - basis - (encoder if mit_encoder else 0.0)
+        auf_karte = math.floor(platz / je) if platz > 0 else 0
+        return max(0, min(schichten, schichten - auf_karte))
+
+    mit, ohne = im_ram(True), im_ram(False)
+    #--- Der Encoder kommt auf die Karte, wenn er dort hoechstens eine Schicht verdraengt
+    #--- (oder alles passt). Auf 16 GB bleibt er im RAM, wie gemessen und dokumentiert.
+    if mit == 0 or mit <= ohne + 1:
+        return {"LLM_N_CPU_MOE": str(mit), "LLM_MMPROJ_OFFLOAD": "true"}
+    return {"LLM_N_CPU_MOE": str(ohne), "LLM_MMPROJ_OFFLOAD": "false"}
+
+
+def apply_llm_choice(repo_root: Path, entry: dict, vram_mib: int, modell_gewechselt: bool) -> dict[str, str]:
+    """Traegt das gewaehlte Sprachmodell in die .env ein und, passend zum Grafikspeicher,
+    die Aufteilung zwischen Karte und RAM. Beim Wechsel gilt alles neu. Bleibt das Modell,
+    kommen nur fehlende Schluessel dazu (eine bewusst leere LLM_MMPROJ_FILE bleibt leer),
+    und die Aufteilung nur, solange sie noch auf den Werten der Vorlage steht."""
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    template_text = (repo_root / ".env.example").read_bytes().decode("utf-8")
+    template = init_mod.parse_env(template_text)
+    current = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+    values = {k: v for k, v in entry.get("env", {}).items()
+              if (modell_gewechselt and (v or k in current)) or (k not in current and v)}
+    speicher = dict(entry.get("speicher", {}))
+    if speicher and not entry.get("env", {}).get("LLM_MMPROJ_FILE"):
+        speicher["encoder"] = 0            # ohne Bild-Encoder kein Platz dafuer
+    tuned = tune_llm_for_gpu(speicher, vram_mib)
+    unangepasst = all(current.get(k, template.get(k)) == template.get(k) for k in tuned)
+    if tuned and (modell_gewechselt or unangepasst):
+        values.update(tuned)
+    init_mod.write_env_file(env_path, template_text, values)
+    return values
+
+
+def load_models_spec(models_json_path: Path, auswahl: str | None = "") -> list[dict]:
+    """Liest models.json und liefert eine flache Liste aller Zieldateien. Von den
+    Sprachmodellen nur das gewaehlte: auswahl "" = Vorgabe, None = keines (eigenes Modell)."""
     if not models_json_path.exists():
         raise FileNotFoundError(f"Modell-Konfiguration nicht gefunden: {models_json_path}")
     data = json.loads(models_json_path.read_text(encoding="utf-8"))
+    if auswahl == "":
+        auswahl = default_llm_choice(models_json_path)
     entries: list[dict] = []
     for model in data.get("models", []):
+        if model.get("auswahl") and model["auswahl"] != auswahl:
+            continue
         repo = model["repo"]
         revision = model["revision"]
         for f in model.get("files", []):
@@ -919,7 +1002,8 @@ def doctor_check_ram() -> DoctorResult:
     return DoctorResult("OK", "Arbeitsspeicher", f"{ram_gb:.1f} GB RAM.")
 
 
-def doctor_check_disk_space(models_dir: Path, models_spec_path: Path | None = None) -> DoctorResult:
+def doctor_check_disk_space(models_dir: Path, models_spec_path: Path | None = None,
+                            auswahl: str | None = "") -> DoctorResult:
     """Prueft freien Platz im Modellordner, ohne Ordner anzulegen."""
     probe = models_dir
     while not probe.exists() and probe.parent != probe:
@@ -934,7 +1018,7 @@ def doctor_check_disk_space(models_dir: Path, models_spec_path: Path | None = No
     needed_bytes = 0
     if models_spec_path and models_spec_path.exists():
         try:
-            for item in load_models_spec(models_spec_path):
+            for item in load_models_spec(models_spec_path, auswahl):
                 target = models_dir / item["target"]
                 if not target.exists() or target.stat().st_size != item["size"]:
                     needed_bytes += item["size"]
@@ -1154,11 +1238,13 @@ def doctor_check_secrets_and_dirs(repo_root: Path) -> DoctorResult:
     return DoctorResult("OK", "API_Tokens & Ordner", "Alle Geheimnis-Dateien und Laufzeitordner vorhanden und Rechte stimmen.")
 
 
-def doctor_check_models(models_dir: Path, models_spec_path: Path, verify_sha256: bool = False) -> DoctorResult:
-    """Prueft Modelle aus setup/models.json auf Vorhandensein, Groesse und optional SHA-256."""
+def doctor_check_models(models_dir: Path, models_spec_path: Path, verify_sha256: bool = False,
+                        auswahl: str | None = "") -> DoctorResult:
+    """Prueft Modelle aus setup/models.json auf Vorhandensein, Groesse und optional SHA-256;
+    vom Sprachmodell nur das, das die .env nutzt."""
     if not models_spec_path.exists():
         return DoctorResult("FEHLER", "Modelle", f"{models_spec_path} fehlt.")
-    entries = load_models_spec(models_spec_path)
+    entries = load_models_spec(models_spec_path, auswahl)
     missing: list[str] = []
     wrong_size: list[str] = []
     wrong_hash: list[str] = []
@@ -1692,16 +1778,17 @@ def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[
     models_dir = Path(_effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]
                       or os.path.expanduser("~/argus/models"))
     models_spec_path = repo_root / "setup" / "models.json"
+    auswahl = llm_choice_from_env(models_spec_path, env_data) if models_spec_path.exists() else ""
 
     results: list[DoctorResult] = [
         doctor_check_docker(),
         doctor_check_gpu(),
         doctor_check_ram(),
-        doctor_check_disk_space(models_dir, models_spec_path),
+        doctor_check_disk_space(models_dir, models_spec_path, auswahl),
         doctor_check_env(repo_root),
         doctor_check_profiles(repo_root, env_data),
         doctor_check_secrets_and_dirs(repo_root),
-        doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models),
+        doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models, auswahl=auswahl),
         doctor_check_networks(repo_root),
         doctor_check_proxy(repo_root, env_data),
         doctor_check_stack(repo_root, env_data=env_data),
@@ -1788,6 +1875,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-models", action="store_true", help="Modelle nicht laden.")
     parser.add_argument("--no-start", action="store_true", help="Stapel nicht starten.")
     parser.add_argument("--models-only", action="store_true", help="Nur Modelle pruefen und laden.")
+    parser.add_argument("--llm", type=str, default=None,
+                        help="Sprachmodell: qwen (Qwen3.6-35B-A3B, Vorgabe) oder gemma (Gemma 4 26B-A4B).")
 
     subparsers = parser.add_subparsers(dest="subcommand")
     doc_parser = subparsers.add_parser("doctor", help="Installation und Umgebung lesend pruefen.")
@@ -1858,11 +1947,22 @@ def main(argv: list[str] | None = None) -> int:
         default_workspace = os.path.expanduser("~/argus/workspace")
         default_models = os.path.expanduser("~/argus/models")
 
+    #--- Sprachmodell: das der vorhandenen .env, sonst die Vorgabe; --llm waehlt um.
+    models_spec_path = repo_root / "setup" / "models.json"
+    choices = {m["auswahl"]: m for m in llm_choices(models_spec_path)} if models_spec_path.exists() else {}
+    env_path = repo_root / ".env"
+    env_now = _load_init_stack_module(repo_root).parse_env(
+        env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+    llm_bisher = llm_choice_from_env(models_spec_path, env_now) if choices else None
+    if args.llm is not None and args.llm not in choices:
+        print(f"Fehler in --llm: '{args.llm}' ist unbekannt (erlaubt: {', '.join(choices)}).")
+        return 1
+
     # Modell-Pfad fuer --models-only Aufruf
     if args.models_only:
         models_dir = args.models or prompt_text("Modellordner", default_models, non_interactive=args.yes)
-        models_spec_path = repo_root / "setup" / "models.json"
-        _execute_models_step(models_spec_path, models_dir, non_interactive=args.yes)
+        _execute_models_step(models_spec_path, models_dir, non_interactive=args.yes,
+                             auswahl=args.llm or llm_bisher)
         print("\nModellpruefung abgeschlossen.")
         return 0
 
@@ -1890,9 +1990,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         gpu_vram_gb = gpu_vram_mib / 1024
         print(f"  Grafikkarte: {gpu_name} ({gpu_vram_gb:.1f} GB VRAM)")
-        if gpu_vram_mib < 16000:
-            print("  Hinweis: Die Modellwerte sind fuer 16 GB VRAM optimiert.")
-            print("  Bei weniger VRAM muss LLM_N_CPU_MOE in der .env hoeher gesetzt werden.")
+        if gpu_vram_mib <= 0:
+            print("  Hinweis: Die Karte meldet keinen Speicher; die Aufteilung zwischen Karte und")
+            print("  RAM bleibt auf den Werten fuer 16 GB (LLM_N_CPU_MOE in der .env).")
+        elif gpu_vram_mib < 15000:
+            print("  Hinweis: Unter 16 GB liegt ein grosser Teil des Modells im RAM; das ist langsam.")
 
     total_ram_bytes = check_ram_bytes()
     if total_ram_bytes > 0:
@@ -1909,6 +2011,23 @@ def main(argv: list[str] | None = None) -> int:
     print("[3/7] Konfiguration & Pfade...")
     workspace_dir = args.workspace or prompt_text("Arbeitsordner", default_workspace, non_interactive=args.yes)
     models_dir = args.models or prompt_text("Modellordner", default_models, non_interactive=args.yes)
+
+    #--- Sprachmodell waehlen. Ein eigenes Modell (nicht in models.json) bleibt unberuehrt.
+    llm = args.llm
+    if llm is None and llm_bisher is not None and len(choices) > 1 and not args.yes:
+        namen = list(choices)
+        frage = "Sprachmodell [" + ", ".join(
+            f"{i} = {choices[n].get('kurz', n)}" for i, n in enumerate(namen, 1)) + "]"
+        vorgabe = str(namen.index(llm_bisher) + 1) if llm_bisher in namen else "1"
+        nr = prompt_choice(frage, choices=[str(i) for i in range(1, len(namen) + 1)],
+                           default=vorgabe, non_interactive=args.yes)
+        llm = namen[int(nr) - 1]
+    elif llm is None:
+        llm = llm_bisher
+    if llm is None and choices:
+        print("  Sprachmodell: eigenes Modell aus der .env, die Installation laedt keines.")
+    elif llm is not None:
+        print(f"  Sprachmodell: {choices[llm]['title']}")
 
     server_url = ""
     use_proxy = False
@@ -1986,6 +2105,13 @@ def main(argv: list[str] | None = None) -> int:
         venv_python = ensure_setup_venv(repo_root)
     run_init_stack(repo_root, venv_python, workspace=workspace_dir, models=models_dir)
     ensure_installation_dirs(repo_root, workspace_dir=workspace_dir, models_dir=models_dir)
+    if llm is not None:
+        gesetzt = apply_llm_choice(repo_root, choices[llm], gpu_vram_mib if has_gpu else 0,
+                                   modell_gewechselt=(llm != llm_bisher))
+        if "LLM_N_CPU_MOE" in gesetzt:
+            auf_karte = "auf der Grafikkarte" if gesetzt["LLM_MMPROJ_OFFLOAD"] == "true" else "im RAM"
+            print(f"  Aufteilung fuer {gpu_vram_mib / 1024:.0f} GB Grafikspeicher: "
+                  f"{gesetzt['LLM_N_CPU_MOE']} Schichten mit Experten im RAM, Bild-Encoder {auf_karte}.")
 
     if server_url:
         update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
@@ -2011,10 +2137,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_models:
         print("  Modell-Download uebersprungen (--no-models).\n")
     else:
-        models_spec_path = repo_root / "setup" / "models.json"
         if bundle_dir is not None:
-            copy_models_from_bundle(bundle_dir, Path(models_dir), models_spec_path)
-        modelle_ok = _execute_models_step(models_spec_path, models_dir, non_interactive=args.yes)
+            copy_models_from_bundle(bundle_dir, Path(models_dir), models_spec_path, auswahl=llm)
+        modelle_ok = _execute_models_step(models_spec_path, models_dir, non_interactive=args.yes,
+                                          auswahl=llm)
         print("")
 
     # -------------------------------------------------------------------------
@@ -2231,7 +2357,9 @@ def create_bundle(repo_root: Path, out_dir: Path, version: str, with_models: boo
         env_data = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
         models_dir = Path(_effective_dir(repo_root, env_data, "ARGUS_MODELS_DIR")[0]
                           or os.path.expanduser("~/argus/models"))
-        for item in load_models_spec(repo_root / "setup" / "models.json"):
+        spec_path = repo_root / "setup" / "models.json"
+        #--- Vom Sprachmodell das, das diese Installation nutzt.
+        for item in load_models_spec(spec_path, llm_choice_from_env(spec_path, env_data)):
             src = models_dir / item["target"]
             if not src.is_file() or src.stat().st_size != item["size"]:
                 raise RuntimeError(f"Modell {item['target']} fehlt in {models_dir} oder ist unvollstaendig.")
@@ -2292,14 +2420,15 @@ def apply_bundle(repo_root: Path, bundle_dir: Path) -> dict:
     return manifest
 
 
-def copy_models_from_bundle(bundle_dir: Path, models_dir: Path, models_spec_path: Path) -> int:
+def copy_models_from_bundle(bundle_dir: Path, models_dir: Path, models_spec_path: Path,
+                            auswahl: str | None = "") -> int:
     """Kopiert Modelle aus dem Paket, die im Modellordner fehlen. Geprueft werden sie
     danach wie heruntergeladene (SHA-256 im Modell-Schritt)."""
     src_root = bundle_dir / "models"
     if not src_root.is_dir():
         return 0
     copied = 0
-    for item in load_models_spec(models_spec_path):
+    for item in load_models_spec(models_spec_path, auswahl):
         dst = models_dir / item["target"]
         src = src_root / item["target"]
         if (dst.is_file() and dst.stat().st_size == item["size"]) or not src.is_file():
@@ -2345,11 +2474,12 @@ def run_bundle(repo_root: Path, out: str | None, version: str | None, with_model
     return 0
 
 
-def _execute_models_step(models_spec_path: Path, models_dir_str: str, non_interactive: bool = False) -> bool:
+def _execute_models_step(models_spec_path: Path, models_dir_str: str, non_interactive: bool = False,
+                         auswahl: str | None = "") -> bool:
     """Fuehrt Pruefung und ggf. Download der Modelle durch. True = alle Dateien liegen
-    geprueft im Modellordner."""
+    geprueft im Modellordner. Vom Sprachmodell nur das gewaehlte (auswahl)."""
     models_dir = Path(models_dir_str)
-    entries = load_models_spec(models_spec_path)
+    entries = load_models_spec(models_spec_path, auswahl)
     to_download: list[dict] = []
     fehlerhaft = False
 

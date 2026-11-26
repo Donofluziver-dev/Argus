@@ -1,12 +1,22 @@
 {
-  "_comment": "Modelle, die die Installation laedt. Jede Datei ist auf eine Revision des Hugging-Face-Repos festgelegt und wird nach dem Laden per SHA-256 geprueft. Ziel ist der Ordner ARGUS_MODELS_DIR; 'target' ist der Pfad darin.",
+  "_comment": "Modelle, die die Installation laedt. Jede Datei ist auf eine Revision des Hugging-Face-Repos festgelegt und wird nach dem Laden per SHA-256 geprueft. Ziel ist der Ordner ARGUS_MODELS_DIR; 'target' ist der Pfad darin. Eintraege mit 'auswahl' sind Sprachmodelle, von denen die Installation genau eines laedt (Vorgabe: 'standard'); 'env' sind ihre Werte fuer die .env, 'speicher' ihr Bedarf an Grafikspeicher in GB (gemessen auf RTX 5070 Ti mit Windows-Desktop): basis = alles ausser den Experten, je_schicht = Experten einer Schicht, encoder = Bild-Encoder auf der Karte.",
   "models": [
     {
       "id": "llm",
+      "auswahl": "qwen",
+      "standard": true,
       "title": "Sprachmodell Qwen3.6-35B-A3B (Q4, mit MTP-Kopf)",
+      "kurz": "Qwen3.6-35B-A3B (Alibaba), 23,8 GB",
       "license": "Apache-2.0",
       "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
       "revision": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
+      "env": {
+        "LLM_MODEL_FILE": "Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf",
+        "LLM_MTP_MODEL_FILE": "",
+        "LLM_MMPROJ_FILE": "mmproj-Qwen3.6-35B-A3B-F16.gguf",
+        "OAI_MODEL": "qwen3.6-35b-a3b"
+      },
+      "speicher": {"schichten": 40, "basis": 6.0, "je_schicht": 0.55, "encoder": 1.1},
       "files": [
         {
           "path": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
@@ -19,6 +29,36 @@
           "target": "mmproj-Qwen3.6-35B-A3B-F16.gguf",
           "size": 899283584,
           "sha256": "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160"
+        }
+      ]
+    },
+    {
+      "id": "llm-gemma",
+      "auswahl": "gemma",
+      "title": "Sprachmodell Gemma 4 26B-A4B (Q4, mit MTP-Kopf)",
+      "kurz": "Gemma 4 26B-A4B (Google), 17,5 GB, ohne Bildeingabe",
+      "license": "Apache-2.0",
+      "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+      "revision": "c099eb48e663fd284577b04978a94ffccb261841",
+      "env": {
+        "LLM_MODEL_FILE": "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
+        "LLM_MTP_MODEL_FILE": "mtp-gemma-4-26B-A4B-it.gguf",
+        "LLM_MMPROJ_FILE": "",
+        "OAI_MODEL": "gemma-4-26b-a4b"
+      },
+      "speicher": {"schichten": 30, "basis": 7.3, "je_schicht": 0.47, "encoder": 1.3},
+      "files": [
+        {
+          "path": "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
+          "target": "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
+          "size": 17010980576,
+          "sha256": "ef728c8e0c337fd1067b947af006e38a9ef2419e56feced4fd29b4bf0636e30c"
+        },
+        {
+          "path": "mtp-gemma-4-26B-A4B-it.gguf",
+          "target": "mtp-gemma-4-26B-A4B-it.gguf",
+          "size": 461766816,
+          "sha256": "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b"
         }
       ]
     },

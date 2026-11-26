@@ -48,7 +48,8 @@ jobs:
       - name: Installer-Skripte (ShellCheck)
         run: |
           bash -n install.sh
-          shellcheck install.sh
+          bash -n setup/bootstrap.sh
+          shellcheck install.sh setup/bootstrap.sh
 
   compose:
     runs-on: ubuntu-latest

@@ -131,6 +131,22 @@ roles, administrator and user.
 
 ### Added
 
+- **Linux server in one command (`setup/bootstrap.sh`).** `curl -fsSL …/setup/bootstrap.sh |
+  bash` checks the server first and says what is missing (CPU architecture, GPU and driver 570
+  or newer, Docker with Compose, NVIDIA Container Toolkit with a test container, RAM, disk space
+  for images and models, proxy, reachability of GitHub, Hugging Face, Docker Hub, ghcr.io, PyPI
+  and Debian), then fetches the code to `~/argus/app` (git or archive) and starts the guided
+  setup, with questions from the terminal even under `curl | bash`. Checked by ShellCheck in CI.
+- **Choice of language model at setup.** The installer asks for Qwen3.6-35B-A3B (default) or
+  Gemma 4 26B-A4B (`--llm qwen|gemma`), downloads only the chosen one and writes its model file,
+  MTP head, image encoder and alias to `.env`. Gemma runs without image input for now. `doctor`,
+  the offline bundle and `--models-only` follow the model in `.env`; a model that is not in
+  `setup/models.json` is left alone.
+- **GPU split from the GPU memory.** The installer computes `LLM_N_CPU_MOE` and
+  `LLM_MMPROJ_OFFLOAD` from the GPU memory and the model's needs in `setup/models.json`: on 16 GB
+  the measured 25 layers in RAM, on a large card (about 31 GB and up for Qwen) everything on the
+  GPU. Own values stay as long as the model stays.
+
 - **Web access is a compose profile (`web`: SearXNG, `local-proxy`).** Without it Argus offers
   the model no tool that reaches the internet (web search, page fetch, research, weather,
   route), the prompts do not describe them, `/v1/dashboard/web_search` answers 503, and the
