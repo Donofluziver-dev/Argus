@@ -129,6 +129,9 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 |---|---|---|
 | Dokumentensuche: richtiges Dokument an erster Stelle | 96 % (vor dem Umbau 67 %) | 60 Fragen an 30 Dokumente, `eval/retrieval` |
 | Dauer einer Dokumentensuche | 3,5 s (vorher 19,9 s), auf der Grafikkarte 0,17 s | ebenda, Suche und Bewertung auf der CPU oder [auf der Grafikkarte](#dokumentensuche-und-sprache-auf-der-grafikkarte) |
+| 30 Dokumente in die Suche aufnehmen | 35 s, auf der Grafikkarte 2 s | ebenda |
+| Spracherkennung, 12 s Sprache | 2,4 bis 4 s, auf der Grafikkarte 0,3 s | Whisper large-v3-turbo, deutscher Satz mit Zahlen und Kennung |
+| Vorlesen, je Sekunde Sprache | 1,3 s, auf der Grafikkarte 0,35 s | Qwen3-TTS 1.7B |
 | Aufgaben, die der ganze Agent richtig löst | 91 von 96 (mit Gemma 4: 94 von 96, [Vergleich](#das-modell-ist-austauschbar)) | 32 Aufgaben mit je 3 Durchläufen gegen den echten Agenten, `eval/agent` |
 | Dauer je Aufgabe | 24 s im Median | ebenda |
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
@@ -620,6 +623,9 @@ Home-Ordner (etwa `/home/anna` als Arbeitsordner) lehnt sie das ab, weil Docker 
 30 GB Platz für die Modelle.
 
 ### Linux-Server mit einem Befehl
+
+**Schritt für Schritt:** [Anleitung für die Installation auf einem Linux-Server](docs/installation-linux-server.md),
+mit Antworten auf jede Frage, Zugriff per SSH-Tunnel, erstem Konto und Hilfe bei Fehlern.
 
 Auf einem Linux-Server mit Docker reicht ein Befehl, als normaler Nutzer in der Gruppe
 `docker`:

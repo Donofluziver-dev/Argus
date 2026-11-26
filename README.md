@@ -102,7 +102,10 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | What | Value | How |
 |---|---|---|
 | Document search: correct document ranked first | 96 % (67 % before the rebuild) | 60 questions on 30 documents, `eval/retrieval` |
-| Time per document search | 3.5 s (19.9 s before) | same, search and reranking on the CPU |
+| Time per document search | 3.5 s (19.9 s before), 0.17 s on the GPU | same, search and reranking on the CPU or on the GPU |
+| Indexing 30 documents | 35 s, 2 s on the GPU | same |
+| Speech recognition, 12 s of speech | 2.4 to 4 s, 0.3 s on the GPU | Whisper large-v3-turbo, German sentence with numbers and an ID |
+| Reading aloud, per second of speech | 1.3 s, 0.35 s on the GPU | Qwen3-TTS 1.7B |
 | Tasks the whole agent solves correctly | 91 of 96 (with Gemma 4: 94 of 96, [comparison](#the-model-is-exchangeable)) | 32 tasks, 3 runs each, against the real agent, `eval/agent` |
 | Time per task | 24 s median | same |
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
@@ -406,7 +409,9 @@ it runs under `sudo`. With SELinux enforcing it offers the `:z` label for all bi
 (measured with 16 GB), 32 GB RAM, about 30 GB of disk space for the models (27 GB, including
 the 0.9 GB image encoder).
 
-**Linux server in one command:** as a normal user in the `docker` group run
+**Linux server in one command** (step-by-step guide in German:
+[docs/installation-linux-server.md](docs/installation-linux-server.md)): as a normal user in the
+`docker` group run
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Donofluziver-dev/Argus/main/setup/bootstrap.sh | bash
@@ -530,7 +535,10 @@ text and images are one model, this covers both.
 ## Measurements
 
 - Document search (`eval/retrieval`, 60 questions over 30 fictional documents): correct
-  document in first place 67 % → 96 %, 3.5 s per search on CPU.
+  document in first place 67 % → 96 %, 3.5 s per search on CPU, 0.17 s on the GPU with the
+  same hits.
+- Speech on the GPU: recognising 12 s of speech 0.3 s instead of 2.4 to 4 s, reading aloud
+  0.35 s instead of 1.3 s per second of speech.
 - Agent (`eval/agent`, real model, three rounds): 73 of 78 main tasks.
 - Scans (`eval/scans`, 11 fictional pages and stress series): 111 of 111 checks; single digits
   silently wrong only below 150 dpi or with 4 pt print.
