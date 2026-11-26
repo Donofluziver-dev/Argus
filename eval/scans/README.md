@@ -113,6 +113,38 @@ Was daraus folgt:
 Für den Betrieb: Scanner auf mindestens 150 dpi stellen, besser 200 dpi, und Werte aus
 gescannten Prüfprotokollen, die über eine Freigabe entscheiden, gegen das Original prüfen.
 
+### Gemma 4 26B-A4B im Vergleich (26.11.2026)
+
+Gemma 4 mit eigenem Bild-Encoder (`mmproj-gemma-4-26B-A4B-it-F16.gguf`), Encoder auf der Karte.
+
+**Die elf Seiten:** 108 von 111 Prüfungen, im Median 2,9 s je Seite (Qwen: 111 von 111,
+14,5 s mit dem Encoder im RAM). Verpasst hat Gemma nur beim Brief: Den Betrag unter dem Stempel
+markierte es als `[unleserlich]`, den Stempel selbst ließ es weg, und aus „Arbeitspreis“ wurde
+still „Lieferpreis“.
+
+**Belastungsreihen**, Werte richtig von 16, Gemma mit `LLM_UBATCH` 512 / 2048 neben Qwen:
+
+| Stufe | Gemma (512) | Gemma (2048) | Qwen |
+|---|---|---|---|
+| 150 und 100 dpi | 16, 16 | – | 16, 15 |
+| 75 dpi | 13 | 14 | 15 |
+| 60 dpi | 1 | 0 | 12 |
+| Unschärfe 2,5 / 3,5 px | 15 / 15 | – | 16 / 16 |
+| JPEG, blasse Schrift | alle 16 | – | alle 16 |
+| Drehung 3° / 10° | 15 / 4 | – / 4 | 16 / 16 |
+| Drehung 90° / 180° | 5 / 16 | 16 / – | 16 / 16 |
+| Schrift 6 / 5 / 4 pt | 13 / 12 / 10 | 16 / – / 12 | 16 / 16 / 14 |
+| Handschrift (3 Schriften) | alle richtig | – | alle richtig |
+
+Mit `LLM_UBATCH=512` meldet llama.cpp, dass Gemmas Budget an Bild-Token begrenzt ist; mit 2048
+liest Gemma kleine Schrift und um 90° gedrehte Seiten sicher, braucht aber rund 1,4 GB mehr
+Grafikspeicher. Bei 10° Schräglage hilft das nicht: Gemma verschob in der Tabelle die Spalten
+Nennmaß, Toleranz und Bewertung um eine Zeile, so dass beim Lochkreis n.i.O. und bei der
+Gesamtlänge i.O. stand, genau vertauscht. Qwen las dieselbe Seite fehlerfrei.
+
+Folgerung: Gemma ist für Bilder und saubere Scans brauchbar und viel schneller. Für Scans,
+deren Werte über eine Freigabe entscheiden, ist Qwen die sicherere Wahl.
+
 Während einer früheren Messreihe ist der Rechner ohne Bluescreen neu gestartet. Der Encoder
 lief damals im RAM und belastete die CPU über Minuten voll. Dasselbe Muster stand schon vorher
 ohne Messung im Ereignisprotokoll. Ein Zusammenhang mit Argus ist nicht belegt; die

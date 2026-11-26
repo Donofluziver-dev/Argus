@@ -65,11 +65,15 @@ def test_16gb_card_gives_the_measured_values(inst):
     assert gemma["LLM_MMPROJ_OFFLOAD"] == "false" and 14 <= int(gemma["LLM_N_CPU_MOE"]) <= 16
 
 
-@pytest.mark.parametrize("auswahl", ["qwen", "gemma"])
-def test_large_card_keeps_everything_on_the_gpu(inst, auswahl):
-    #--- RTX 6000 mit 94 GB: alles auf die Karte, auch der Encoder.
-    assert inst.tune_llm_for_gpu(_speicher(auswahl)["speicher"], 94 * 1024) == {
+def test_large_card_keeps_everything_on_the_gpu(inst):
+    #--- RTX 6000 mit 94 GB: alles auf die Karte, auch der Encoder. Gemma bekommt dazu das
+    #--- volle Budget an Bild-Token (gemessen: kleine Schrift und 90 Grad erst damit sicher).
+    assert inst.tune_llm_for_gpu(_speicher("qwen")["speicher"], 94 * 1024) == {
         "LLM_N_CPU_MOE": "0", "LLM_MMPROJ_OFFLOAD": "true"}
+    assert inst.tune_llm_for_gpu(_speicher("gemma")["speicher"], 94 * 1024) == {
+        "LLM_N_CPU_MOE": "0", "LLM_MMPROJ_OFFLOAD": "true", "LLM_UBATCH": "2048"}
+    #--- Auf 16 GB nicht: das kostete rund 1,4 GB.
+    assert "LLM_UBATCH" not in inst.tune_llm_for_gpu(_speicher("gemma")["speicher"], 16303)
 
 
 def test_more_memory_never_means_more_layers_in_ram(inst):
@@ -111,9 +115,8 @@ def test_switch_to_gemma_and_back(inst, tmp_path):
     env = _env(inst, root)
     assert env["LLM_MODEL_FILE"] == "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
     assert env["LLM_MTP_MODEL_FILE"] == "mtp-gemma-4-26B-A4B-it.gguf"
-    #--- Qwens Bild-Encoder passt nicht zu Gemma und muss raus (Gemmas eigener ist noch
-    #--- nicht getestet, Gemma laeuft vorerst ohne Bildeingabe).
-    assert env["LLM_MMPROJ_FILE"] == ""
+    #--- Gemmas eigener Bild-Encoder; Qwens passt nicht zu Gemma.
+    assert env["LLM_MMPROJ_FILE"] == "mmproj-gemma-4-26B-A4B-it-F16.gguf"
     assert env["OAI_MODEL"] == "gemma-4-26b-a4b" and env["LLM_N_CPU_MOE"] != "25"
 
     inst.apply_llm_choice(root, _speicher("qwen"), 16303, modell_gewechselt=True)

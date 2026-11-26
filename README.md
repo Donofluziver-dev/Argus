@@ -108,7 +108,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
 | Transcribing scans, photos and handwriting | 111 of 111 checks on 11 test pages; wrong digits only below 150 dpi or with 4 pt print | fax, phone photo, form, drawing, stamp and stress series, `eval/scans` |
-| Automated tests | 545 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 544 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -432,11 +432,13 @@ finds or installs Python (asking first), checks Docker (on Windows it offers to 
 Desktop and WSL via `winget`), checks GPU and RAM, asks for the workspace and model folders, the
 language model (Qwen3.6, the default, or Gemma 4) and whether this is a single machine or a
 server, creates the secrets and `.env`, sets how the model is split between GPU and RAM from the
-GPU memory (16 GB: 25 Qwen layers with their experts in RAM; from about 31 GB, Gemma 23 GB,
+GPU memory (16 GB: 25 Qwen layers with their experts in RAM; from about 31 GB, Gemma 24 GB,
 everything on the GPU), downloads the models listed in `setup/models.json`, of the language
 models only the chosen one (pinned to a Hugging Face revision, verified by SHA-256, resumable),
-builds and starts the stack and waits until Argus answers. Gemma runs without image input for
-now; its projector file is not tested yet. Every step asks first; running it again is harmless
+builds and starts the stack and waits until Argus answers. Gemma reads clean scans as well as
+Qwen and about three times faster, but is less reliable on difficult ones (with a page skewed by
+10° it shifted table columns by one row, swapping pass and fail; see `eval/scans`), so Qwen is
+the safer choice where scanned values matter. Every step asks first; running it again is harmless
 and keeps own values in `.env` as long as the model stays. Options: `--yes`, `--llm qwen|gemma`,
 `--workspace`, `--models`, `--server-url`,
 `--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,

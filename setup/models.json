@@ -36,17 +36,19 @@
       "id": "llm-gemma",
       "auswahl": "gemma",
       "title": "Sprachmodell Gemma 4 26B-A4B (Q4, mit MTP-Kopf)",
-      "kurz": "Gemma 4 26B-A4B (Google), 17,5 GB, ohne Bildeingabe",
+      "kurz": "Gemma 4 26B-A4B (Google), 18,7 GB, schneller, liest schiefe Scans unsicherer",
       "license": "Apache-2.0",
       "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
       "revision": "c099eb48e663fd284577b04978a94ffccb261841",
       "env": {
         "LLM_MODEL_FILE": "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
         "LLM_MTP_MODEL_FILE": "mtp-gemma-4-26B-A4B-it.gguf",
-        "LLM_MMPROJ_FILE": "",
+        "LLM_MMPROJ_FILE": "mmproj-gemma-4-26B-A4B-it-F16.gguf",
         "OAI_MODEL": "gemma-4-26b-a4b"
       },
-      "speicher": {"schichten": 30, "basis": 7.3, "je_schicht": 0.47, "encoder": 1.3},
+      "_speicher": "ubatch_bild: Gemmas Bild-Encoder bekommt erst mit dieser Batch-Groesse sein volles Budget an Bild-Token (kleine Schrift, gedrehte Seiten); kostet rund ubatch_kosten GB und wird nur gesetzt, wenn danach alles auf die Karte passt.",
+      "speicher": {"schichten": 30, "basis": 7.3, "je_schicht": 0.47, "encoder": 1.3,
+                   "ubatch_bild": 2048, "ubatch_kosten": 1.4},
       "files": [
         {
           "path": "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
@@ -59,6 +61,12 @@
           "target": "mtp-gemma-4-26B-A4B-it.gguf",
           "size": 461766816,
           "sha256": "6326fb9f5e487aa8dcdd313a091e3c67724cb2a666ec3b7d2895b5b26d93ed1b"
+        },
+        {
+          "path": "mmproj-F16.gguf",
+          "target": "mmproj-gemma-4-26B-A4B-it-F16.gguf",
+          "size": 1193058784,
+          "sha256": "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f"
         }
       ]
     },

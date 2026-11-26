@@ -451,7 +451,12 @@ def tune_llm_for_gpu(speicher: dict, vram_mib: int) -> dict[str, str]:
     #--- Der Encoder kommt auf die Karte, wenn er dort hoechstens eine Schicht verdraengt
     #--- (oder alles passt). Auf 16 GB bleibt er im RAM, wie gemessen und dokumentiert.
     if mit == 0 or mit <= ohne + 1:
-        return {"LLM_N_CPU_MOE": str(mit), "LLM_MMPROJ_OFFLOAD": "true"}
+        out = {"LLM_N_CPU_MOE": str(mit), "LLM_MMPROJ_OFFLOAD": "true"}
+        #--- Mehr Bild-Token (Gemma), nur wenn danach noch alles auf die Karte passt.
+        rest = frei - basis - schichten * je - encoder
+        if mit == 0 and speicher.get("ubatch_bild") and rest >= float(speicher.get("ubatch_kosten", 0)):
+            out["LLM_UBATCH"] = str(int(speicher["ubatch_bild"]))
+        return out
     return {"LLM_N_CPU_MOE": str(ohne), "LLM_MMPROJ_OFFLOAD": "false"}
 
 

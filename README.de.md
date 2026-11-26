@@ -134,7 +134,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
 | Scans, Fotos und Handschrift abschreiben | 111 von 111 Prüfungen auf 11 Testseiten; falsche Zahlen erst unter 150 dpi oder bei 4 pt Schrift | Fax, Handyfoto, Formular, Zeichnung, Stempel und Belastungsreihen, `eval/scans` |
-| Automatische Tests | 545 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 544 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -311,22 +311,27 @@ Modell also beides messen.
 
 Gemma 4 wählt die Installation auf Wunsch selbst: die Frage nach dem Sprachmodell
 beantworten oder `install.sh --llm gemma` (unter Windows `install.cmd --llm gemma`). Sie lädt
-Modell und MTP-Kopf, trägt beides in die `.env` ein und stellt die Aufteilung auf den
-Grafikspeicher ein; ein zweiter Lauf mit `--llm qwen` stellt zurück. Von Hand in der `.env`,
-Sampling-Werte leer lassen:
+Modell, MTP-Kopf und Bild-Encoder, trägt sie in die `.env` ein und stellt die Aufteilung auf
+den Grafikspeicher ein; ein zweiter Lauf mit `--llm qwen` stellt zurück. Von Hand in der
+`.env`, Sampling-Werte leer lassen:
 
 ```ini
 LLM_MODEL_FILE=gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
 LLM_MTP_MODEL_FILE=mtp-gemma-4-26B-A4B-it.gguf
-LLM_N_CPU_MOE=14
+LLM_MMPROJ_FILE=mmproj-gemma-4-26B-A4B-it-F16.gguf
+LLM_N_CPU_MOE=15
 OAI_MODEL=gemma-4-26b-a4b
-LLM_MMPROJ_FILE=
 ```
 
-Beide Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`. Der Bild-Encoder
-von Qwen passt nicht zu Gemma, daher bleibt `LLM_MMPROJ_FILE` leer: Mit Gemma läuft Argus
-vorerst ohne Bildeingabe. Gemmas eigene Zusatzdatei liegt im selben Ordner, ist aber noch
-nicht getestet.
+Alle drei Dateien liegen bei Hugging Face unter `unsloth/gemma-4-26B-A4B-it-GGUF`; Qwens
+Bild-Encoder passt nicht zu Gemma. **Bilder mit Gemma** (gemessen mit `eval/scans`): Saubere
+Scans, Fax, Handyfoto, Handschrift und Zeichnung las es so gut wie Qwen und rund dreimal so
+schnell (3 statt 10 bis 15 s je Seite). Bei schwierigen Scans ist es unsicherer: Bei 10° schief
+eingelegten Seiten rutschten die Spalten einer Tabelle um eine Zeile, so dass i.O. und n.i.O.
+bei zwei Merkmalen vertauscht standen; ab 75 dpi abwärts las es deutlich mehr Ziffern falsch.
+Für Scans, deren Werte zählen, ist Qwen die sicherere Wahl. Gemma braucht dazu
+`LLM_UBATCH=2048` für kleine Schrift und gedrehte Seiten; das kostet rund 1,4 GB Grafikspeicher,
+die Installation setzt es nur auf Karten, auf die dann noch alles passt.
 
 **Ein Modell für Text und Bild.** Alle Modelle in der Tabelle sind multimodal
 (Vision-Language): Sie lesen Text und Bilder mit denselben Gewichten. Eine gescannte Seite, ein
@@ -654,8 +659,8 @@ Geheimnisse und Daten, wie sie sind.
 
 Grafikspeicher: Die Installation liest ihn aus und verteilt das Modell selbst. Auf 16 GB liegen
 bei Qwen 25 Schichten mit ihren Experten im RAM und der Bild-Encoder ebenfalls; ab rund 31 GB
-(Gemma: 23 GB) liegt alles auf der Karte. Ein Server mit großer Karte (etwa 94 GB) braucht also nichts
-einzustellen. Eigene Werte in der `.env` bleiben bei einem zweiten Lauf, solange das Modell
+(Gemma: 24 GB) liegt alles auf der Karte, Gemma bekommt ab rund 26 GB dazu das volle Budget an
+Bild-Token. Ein Server mit großer Karte (etwa 94 GB) braucht also nichts einzustellen. Eigene Werte in der `.env` bleiben bei einem zweiten Lauf, solange das Modell
 gleich bleibt.
 
 ### Geführte Installation
@@ -676,7 +681,7 @@ Installation führt durch diese Schritte:
 5. **Geheimnisse und `.env`** anlegen (`setup/init_stack.py`, in einer eigenen Umgebung
    `.venv-setup`). Ausgegeben werden nur Dateinamen, keine Werte. Dazu das gewählte
    Sprachmodell und seine Aufteilung zwischen Grafikkarte und RAM, passend zum Grafikspeicher.
-6. **Modelle laden** (mit Qwen rund 27 GB, darin 0,9 GB Bild-Encoder; mit Gemma rund 20 GB):
+6. **Modelle laden** (mit Qwen rund 27 GB, darin 0,9 GB Bild-Encoder; mit Gemma rund 22 GB):
    jede Datei aus `setup/models.json`, vom Sprachmodell nur das gewählte, festgelegt auf eine
    Revision bei Hugging Face und nach dem Laden per SHA-256 geprüft. Abgebrochene Downloads
    setzen beim nächsten Lauf fort. Vorhandene Dateien werden nur geprüft.

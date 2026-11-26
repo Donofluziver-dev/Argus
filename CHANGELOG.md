@@ -139,7 +139,8 @@ roles, administrator and user.
   setup, with questions from the terminal even under `curl | bash`. Checked by ShellCheck in CI.
 - **Choice of language model at setup.** The installer asks for Qwen3.6-35B-A3B (default) or
   Gemma 4 26B-A4B (`--llm qwen|gemma`), downloads only the chosen one and writes its model file,
-  MTP head, image encoder and alias to `.env`. Gemma runs without image input for now. `doctor`,
+  MTP head, image encoder and alias to `.env`. Gemma reads images with its own encoder; on a
+  card with room to spare it also gets `LLM_UBATCH=2048` for its full image token budget. `doctor`,
   the offline bundle and `--models-only` follow the model in `.env`; a model that is not in
   `setup/models.json` is left alone.
 - **GPU split from the GPU memory.** The installer computes `LLM_N_CPU_MOE` and
