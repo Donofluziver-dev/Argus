@@ -321,6 +321,10 @@ def generate_env_secrets() -> dict[str, str]:
         "DASHBOARD_SETUP_TOKEN": random_token(18),
         # Sieht aus wie ein echter Schluessel, damit ein Abfluss auffaellt.
         "CANARY_TOKENS": f"sk-argus-{random_token(24)}",
+        # Qdrant nimmt nur Anfragen mit diesem Schluessel an (Backend und Container).
+        "QDRANT_API_KEY": random_token(32),
+        # Backend und Code-Sandbox; ohne ihn nimmt die Sandbox keinen Lauf an.
+        "SANDBOX_TOKEN": random_token(32),
     }
 
 

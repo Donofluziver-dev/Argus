@@ -68,7 +68,7 @@ window.argusChatStream = async function (message, cb) {
         else if (ev.type === 'files') { if (cb.onFiles) cb.onFiles(ev.items || []); }
         else if (ev.type === 'tool_done') { if (cb.onToolDone) cb.onToolDone(ev.index, ev.dauer_ms); }
         else if (ev.type === 'token') { if (cb.onToken) cb.onToken(ev.text); }
-        else if (ev.type === 'done') { gotDone = true; window.setOrbState('idle'); if (cb.onDone) cb.onDone(); }
+        else if (ev.type === 'done') { gotDone = true; window.setOrbState('idle'); if (cb.onDone) cb.onDone(ev); }
       }
     }
   } catch (e) {

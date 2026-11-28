@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import unicodedata
+import uuid
 
 log = logging.getLogger("argus.user_files")
 
@@ -166,6 +167,48 @@ def resolve_user_file(user_id: int, bereich: str, filename: str, must_exist: boo
         raise FileNotFoundError(f"Datei nicht gefunden: {safe_name}")
 
     return target
+
+
+_NEW_FILE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                   | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+_NEW_FILE_MODE = 0o600
+
+
+def _numbered_names(name: str, max_tries: int):
+    yield name
+    stem, ext = os.path.splitext(name)
+    for i in range(2, max_tries):
+        yield f"{stem}_{i}{ext}"
+    yield f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
+
+
+def open_new_file(folder: Path, name: str, max_tries: int = 100) -> tuple[Path, int]:
+    """Legt eine neue Datei im Ordner exklusiv an und liefert (Pfad, Dateideskriptor).
+
+    O_EXCL statt vorheriger Existenzpruefung: Zwei gleichzeitige Uploads gleichen
+    Namens bekommen verschiedene Dateien, keiner ueberschreibt den anderen.
+    O_NOFOLLOW: Ein Symlink an dieser Stelle wird nie verfolgt. Ist der Name belegt,
+    folgen name_2, name_3 ... und zuletzt ein Zufallszusatz."""
+    for cand in _numbered_names(sanitize_filename(name), max_tries):
+        path = folder / sanitize_filename(cand)
+        try:
+            fd = os.open(path, _NEW_FILE_FLAGS, _NEW_FILE_MODE)
+        except FileExistsError:
+            continue
+        return path, fd
+    raise FileExistsError(f"Kein freier Dateiname fuer {name!r}.")
+
+
+def write_new_file(folder: Path, name: str, data: bytes) -> Path:
+    """Schreibt data in eine neue Datei (siehe open_new_file) und liefert ihren Pfad."""
+    path, fd = open_new_file(folder, name)
+    try:
+        with os.fdopen(fd, "wb") as fp:
+            fp.write(data)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 def get_user_files_max_bytes() -> int:

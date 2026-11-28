@@ -507,9 +507,22 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
 - **Freigaben:** Mit dem Cloud-Modul fragt eine Mission vor dem Versand per Karte im Chat
   nach. Freigeben kann nur das Konto, das sie ausgelöst hat.
 - **Anmeldung:** Sitzung als HttpOnly-Cookie, Passwörter mit Argon2, keine
-  Selbstregistrierung, Sperre nach fünf Fehlversuchen. Abmelden und Passwortwechsel beenden
-  alle Sitzungen des Kontos. Das erste Administrator-Konto legt nur an, wer den
-  Einrichtungs-Schlüssel der Installation kennt (`DASHBOARD_SETUP_TOKEN`).
+  Selbstregistrierung. Fünf Fehlversuche von einer Adresse sperren das Konto für diese
+  Adresse; 50 Fehlversuche von beliebigen Adressen sperren es für alle (gegen verteiltes
+  Raten). So kann niemand mit ein paar falschen Passwörtern den Administrator aussperren.
+  Dieselbe Sperre gilt für die API-Anmeldung und für das aktuelle Passwort beim
+  Passwortwechsel. Kontonamen sind ohne Unterschied von Groß- und Kleinschreibung eindeutig.
+  Abmelden und Passwortwechsel beenden alle Sitzungen des Kontos. Das erste
+  Administrator-Konto legt nur an, wer den Einrichtungs-Schlüssel der Installation kennt
+  (`DASHBOARD_SETUP_TOKEN`).
+- **Größe von Anfragen:** Jede Anfrage hat eine Obergrenze, bevor das Backend sie liest:
+  1 MB (`REQUEST_MAX_BYTES`), der Chat so viel, wie Nachricht und erlaubte Bilder brauchen,
+  Uploads `UPLOAD_MAX_BYTES`, Spracheingabe `STT_MAX_UPLOAD_MB`. Der TLS-Proxy weist grob
+  Überlanges schon vorher ab (`ARGUS_PROXY_MAX_BODY`, 600 MB).
+- **Dienste untereinander:** Qdrant nimmt nur Anfragen mit `QDRANT_API_KEY` an, die
+  Code-Sandbox nur mit `SANDBOX_TOKEN` (beide erzeugt `init_stack.py`). Ein kompromittierter
+  Dienst im Netz `intern` liest so nicht die Wissensbasis, und Code in einer Sandbox-Replik
+  kann keine andere beanspruchen.
 - **Audit:** Ein Protokoll mit HMAC-Kette hält fest, was sicherheitsrelevant ist:
   Werkzeugaufrufe mit Schreibzugriff, Sperren nach Firmendaten, Köder-Alarme, Freigaben,
   Anmeldungen (erfolgreich, fehlgeschlagen, gesperrt), Abmeldungen und jede Kontoänderung
@@ -884,6 +897,12 @@ auf. Ein eigener Proxy statt Caddy geht auch: `COMPOSE_PROFILES` ohne `proxy`, u
 Zugriffsprotokoll von `rag-backend`). Er muss `X-Forwarded-Proto` setzen, sonst fehlt dem
 Sitzungs-Cookie das `Secure`. `install.cmd doctor` prüft die Einstellungen.
 
+Die Dienste hinter `intern-proxy` und `local-proxy` (Phoenix 6006, SearXNG 8888, Modell,
+Einbettung und Sprache) liegen nur auf `127.0.0.1`. Auf einem Server mit mehreren
+Shell-Nutzern erreicht sie trotzdem jeder, der sich dort anmelden kann; Phoenix (geschwärzte
+Abläufe) und SearXNG brauchen dafür keinen Schlüssel. Ein Argus-Server gehört deshalb nur
+den Personen, die ihn betreiben.
+
 Für einen Server mit vielen gleichzeitigen Nutzern ist llama.cpp nicht die erste Wahl.
 Das Backend spricht das Modell über eine OpenAI-kompatible Schnittstelle an (`OAI_BASE_URL`);
 ein Betrieb mit vLLM oder SGLang ist damit vorgesehen, mit diesem Stand aber nicht getestet.
@@ -1054,10 +1073,21 @@ weitergegebene Eintrag trägt seine HMAC-Signatur, so lässt er sich dort wieder
 | `CLOUD_AGENTS_ENABLED` | `false` | Cloud-Modelle (Gemini) als Helfer. Ohne `true` geht nichts an ein Cloud-Modell, auch wenn ein Schlüssel hinterlegt ist. |
 | `CLOUD_MISSION_AUTO_APPROVE` | `false` | Mit `true` gehen Cloud-Anfragen ohne Rückfrage raus; Schwärzung, PII-Stopp und Köder-Prüfung laufen trotzdem. In einem Gespräch mit Firmendaten nie ohne Rückfrage. Die Hilfswege ohne Karte (Recherche-Plan, Plan-Prüfung, Fehlersuche) laufen nur mit `true`. |
 | `API_DOCS` | `false` | Mit `true` ist die API-Beschreibung unter `/docs` erreichbar, ohne Anmeldung. |
+| `QDRANT_API_KEY` | von `init_stack.py` erzeugt | Schlüssel für Qdrant; Backend und Container lesen ihn aus der `.env`. Leer = Qdrant ohne Schlüssel. |
+| `SANDBOX_TOKEN` | von `init_stack.py` erzeugt | Geheimnis zwischen Backend und Code-Sandbox. Leer = die Sandbox nimmt Läufe ohne Token an. |
+| `REQUEST_MAX_BYTES` | `1048576` | Obergrenze für eine Anfrage an das Backend; Chat, Uploads und Spracheingabe haben eigene, größere Grenzen. |
 | `AUDIT_ANCHOR_PATH` | `/app/data/audit_anchor.json` | Anker der Audit-Kette: Löschen am Ende fällt bei der Prüfung auf. |
 
-Nach fünf Fehlversuchen ist ein Konto 15 Minuten gesperrt. `alembic/` ist schreibgeschützt
-eingebunden: Die Migrationen laufen beim Start als Code.
+Nach fünf Fehlversuchen von einer Adresse ist ein Konto für diese Adresse 15 Minuten
+gesperrt, nach 50 Fehlversuchen von beliebigen Adressen für alle
+(`DASHBOARD_LOGIN_MAX_FAILS`, `DASHBOARD_LOGIN_MAX_FAILS_ACCOUNT`,
+`DASHBOARD_LOGIN_LOCK_SECONDS`). Ohne vertrauten Proxy kommen hinter der
+Docker-Portweiterleitung alle Clients von derselben Adresse; dann gilt die erste Stufe für
+alle. `alembic/` ist schreibgeschützt eingebunden: Die Migrationen laufen beim Start als Code.
+
+`CORS_ORIGINS` ist leer und sollte es bleiben: Die Oberfläche braucht kein CORS. Wer einen
+Browser-Client unter einer anderen Adresse betreibt, trägt sie dort ein; Cookies gehen auch
+dann nicht mit, nur ein API-Token im Header.
 
 Änderungen am Backend oder an der Oberfläche brauchen einen Neubau:
 `docker compose up -d --build rag-backend`.

@@ -1,6 +1,10 @@
 // ===== Chat-Ansicht: Verlauf aus der Datenbank, Streaming, Werkzeug-Schritte =====
 let chatCurrentId = null;
 let chatBusy = false;
+// Gespraech mit Firmendaten (vom Backend gemeldet): Links in Antworten sind dann nicht
+// klickbar. Eine eingeschleuste Anweisung koennte Daten in eine URL packen, ein Klick
+// truege sie hinaus. Die Adresse bleibt lesbar und kopierbar.
+let chatSensitive = false;
 
 // Bildanhaenge reisen als data-URI mit der Nachricht -- keine Datei auf der Platte.
 // Die Grenzen spiegeln die des Backends, damit der Nutzer das Limit SIEHT, statt
@@ -165,7 +169,10 @@ function chatMd(src) {
 
   // Links NUR mit http/https-Schema. Ohne diese Schranke bliebe ein vom Modell
   // erzeugtes [Klick](javascript:...) ein klickbarer Skript-Aufruf.
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+  t = chatSensitive
+    ? t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                '<span class="chat-link-gesperrt" title="In einem Gespr\u00e4ch mit Firmendaten nicht klickbar">$1 ($2)</span>')
+    : t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
                 '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 
   t = t.split(/\n{2,}/).map(function (p) {
@@ -332,6 +339,7 @@ async function chatOpen(id) {
   try {
     const d = await api('/v1/dashboard/chats/' + id);
     chatCurrentId = d.id;
+    chatSensitive = !!d.sensitive;
     chatSetTitle(d.title, (d.messages || []).length + ' Nachrichten');
     const box = $('chat-messages');
     box.innerHTML = '';
@@ -356,6 +364,7 @@ async function chatNew() {
   try {
     const d = await api('/v1/dashboard/chats', { method: 'POST' });
     chatCurrentId = d.id;
+    chatSensitive = false;
     chatSetTitle('Neuer Chat', '');
     $('chat-messages').innerHTML = '<div class="chat-empty">Neuer Chat &mdash; stell deine Frage.</div>';
     await chatLoadList();
@@ -371,6 +380,7 @@ async function chatDelete(id, ev) {
     await api('/v1/dashboard/chats/' + id, { method: 'DELETE' });
     if (id === chatCurrentId) {
       chatCurrentId = null;
+      chatSensitive = false;
       chatSetTitle('Neuer Chat', '');
       $('chat-messages').innerHTML = '<div class="chat-empty">Chat geloescht.</div>';
     }
@@ -1002,7 +1012,7 @@ function chatRunTurn(text, images) {
     onSession: function (sid) {
       // Die vom Backend angelegte Sitzung uebernehmen, damit Folgefragen im selben
       // Verlauf landen.
-      if (sid && sid !== chatCurrentId) { chatCurrentId = sid; chatLoadList(); }
+      if (sid && sid !== chatCurrentId) { chatCurrentId = sid; chatSensitive = false; chatLoadList(); }
     },
     onReasoning: function (t) { chatSetZustand(ai, 'denken'); chatAddReasoning(ai, t); chatScroll(); },
     onConfirmation: function (ev) { chatAddConfirmation(ai, ev); chatScroll(true); },
@@ -1012,6 +1022,7 @@ function chatRunTurn(text, images) {
     },
     onToolDone: function (index, ms) { chatToolFertig(ai.tools, index, ms); },
     onToolBlocked: function (index) {
+      chatSensitive = true;
       chatToolGesperrt(ai.tools.querySelector('.tool-zeile[data-index="' + index + '"]'));
     },
     onSources: function (items) { chatAddSources(ai, items); chatScroll(); },
@@ -1026,7 +1037,8 @@ function chatRunTurn(text, images) {
       ai.bubble.textContent = acc;
       chatScroll();
     },
-    onDone: function () {
+    onDone: function (ev) {
+      if (ev && ev.sensitive) chatSensitive = true;
       chatSetZustand(ai, null);
       ai.bubble.innerHTML = chatMd(acc);
       chatMarkiereVerweise(ai);

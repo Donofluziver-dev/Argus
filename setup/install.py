@@ -1583,6 +1583,18 @@ def doctor_check_switches(env_data: dict[str, str]) -> list[DoctorResult]:
             "Schalter DASHBOARD_SETUP_TOKEN",
             "DASHBOARD_SETUP_TOKEN ist leer: Beim Erstlauf kann jeder, der die Seite zuerst erreicht, das Administrator-Konto anlegen.",
         ))
+    if not env_data.get("QDRANT_API_KEY", "").strip():
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter QDRANT_API_KEY",
+            "QDRANT_API_KEY ist leer: Jeder Dienst im Netz intern kann die Wissensbasis lesen und aendern. setup/init_stack.py legt den Schluessel an.",
+        ))
+    if not env_data.get("SANDBOX_TOKEN", "").strip():
+        warnings.append(DoctorResult(
+            "WARNUNG",
+            "Schalter SANDBOX_TOKEN",
+            "SANDBOX_TOKEN ist leer: Die Code-Sandbox nimmt Laeufe ohne Token an, auch aus einer anderen Sandbox-Replik. setup/init_stack.py legt ihn an.",
+        ))
     if env_data.get("EGRESS_AFTER_SENSITIVE", "").strip().lower() == "allow":
         warnings.append(DoctorResult(
             "WARNUNG",

@@ -54,6 +54,27 @@ def _write_anchor(count: int, last_sig: str) -> None:
     os.replace(tmp_path, anchor_path)
 
 
+def _advisory_lock(db) -> None:
+    """Advisory-Lock bis zum Ende der Transaktion, weil Hauptprozess und
+    MCP-Subprozess in dieselbe Kette schreiben. SQLite kennt die Funktion nicht."""
+    from sqlalchemy import text as _sa_text
+    try:
+        db.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": 0x4155444954})
+    except Exception:
+        pass
+
+
+def _refresh_anchor() -> None:
+    from rag_backend.database import SessionLocal
+    from rag_backend.models import AuditLog
+    with SessionLocal() as db:
+        _advisory_lock(db)
+        count = db.query(AuditLog).count()
+        last = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+        _write_anchor(count, last.hmac_signature if last else "")
+        db.rollback()
+
+
 def write_audit_log(
     tool: str,
     tool_class: str,
@@ -76,11 +97,7 @@ def write_audit_log(
             # Zeile ein. Aendern/Loeschen/Umsortieren bricht die Kette.
             # Advisory-Lock, weil Hauptprozess und MCP-Subprozess in dieselbe Kette
             # schreiben; SQLite kennt die Funktion nicht -> still ignorieren.
-            from sqlalchemy import text as _sa_text
-            try:
-                db.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": 0x4155444954})
-            except Exception:
-                pass
+            _advisory_lock(db)
             last = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
             prev_sig = last.hmac_signature if (last and last.hmac_signature) else ""
 
@@ -110,17 +127,18 @@ def write_audit_log(
                 hmac_signature=signature,
                 details=details,
             ))
-            #--- Anker NOCH unter dem Advisory-Lock schreiben (er endet mit dem
-            #--- Commit): sonst koennen zwei Schreiber Zaehler und Endsignatur
-            #--- vertauschen, und die Pruefung meldet eine Manipulation, die es
-            #--- nicht gab. Ein Ankerfehler darf den Eintrag selbst nie kosten.
-            db.flush()
-            total_count = db.query(AuditLog).count()
-            try:
-                _write_anchor(total_count, signature)
-            except Exception as anchor_err:
-                log.error(f"audit_log Anker nicht schreibbar: {anchor_err}")
             db.commit()
+
+        #--- Anker erst nach dem Commit: Schlug der Commit fehl, stand vorher ein Anker
+        #--- auf der Platte, den es in der Datenbank nie gab, und die Pruefung meldete
+        #--- eine Manipulation. Eigene Transaktion unter derselben Sperre, mit Zahl und
+        #--- Endsignatur aus der Datenbank: Schreiben zwei Prozesse kurz nacheinander,
+        #--- traegt jeder den dann aktuellen Stand ein, keiner einen veralteten.
+        #--- Ein Ankerfehler darf den Eintrag selbst nie kosten.
+        try:
+            _refresh_anchor()
+        except Exception as anchor_err:
+            log.error(f"audit_log Anker nicht schreibbar: {anchor_err}")
 
         # Weitergabe an SIEM (optional, blockiert nicht)
         try:

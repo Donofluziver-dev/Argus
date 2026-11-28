@@ -56,7 +56,7 @@ SENSITIVE_SOURCE_TOOLS = frozenset({
     "ingest_document",
     "fs_read_file",
     "fs_list_directory",
-    "execute_code",  # Sandbox liest C:\Argus_Workspace
+    "execute_code",  # Sandbox bekommt die Dateien des Kontos
 })
 
 LOCAL_FS_MCP_TOOLS = frozenset({
@@ -317,6 +317,15 @@ def activate_conversation_state(
     return state
 
 
+def activate_isolated_state(label: str) -> EgressState:
+    """Frischer, unmarkierter Zustand fuer einen Aufruf ohne Gespraech (etwa die
+    Websuche der Desktop-App). Er wird nicht in _SESSION_STATES eingetragen und
+    verdraengt dort keine Gespraeche; er gilt nur im aktuellen Kontext."""
+    state = EgressState(session_key=f"{label}:{os.urandom(8).hex()}", db_checked=True)
+    egress_state_var.set(state)
+    return state
+
+
 def clear_memory_state() -> None:
     """Leert den In-Memory-Zustand (z.B. zur Simulation eines Backend-Neustarts in Tests).
     Die Datenbank-Spalten bleiben unberührt."""
@@ -345,6 +354,16 @@ def is_block_message(text: Any) -> bool:
         return False
     t = text.lstrip()
     return t.startswith((BLOCK_MESSAGE, CONTENT_BLOCK_MESSAGE, CONFIRM_DENIED_MESSAGE))
+
+
+def is_session_marked(session_key: str) -> bool:
+    """True, wenn das Gespraech mit diesem Schluessel (z. B. "dashboard:12")
+    Firmendaten gelesen hat: im Speicher markiert oder in der Datenbank vermerkt.
+    Fuer die Oberflaeche; aendert keinen Zustand."""
+    state = _SESSION_STATES.get(session_key)
+    if state is not None and state.marked:
+        return True
+    return _load_marked_from_db(session_key)
 
 
 def is_conversation_sensitive() -> bool:

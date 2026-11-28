@@ -38,7 +38,8 @@ def _get_qdrant() -> qdrant_client.QdrantClient:
             print("  Qdrant wird im In-Memory-Modus initialisiert (Tests).")
             _QDRANT_CLIENT = qdrant_client.QdrantClient(location=":memory:")
         else:
-            _QDRANT_CLIENT = qdrant_client.QdrantClient(url=os.getenv("QDRANT_URL", "http://qdrant:6333"))
+            from rag_backend.qdrant_conn import make_qdrant_client
+            _QDRANT_CLIENT = make_qdrant_client()
     return _QDRANT_CLIENT
 
 

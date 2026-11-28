@@ -425,7 +425,8 @@ async def startup_load_models():
         log.info("Startup: Lege Qdrant- und HTTP-Clients an...")
         try:
             if _qdrant_client is None:
-                _qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL", "http://qdrant:6333"))
+                from rag_backend.qdrant_conn import make_qdrant_client
+                _qdrant_client = make_qdrant_client()
             if _http_client_internal is None:
                 _http_client_internal = httpx.AsyncClient(timeout=15.0)
             if _http_client_web is None:
@@ -1543,6 +1544,12 @@ async def _sandbox_post(path: str, payload: dict, timeout: float) -> httpx.Respo
         wait_s = 30.0
     deadline = time.monotonic() + max(0.0, wait_s)
     host_header = f"{host}:{_SANDBOX_PORT}"
+    headers = {"Host": host_header}
+    #--- Gemeinsames Geheimnis mit der Sandbox (calc_sandbox/app.py): Ohne es nimmt
+    #--- eine Replik keinen Lauf an, auch nicht von einer anderen Replik aus.
+    token = (os.getenv("SANDBOX_TOKEN") or "").strip()
+    if token:
+        headers["X-Sandbox-Token"] = token
 
     async with _new_sandbox_client(timeout) as client:
         while True:
@@ -1554,7 +1561,7 @@ async def _sandbox_post(path: str, payload: dict, timeout: float) -> httpx.Respo
                     resp = await client.post(
                         f"http://{netloc}:{_SANDBOX_PORT}{path}",
                         json=payload,
-                        headers={"Host": host_header},
+                        headers=headers,
                     )
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     log.debug(f"Sandbox {addr} nicht erreichbar: {type(e).__name__}")
@@ -1594,10 +1601,10 @@ async def calculate(expression: str) -> str:
 # ---- Tool: execute_code
 
 def _mark_sandbox_output(res_json) -> None:
-    """Die Sandbox liest C:\\Argus_Workspace (/app/data). Ob der Code das getan
-    hat, laesst sich nicht verlaesslich erkennen (pwsh, ctypes, Unterprozesse),
-    darum zaehlt jede Ausfuehrung als vertrauliche Quelle. Auch die Fehlerausgabe,
-    sie enthaelt bis dahin gedrucktes stdout."""
+    """Die Sandbox bekommt die Dateien des Kontos (./data/). Ob der Code sie gelesen
+    hat, laesst sich nicht verlaesslich erkennen, darum zaehlt jede Ausfuehrung als
+    vertrauliche Quelle. Auch die Fehlerausgabe, sie enthaelt bis dahin gedrucktes
+    stdout."""
     if not isinstance(res_json, dict):
         return
     out = res_json.get("result") or res_json.get("error")
@@ -1680,8 +1687,10 @@ async def execute_code(code: str) -> str:
                     rf_name = user_files.safe_filename(rf.get("name") or "")
                     rf_bytes = base64.b64decode(rf.get("content") or "")
                     user_files.check_user_quota(user_id, len(rf_bytes))
-                    rf_path = erg_dir / rf_name
-                    rf_path.write_bytes(rf_bytes)
+                    #--- Neue Datei statt Ueberschreiben: Ein zweiter Lauf mit gleichem
+                    #--- Dateinamen legt bericht_2.csv an, das erste Ergebnis bleibt.
+                    rf_path = user_files.write_new_file(erg_dir, rf_name, rf_bytes)
+                    rf_name = rf_path.name
                     created_names.append(f"Ergebnisse/{rf_name}")
                     dateien_merken([{"bereich": "ergebnisse", "name": rf_name, "size": len(rf_bytes)}])
                 except Exception as e:
@@ -2755,8 +2764,8 @@ async def save_artifact(filename: str, content: str) -> str:
         content_bytes = content.encode("utf-8")
         user_files.check_user_quota(user_id, len(content_bytes))
         target_dir = user_files.get_user_dir(user_id, "ergebnisse", create=True)
-        target_path = target_dir / clean_name
-        target_path.write_bytes(content_bytes)
+        target_path = user_files.write_new_file(target_dir, clean_name, content_bytes)
+        clean_name = target_path.name
         dateien_merken([{"bereich": "ergebnisse", "name": clean_name, "size": len(content_bytes)}])
         log.info(f"Artefakt gespeichert: Ergebnisse/{clean_name} (User {user_id})")
         return f"Saved as Ergebnisse/{clean_name}; the user can download it from the chat."

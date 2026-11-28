@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import ctypes
+import hmac
 import os
 import re as _re
 import resource
@@ -94,6 +95,32 @@ def _harden_service_process() -> None:
 
 
 _harden_service_process()
+
+
+#--- Gemeinsames Geheimnis mit dem Backend (SANDBOX_TOKEN aus der .env). Die Repliken
+#--- haengen im selben Netz: Ohne Token koennte Code in einer Replik eine andere
+#--- ueber /execute beanspruchen und sie so fuer den naechsten echten Lauf verbrauchen,
+#--- oder den eigenen Dienst auf 127.0.0.1:8001 ansprechen. Der Wert wird aus der
+#--- Umgebung genommen, sobald er gelesen ist; Laeufe bekommen ohnehin eine eigene,
+#--- leere Umgebung, und /proc/1/environ ist fuer runner und calc nicht lesbar
+#--- (Dienst nicht dumpbar). Ohne Wert (alte .env) prueft die Sandbox nichts.
+_SANDBOX_TOKEN = os.environ.pop("SANDBOX_TOKEN", "").strip()
+if not _SANDBOX_TOKEN:
+    print("[calc-sandbox] WARNUNG: SANDBOX_TOKEN fehlt -- Anfragen werden ohne Token "
+          "angenommen. setup/init_stack.py legt ihn in der .env an.", flush=True)
+
+
+def _token_ok(given: str | None) -> bool:
+    if not _SANDBOX_TOKEN:
+        return True
+    return hmac.compare_digest((given or "").encode("utf-8"), _SANDBOX_TOKEN.encode("utf-8"))
+
+
+@app.middleware("http")
+async def _require_sandbox_token(request, call_next):
+    if request.url.path != "/healthz" and not _token_ok(request.headers.get("x-sandbox-token")):
+        return JSONResponse(status_code=401, content={"error": "Nicht autorisiert."})
+    return await call_next(request)
 
 
 def _has_required_capabilities() -> bool:

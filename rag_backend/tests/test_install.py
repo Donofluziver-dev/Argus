@@ -610,6 +610,8 @@ def test_doctor_check_env_and_switches(installer, tmp_path):
         "EGRESS_AFTER_SENSITIVE": "block",
         "WEB_INJECTION_GUARD": "true",
         "API_DOCS": "false",
+        "QDRANT_API_KEY": "qdrant-schluessel-wert",
+        "SANDBOX_TOKEN": "sandbox-token-wert",
     }
     sw_ok = installer.doctor_check_switches(safe_env)
     assert len(sw_ok) == 1 and sw_ok[0].status == "OK"
@@ -624,7 +626,7 @@ def test_doctor_check_env_and_switches(installer, tmp_path):
         "API_DOCS": "true",
     }
     sw_warn = installer.doctor_check_switches(risky_env)
-    assert len(sw_warn) == 6
+    assert len(sw_warn) == 8
     assert all(w.status == "WARNUNG" for w in sw_warn)
     combined = " ".join(w.message for w in sw_warn)
     for expected_name in (
@@ -634,6 +636,8 @@ def test_doctor_check_env_and_switches(installer, tmp_path):
         "EGRESS_AFTER_SENSITIVE",
         "WEB_INJECTION_GUARD",
         "API_DOCS",
+        "QDRANT_API_KEY",
+        "SANDBOX_TOKEN",
     ):
         assert expected_name in combined
 

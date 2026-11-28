@@ -39,6 +39,14 @@
 	header @not_localhost Strict-Transport-Security "max-age=31536000"
 	header -Server
 
+	# Aeussere Grenze fuer Request-Bodies. Die genauen Grenzen je Route setzt das
+	# Backend (Standard 1 MB, Chat mit Bildern rund 22 MB, Uploads UPLOAD_MAX_BYTES);
+	# hier faellt nur grob Ueberlanges ab, bevor es das Backend erreicht. Bei
+	# groesserem UPLOAD_MAX_BYTES mit anheben.
+	request_body {
+		max_size {$ARGUS_PROXY_MAX_BODY:600MB}
+	}
+
 	# SSE-Chat und lange Modell-Antworten: kein Puffern (flush_interval -1)
 	# und mindestens 30 Minuten Timeout wie bei den internen nginx-Proxys.
 	reverse_proxy rag-backend:7860 {

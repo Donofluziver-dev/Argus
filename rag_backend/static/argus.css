@@ -1127,6 +1127,7 @@
     color: #9ff0ff;
   }
   .chat-bubble a { color: var(--color-cyan); }
+  .chat-bubble .chat-link-gesperrt { color: var(--text-secondary); border-bottom: 1px dotted currentColor; cursor: help; overflow-wrap: anywhere; }
   /* Tabellen: das Modell liefert bei jedem Vergleich eine, vorher standen die
      rohen Pipe-Zeichen im Chat. Waagerecht scrollbar statt umbrechend, sonst
      sprengt eine breite Kostentabelle die Blase. */

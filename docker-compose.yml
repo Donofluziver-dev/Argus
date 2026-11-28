@@ -197,6 +197,9 @@ services:
     environment:
       # Ohne Ausgang liefe die Nutzungsstatistik nur in Fehler.
       - QDRANT__TELEMETRY_DISABLED=true
+      # Ohne Schluessel lesen und aendern alle Dienste im Netz "intern" die
+      # Wissensbasis. qdrant_start.sh reicht ihn an Qdrant weiter.
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     #--- Laeuft weiter als root: das bestehende qdrant_data-Volume gehoert root,
     #--- ein Wechsel auf 1000:1000 braeuchte vorher ein chown. Ohne Capabilities
     #--- kann root dort nur noch auf eigene Dateien zugreifen.
@@ -268,6 +271,9 @@ services:
     restart: unless-stopped
     environment:
       - SANDBOX_ONE_RUN=true
+      # Gemeinsames Geheimnis mit dem Backend: Ohne es nimmt keine Replik einen Lauf
+      # an, auch nicht aus einer anderen Replik heraus.
+      - SANDBOX_TOKEN=${SANDBOX_TOKEN:-}
     networks:
       - sandbox
     read_only: true
@@ -318,7 +324,7 @@ services:
       - intern
     read_only: true
     tmpfs:
-      - /tmp:size=256m
+      - /tmp:size=256m,noexec
     environment:
       - QWEN_LANG=${QWEN_LANG:-auto}
       - QWEN_VOICE=${QWEN_VOICE:-}
@@ -348,6 +354,7 @@ services:
     cap_drop:
       - ALL
     mem_limit: 12g
+    pids_limit: 256
     ulimits:
       memlock: -1
     healthcheck:
@@ -381,6 +388,7 @@ services:
       - ALL
     mem_limit: 3g
     cpus: "4.0"
+    pids_limit: 256
     # Argus Desktop erreicht STT ueber intern-proxy (127.0.0.1:8003), mit dem LLM-API-Key.
     volumes:
       - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
@@ -584,6 +592,7 @@ services:
     environment:
       - ARGUS_DOMAIN=${ARGUS_DOMAIN:-localhost}
       - ARGUS_TLS_MODE=${ARGUS_TLS_MODE:-internal}
+      - ARGUS_PROXY_MAX_BODY=${ARGUS_PROXY_MAX_BODY:-600MB}
     # Ports 80 und 443 ohne Root und ohne Capability. Docker setzt das seit 20.10
     # ohnehin; hier steht es ausdruecklich, falls eine Installation es aendert.
     sysctls:

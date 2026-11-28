@@ -4,3 +4,4 @@
 *
 !llm_start.sh
 !embed_start.sh
+!qdrant_start.sh

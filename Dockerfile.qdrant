@@ -3,3 +3,6 @@ USER 0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
+COPY qdrant_start.sh /usr/local/bin/qdrant_start.sh
+RUN chmod 0755 /usr/local/bin/qdrant_start.sh
+CMD ["/usr/local/bin/qdrant_start.sh"]

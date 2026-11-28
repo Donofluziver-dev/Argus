@@ -74,8 +74,9 @@ def test_login_audit_success_failed_locked_no_password(client):
 
     # 4. Sperre nach Fehlversuchen provozieren
     from rag_backend.main import _LOGIN_MAX_FAILS, _login_failed
+    #--- Die Sperre gilt je Konto und Adresse; der TestClient kommt als "testclient".
     for _ in range(_LOGIN_MAX_FAILS):
-        _login_failed("adminuser")
+        _login_failed("adminuser", "testclient")
 
     r_lock = client.post("/v1/dashboard/auth/login", headers=DASH_ORIGIN,
                          json={"username": "adminuser", "password": "IrgendwasPasswort123!"})

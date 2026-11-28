@@ -693,6 +693,33 @@ def test_no_silent_fallback_when_privilege_drop_unavailable(monkeypatch):
 
 
 
+def test_requests_without_sandbox_token_are_rejected(monkeypatch):
+    """Mit SANDBOX_TOKEN nimmt die Sandbox nur Anfragen mit diesem Token an. So kann
+    Code in einer Replik keine andere Replik (und nicht den eigenen Dienst) aufrufen."""
+    from fastapi.testclient import TestClient
+    import sys
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    client = TestClient(mod.app)
+    monkeypatch.setattr(mod, "_SANDBOX_TOKEN", "richtiges-token-0123456789")
+
+    assert client.get("/healthz").status_code == 200
+    for headers in ({}, {"X-Sandbox-Token": "falsch"}, {"X-Sandbox-Token": "richtiges-token-012345678"}):
+        r_exec = client.post("/execute", json={"code": "print(1)"}, headers=headers)
+        assert r_exec.status_code == 401
+        r_calc = client.post("/calculate", json={"expression": "1+1"}, headers=headers)
+        assert r_calc.status_code == 401
+
+    ok = client.post("/calculate", json={"expression": "6 * 7"},
+                     headers={"X-Sandbox-Token": "richtiges-token-0123456789"})
+    assert ok.status_code == 200
+    assert ok.json() == {"result": "Ergebnis: 42"}
+
+
+def test_sandbox_token_is_removed_from_environment():
+    import sys
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    assert "SANDBOX_TOKEN" not in os.environ
+    assert isinstance(mod._SANDBOX_TOKEN, str)
 
 
 def _warte_auf_zombie(pid: int, timeout: float = 3.0) -> None:
@@ -908,8 +935,10 @@ def test_one_run_first_run_ok_second_503_retire_once_after_response(one_run, mon
 
     #--- Erst Antwort, dann Wartezeit bis zur Mindestlaufzeit, dann genau ein _retire.
     assert [e if isinstance(e, str) else e[0] for e in events] == ["response", "wait", "retire"]
+    #--- Gewartet wird der Rest bis 10 s seit dem Start: hoechstens 7 s, abzueglich
+    #--- der Dauer des Laufs selbst (pandas-Import, je nach Rechner 0,5 bis 2 s).
     waited = events[1][1]
-    assert 6.0 <= waited <= 7.0 + 0.5
+    assert 0.0 < waited <= 7.0 + 0.5
 
     r2 = client.post("/execute", json={"code": "print('zweiter Lauf')", "language": "python", "timeout": 5.0})
     assert r2.status_code == 503

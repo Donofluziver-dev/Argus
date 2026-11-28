@@ -216,15 +216,14 @@ def _run_migrations():
         log.warning(f"ALTER TABLE for sensitive session columns failed: {_e}")
 
 def _ensure_qdrant_collection():
-    import qdrant_client
     # Erstellungslogik lebt zentral in ingest.py. dim kommt hier aus der .env,
     # weil das Embedding-Modell beim Startup noch nicht geladen sein soll.
     from rag_backend.ingest import ensure_qdrant_collection
-    url = os.getenv("QDRANT_URL", "http://qdrant:6333")
+    from rag_backend.qdrant_conn import make_qdrant_client
     collection = os.getenv("QDRANT_COLLECTION", "docs")
     dim = int(os.getenv("EMBEDDING_DIM", 1024))
     try:
-        qc = qdrant_client.QdrantClient(url=url)
+        qc = make_qdrant_client()
         # Legt die Sammlung im Hybrid-Aufbau an oder zieht einen alten Aufbau
         # um (bettet dafuer ueber den Container embed neu ein).
         created = ensure_qdrant_collection(qc, collection, dim)
@@ -456,24 +455,55 @@ limiter = Limiter(key_func=_rate_limit_key)
 #--- Die API-Beschreibung (/docs, /redoc, /openapi.json) ist ohne Anmeldung lesbar
 #--- und zaehlt jede Route auf. Aus, solange sie niemand ausdruecklich einschaltet.
 _API_DOCS = os.getenv("API_DOCS", "false").strip().lower() == "true"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+#--- Obergrenzen fuer Request-Bodies. Ohne sie liest FastAPI jeden Body vor jeder
+#--- Pruefung (auch vor Ratenlimit und Anmeldung) komplett in den Speicher. Der
+#--- Standard gilt fuer alle Routen; Chat, Uploads und Spracheingabe heben ihn an
+#--- ihrer Route an (max_body_size im Dekorator).
+_MB = 1024 * 1024
+_MAX_BODY_DEFAULT = _env_int("REQUEST_MAX_BYTES", _MB)
+_MAX_MESSAGE_CHARS = _env_int("DASHBOARD_MAX_MESSAGE_CHARS", 200000)
+_MAX_UPLOAD_BYTES = _env_int("UPLOAD_MAX_BYTES", 500 * _MB)
+#--- Etwas ueber der Grenze der Route: so meldet die Route ihren eigenen Grund
+#--- ("Aufnahme zu gross"), und erst ein grob ueberlanger Body scheitert hier.
+_MAX_UPLOAD_BODY = _MAX_UPLOAD_BYTES + 2 * _MB
+_MAX_STT_BODY = _env_int("STT_MAX_UPLOAD_MB", 25) * _MB + 2 * _MB
+#--- Chat: Nachricht (bis 4 Byte je Zeichen) plus die erlaubten Bilder als data-URI.
+_MAX_CHAT_BODY = 4 * _MAX_MESSAGE_CHARS + _MAX_IMAGES * _MAX_IMAGE_DATA_CHARS + 2 * _MB
+
 app = FastAPI(
     title="Argus",
     lifespan=lifespan,
     docs_url="/docs" if _API_DOCS else None,
     redoc_url="/redoc" if _API_DOCS else None,
     openapi_url="/openapi.json" if _API_DOCS else None,
+    max_body_size=_MAX_BODY_DEFAULT,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
+#--- CORS nur auf ausdruecklichen Wunsch und nie mit Cookies: Die Oberflaeche liegt
+#--- same-origin und braucht kein CORS. Mit allow_credentials haette jede Seite der
+#--- erlaubten Origin (frueher fest http://localhost:3000) die Chats mit dem
+#--- Sitzungs-Cookie lesen koennen. Ein Bearer-Token im Authorization-Header geht
+#--- weiterhin, es zaehlt fuer CORS nicht als Credential.
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if _CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 #--- Der Container calc-sandbox haengt im selben Docker-Netz wie das Backend,
 #--- braucht dessen API auf Port 7860 aber nie. Der Anfragepfad macht NIE eine
@@ -959,7 +989,7 @@ def dashboard_auth_register(request: Request, body: DashboardLoginIn,
     if len(name) < 3 or len(body.password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             detail="Benutzername ab 3, Passwort ab 8 Zeichen.")
-    if db.query(User).filter_by(email=name).first():
+    if _name_taken(db, name):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Benutzername ist vergeben.")
     user = User(email=name, hashed_password=_ph.hash(body.password), role="user")
     db.add(user)
@@ -1014,29 +1044,104 @@ def dashboard_auth_setup(request: Request, body: DashboardUserIn,
     return resp
 
 
-#--- Fehlversuche pro Benutzername. Das IP-Limit allein greift hinter der
-#--- Docker-Portweiterleitung nicht: alle Clients kommen von derselben Adresse.
+#--- Fehlversuche zaehlen zweifach: je Konto UND Adresse (sperrt nach wenigen
+#--- Versuchen) und je Konto ueber alle Adressen (sperrt erst bei vielen, gegen
+#--- verteiltes Raten). Frueher zaehlte nur der Name: Dann konnte jeder im Netz mit
+#--- fuenf falschen Passwoertern alle 15 Minuten den Administrator aussperren. Hinter
+#--- der Docker-Portweiterleitung ohne vertrauten Proxy kommen alle Clients von
+#--- derselben Adresse; dann wirkt die erste Stufe wie eine Sperre je Konto.
 _LOGIN_FAILS: dict[str, list[float]] = {}
 _LOGIN_FAIL_LOCK = threading.Lock()
-_LOGIN_MAX_FAILS = int(os.getenv("DASHBOARD_LOGIN_MAX_FAILS", "5"))
-_LOGIN_LOCK_SECONDS = int(os.getenv("DASHBOARD_LOGIN_LOCK_SECONDS", "900"))
+_LOGIN_MAX_FAILS = _env_int("DASHBOARD_LOGIN_MAX_FAILS", 5)
+_LOGIN_MAX_FAILS_ACCOUNT = _env_int("DASHBOARD_LOGIN_MAX_FAILS_ACCOUNT", 50)
+_LOGIN_LOCK_SECONDS = _env_int("DASHBOARD_LOGIN_LOCK_SECONDS", 900)
+_LOGIN_FAIL_ENTRIES_MAX = 10000
 #--- Gegen Timing: unbekannte Namen pruefen trotzdem einen Hash.
 _DUMMY_HASH = _ph.hash("argus-dummy-password-for-timing")
 
 
-def _login_locked(name: str) -> bool:
+def _client_addr(request: Request | None) -> str:
+    if request is None or not getattr(request, "client", None):
+        return ""
+    return (request.client.host or "").strip().lower()
+
+
+def _fail_keys(name: str, addr: str) -> tuple[str, str]:
+    norm = (name or "").strip().lower()[:256]
+    return f"konto:{norm}", f"paar:{norm}|{(addr or '').strip().lower()}"
+
+
+def _fail_limit(key: str) -> int:
+    return _LOGIN_MAX_FAILS_ACCOUNT if key.startswith("konto:") else _LOGIN_MAX_FAILS
+
+
+def _recent_fails(key: str, now: float) -> list[float]:
+    fails = [t for t in _LOGIN_FAILS.get(key, ()) if now - t < _LOGIN_LOCK_SECONDS]
+    if fails:
+        _LOGIN_FAILS[key] = fails
+    else:
+        _LOGIN_FAILS.pop(key, None)
+    return fails
+
+
+def _prune_login_fails(now: float) -> None:
+    """Haelt die Tabelle klein, ohne bestehende Sperren aufzuheben: erst Abgelaufenes,
+    dann die aeltesten Eintraege, die (noch) keine Sperre ausloesen."""
+    for key in list(_LOGIN_FAILS):
+        _recent_fails(key, now)
+    overflow = len(_LOGIN_FAILS) - _LOGIN_FAIL_ENTRIES_MAX
+    if overflow <= 0:
+        return
+    unlocked = sorted(
+        (k for k, f in _LOGIN_FAILS.items() if len(f) < _fail_limit(k)),
+        key=lambda k: _LOGIN_FAILS[k][-1],
+    )
+    for key in unlocked[:overflow]:
+        _LOGIN_FAILS.pop(key, None)
+
+
+def _login_locked(name: str, addr: str = "") -> bool:
+    now = time.time()
+    konto, paar = _fail_keys(name, addr)
+    with _LOGIN_FAIL_LOCK:
+        return (len(_recent_fails(paar, now)) >= _LOGIN_MAX_FAILS
+                or len(_recent_fails(konto, now)) >= _LOGIN_MAX_FAILS_ACCOUNT)
+
+
+def _login_failed(name: str, addr: str = "") -> None:
     now = time.time()
     with _LOGIN_FAIL_LOCK:
-        fails = [t for t in _LOGIN_FAILS.get(name, []) if now - t < _LOGIN_LOCK_SECONDS]
-        _LOGIN_FAILS[name] = fails
-        return len(fails) >= _LOGIN_MAX_FAILS
+        for key in _fail_keys(name, addr):
+            fails = _LOGIN_FAILS.setdefault(key, [])
+            fails.append(now)
+            del fails[:-_fail_limit(key)]
+        if len(_LOGIN_FAILS) > _LOGIN_FAIL_ENTRIES_MAX:
+            _prune_login_fails(now)
 
 
-def _login_failed(name: str) -> None:
+def _login_succeeded(name: str, addr: str = "") -> None:
+    """Nach einer erfolgreichen Anmeldung zaehlen die Fehlversuche dieser Adresse nicht
+    weiter. Der Zaehler je Konto bleibt: Er gilt dem verteilten Raten."""
     with _LOGIN_FAIL_LOCK:
-        _LOGIN_FAILS.setdefault(name, []).append(time.time())
-        if len(_LOGIN_FAILS) > 10000:
-            _LOGIN_FAILS.clear()
+        _LOGIN_FAILS.pop(_fail_keys(name, addr)[1], None)
+
+
+def _find_account(db: Session, name: str) -> User | None:
+    """Konto zum Namen: zuerst exakt, sonst ohne Gross-/Kleinschreibung, wenn das
+    eindeutig ist. Neue Konten koennen sich nur noch darin nicht unterscheiden."""
+    if not name:
+        return None
+    user = db.query(User).filter_by(email=name).first()
+    if user is not None:
+        return user
+    from sqlalchemy import func
+    rows = db.query(User).filter(func.lower(User.email) == name.lower()).limit(2).all()
+    return rows[0] if len(rows) == 1 else None
+
+
+def _name_taken(db: Session, name: str) -> bool:
+    from sqlalchemy import func
+    return db.query(User.id).filter(func.lower(User.email) == name.lower()).first() is not None
 
 
 @app.post("/v1/dashboard/auth/login", tags=["Dashboard"])
@@ -1045,9 +1150,10 @@ def dashboard_auth_login(request: Request, body: DashboardLoginIn,
                          db: Session = Depends(get_db),
                          csrf = Depends(check_dashboard_csrf)):
     name = body.username.strip()
-    user = db.query(User).filter_by(email=name).first()
+    addr = _client_addr(request)
+    user = _find_account(db, name)
     exists = bool(user and user.id != _SERVICE_UID)
-    if _login_locked(name.lower()):
+    if _login_locked(name, addr):
         audit_auth("auth.login", status="locked", request=request, account=name, account_exists=exists)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Zu viele Fehlversuche. Bitte spaeter erneut versuchen.")
@@ -1059,10 +1165,11 @@ def dashboard_auth_login(request: Request, body: DashboardLoginIn,
             raise VerifyMismatchError()
         _ph.verify(user.hashed_password, body.password)
     except (VerifyMismatchError, InvalidHash):
-        _login_failed(name.lower())
+        _login_failed(name, addr)
         reason = "wrong_password" if exists else "unknown_account"
         audit_auth("auth.login", status="failed", request=request, account=name, account_exists=exists, details={"reason": reason})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Anmeldung fehlgeschlagen.")
+    _login_succeeded(name, addr)
     if _ph.check_needs_rehash(user.hashed_password):
         user.hashed_password = _ph.hash(body.password)
         db.commit()
@@ -1091,15 +1198,24 @@ def dashboard_auth_logout(request: Request, db: Session = Depends(get_db),
 
 
 @app.post("/v1/dashboard/auth/password", tags=["Dashboard"])
+@limiter.limit(lambda: os.getenv("DASHBOARD_PASSWORD_RATE_LIMIT", "10/minute"))
 def dashboard_auth_password(request: Request, body: DashboardPasswordIn,
                             user: User = Depends(dashboard_user),
                             db: Session = Depends(get_db),
                             csrf = Depends(check_dashboard_csrf)):
     if len(body.password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Passwort ab 8 Zeichen.")
+    #--- Wer nur das Cookie hat, soll das Passwort nicht beliebig oft raten koennen:
+    #--- dieselbe Sperre wie bei der Anmeldung, unter eigenem Schluessel.
+    fail_key, addr = f"passwortwechsel:{user.id}", _client_addr(request)
+    if _login_locked(fail_key, addr):
+        audit_auth("auth.password_change", status="locked", request=request, user_id=user.id, account=user.email, account_exists=True)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Zu viele Fehlversuche. Bitte spaeter erneut versuchen.")
     try:
         _ph.verify(user.hashed_password, body.current_password)
     except (VerifyMismatchError, InvalidHash):
+        _login_failed(fail_key, addr)
         audit_auth("auth.password_change", status="failed", request=request, user_id=user.id, account=user.email, account_exists=True, details={"reason": "wrong_current_password"})
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Aktuelles Passwort stimmt nicht.")
     user.hashed_password = _ph.hash(body.password)
@@ -1154,7 +1270,7 @@ def dashboard_user_create(body: DashboardUserIn, db: Session = Depends(get_db),
                             detail="Benutzername ab 3, Passwort ab 8 Zeichen.")
     if body.role not in DASHBOARD_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Unbekannte Rolle.")
-    if db.query(User).filter_by(email=name).first():
+    if _name_taken(db, name):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Benutzername ist vergeben.")
     user = User(email=name, hashed_password=_ph.hash(body.password), role=body.role)
     db.add(user)
@@ -1255,27 +1371,37 @@ def _remove_user_files(user_id: int) -> None:
 def register(request: Request, body: RegisterRequest, db: Session = Depends(get_db)):
     if os.getenv("ENABLE_BACKEND_SIGNUP", "false").lower() != "true":
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Registrierung deaktiviert.")
-    if db.query(User).filter_by(email=body.email).first():
+    if _name_taken(db, body.email.strip()):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Email existiert bereits.")
     #--- Rolle ausdruecklich: der Spalten-Default ist 'admin' (Altbestand).
-    db.add(User(email=body.email, hashed_password=_ph.hash(body.password), role="user"))
+    db.add(User(email=body.email.strip(), hashed_password=_ph.hash(body.password), role="user"))
     db.commit()
-    return {"email": body.email}
+    return {"email": body.email.strip()}
 
 @app.post("/login")
 @limiter.limit("5/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    name = form.username
-    user = db.query(User).filter_by(email=name).first()
+    #--- Dieselbe Sperre und dieselbe Laufzeit fuer unbekannte Konten wie bei der
+    #--- Anmeldung im Browser: sonst verriete die Antwortzeit, welche Konten es gibt.
+    name = (form.username or "").strip()
+    addr = _client_addr(request)
+    user = _find_account(db, name)
     exists = bool(user and user.id != _SERVICE_UID)
-    if not exists:
-        audit_auth("auth.api_login", status="failed", request=request, account=name, account_exists=False, details={"reason": "unknown_account"})
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Falsche Anmeldedaten.")
+    if _login_locked(name, addr):
+        audit_auth("auth.api_login", status="locked", request=request, account=name, account_exists=exists)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Zu viele Fehlversuche. Bitte spaeter erneut versuchen.")
     try:
+        if not exists:
+            _ph.verify(_DUMMY_HASH, form.password + "\x00")
+            raise VerifyMismatchError()
         _ph.verify(user.hashed_password, form.password)
     except (VerifyMismatchError, InvalidHash):
-        audit_auth("auth.api_login", status="failed", request=request, account=name, account_exists=True, details={"reason": "wrong_password"})
+        _login_failed(name, addr)
+        reason = "wrong_password" if exists else "unknown_account"
+        audit_auth("auth.api_login", status="failed", request=request, account=name, account_exists=exists, details={"reason": reason})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Falsche Anmeldedaten.")
+    _login_succeeded(name, addr)
     #--- API-Tokens erreichen Missionen und Freigaben -- nur fuer Administratoren.
     if getattr(user, "role", "user") != "admin":
         audit_auth("auth.api_login", status="denied", request=request, user_id=user.id, account=user.email, account_exists=True, details={"reason": "role"})
@@ -1295,18 +1421,16 @@ async def health():
 #--- die Aktion ausgeloest hat, darf sie ueber HTTP sehen oder freigeben.
 
 @app.get("/v1/confirmations/pending", tags=["Action-Engine"])
-async def list_pending_confirmations(current_user: User = Depends(get_current_user)):
+def list_pending_confirmations(current_user: User = Depends(get_current_user)):
     from rag_backend.action_engine.confirmation import confirmation_store
     pending = confirmation_store.list_pending(actor=current_user.id)
     return {"confirmations": [r.model_dump() for r in pending]}
 
 def _require_admin(user: User) -> None:
-    '''Nur Administratoren duerfen Host-Aktionen freigeben.
+    '''Nur Administratoren duerfen Freigaben (Cloud-Missionen) erteilen.
 
-    Heute hat jedes Konto die Rolle "admin" (Einzelnutzer-Betrieb) -- der Check ist
-    das Fundament fuer den Fall, dass weitere Nutzer dazukommen: die duerfen den
-    Assistenten dann benutzen, aber keine schreibenden Aktionen auf dem Rechner
-    freigeben. Lesen der eigenen offenen Anfragen bleibt erlaubt.'''
+    Konten der Rolle "user" benutzen den Assistenten, geben aber nichts frei.
+    Lesen der eigenen offenen Anfragen bleibt erlaubt.'''
     if getattr(user, "role", "user") != "admin":
         raise HTTPException(
             status_code=403,
@@ -1314,7 +1438,7 @@ def _require_admin(user: User) -> None:
         )
 
 @app.post("/v1/confirmations/{confirmation_id}/approve", tags=["Action-Engine"])
-async def approve_confirmation(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
+def approve_confirmation(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
     from rag_backend.action_engine.confirmation import confirmation_store, ConfirmationStatus
     _require_admin(current_user)
     req = confirmation_store.approve(confirmation_id, actor=current_user.id)
@@ -1325,7 +1449,7 @@ async def approve_confirmation(confirmation_id: str, current_user: User = Depend
     return {"status": req.status.value}
 
 @app.post("/v1/confirmations/{confirmation_id}/confirm-cooldown", tags=["Action-Engine"])
-async def confirm_after_cooldown(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
+def confirm_after_cooldown(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
     from rag_backend.action_engine.confirmation import confirmation_store
     _require_admin(current_user)
     req, remaining = confirmation_store.confirm_after_cooldown(confirmation_id, actor=current_user.id)
@@ -1336,7 +1460,7 @@ async def confirm_after_cooldown(confirmation_id: str, current_user: User = Depe
     return {"status": req.status.value}
 
 @app.post("/v1/confirmations/{confirmation_id}/reject", tags=["Action-Engine"])
-async def reject_confirmation(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
+def reject_confirmation(confirmation_id: str, current_user: User = Depends(get_current_user), csrf = Depends(check_csrf_headers)):
     from rag_backend.action_engine.confirmation import confirmation_store
     _require_admin(current_user)
     req = confirmation_store.reject(confirmation_id, actor=current_user.id)
@@ -1369,12 +1493,12 @@ def _mission_admin(current_user: User = Depends(get_current_user)) -> User:
 
 
 @app.get("/v1/missions", tags=["Cloud-Agents"])
-async def list_missions(current_user: User = Depends(_mission_admin), db: Session = Depends(get_db)):
+def list_missions(current_user: User = Depends(_mission_admin), db: Session = Depends(get_db)):
     rows = db.query(Mission).order_by(Mission.created_at.desc()).limit(50).all()
     return {"missions": [_mission_to_dict(r, include_result=False) for r in rows]}
 
 @app.get("/v1/missions/{mission_id}", tags=["Cloud-Agents"])
-async def get_mission(mission_id: int, current_user: User = Depends(_mission_admin), db: Session = Depends(get_db)):
+def get_mission(mission_id: int, current_user: User = Depends(_mission_admin), db: Session = Depends(get_db)):
     row = db.get(Mission, mission_id)
     if not row:
         raise HTTPException(status_code=404, detail="Mission nicht gefunden.")
@@ -1391,6 +1515,9 @@ async def cancel_mission_endpoint(mission_id: int, current_user: User = Depends(
 # ---- Dashboard-Endpoints #---
 #--- Jede Route traegt ihr Gate im Signatur-Kopf: Depends(dashboard_user) =
 #--- jedes angemeldete Konto, Depends(dashboard_admin) = nur Administratoren.
+#--- Routen ohne await sind bewusst "def": Ihre Datenbank- und Dateizugriffe sind
+#--- synchron. Als "async def" liefen sie im Event-Loop und hielten waehrenddessen
+#--- jeden laufenden Chat-Stream an; als "def" laufen sie im Thread-Pool.
 
 
 def _dashboard_config(multimodal: bool = False) -> dict:
@@ -1444,13 +1571,13 @@ async def dashboard_summary(admin: User = Depends(dashboard_admin)):
             "config": _dashboard_config(multimodal)}
 
 @app.get("/v1/dashboard/missions", tags=["Dashboard"])
-async def dashboard_missions(db: Session = Depends(get_db),
+def dashboard_missions(db: Session = Depends(get_db),
                              admin: User = Depends(dashboard_admin)):
     rows = db.query(Mission).order_by(Mission.id.desc()).limit(20).all()
     return {"missions": [_mission_to_dict(r, include_result=False) for r in rows]}
 
 @app.get("/v1/dashboard/missions/{mission_id}", tags=["Dashboard"])
-async def dashboard_mission_detail(mission_id: int, db: Session = Depends(get_db),
+def dashboard_mission_detail(mission_id: int, db: Session = Depends(get_db),
                                    admin: User = Depends(dashboard_admin)):
     row = db.get(Mission, mission_id)
     if not row:
@@ -1463,7 +1590,7 @@ _MISSION_TERMINAL = ("done", "failed", "cancelled")
 
 
 @app.delete("/v1/dashboard/missions", tags=["Dashboard"])
-async def dashboard_clear_missions(db: Session = Depends(get_db),
+def dashboard_clear_missions(db: Session = Depends(get_db),
                                    admin: User = Depends(dashboard_admin),
                                    csrf = Depends(check_dashboard_csrf)):
     rows = db.query(Mission).filter(Mission.status.in_(_MISSION_TERMINAL)).all()
@@ -1479,7 +1606,7 @@ async def dashboard_clear_missions(db: Session = Depends(get_db),
 
 
 @app.delete("/v1/dashboard/missions/{mission_id}", tags=["Dashboard"])
-async def dashboard_delete_mission(mission_id: int, db: Session = Depends(get_db),
+def dashboard_delete_mission(mission_id: int, db: Session = Depends(get_db),
                                    admin: User = Depends(dashboard_admin),
                                    csrf = Depends(check_dashboard_csrf)):
     row = db.get(Mission, mission_id)
@@ -1496,10 +1623,10 @@ async def dashboard_delete_mission(mission_id: int, db: Session = Depends(get_db
 
 
 @app.get("/v1/dashboard/audit", tags=["Dashboard"])
-async def dashboard_audit(db: Session = Depends(get_db),
+def dashboard_audit(db: Session = Depends(get_db),
                           admin: User = Depends(dashboard_admin)):
-    #--- 'details' enthaelt die ausgefuehrte PowerShell im Klartext -- deshalb ist
-    #--- diese Route Administratoren vorbehalten.
+    #--- 'details' nennt Konten, Adressen, Pfade und Gruende -- deshalb ist diese
+    #--- Route Administratoren vorbehalten.
     rows = db.query(AuditLog).order_by(AuditLog.ts.desc()).limit(50).all()
     return {"audit": [
         {"ts": r.ts.isoformat() if r.ts else None, "tool": r.tool, "tool_class": r.tool_class,
@@ -1507,13 +1634,13 @@ async def dashboard_audit(db: Session = Depends(get_db),
     ]}
 
 @app.get("/v1/dashboard/audit/verify", tags=["Dashboard"])
-async def dashboard_audit_verify(admin: User = Depends(dashboard_admin)):
+def dashboard_audit_verify(admin: User = Depends(dashboard_admin)):
     # Prueft die HMAC-Hash-Chain des Audit-Logs auf Manipulation/Luecken.
     from rag_backend.action_engine.audit import verify_audit_chain
     return verify_audit_chain()
 
 @app.delete("/v1/dashboard/audit", tags=["Dashboard"])
-async def dashboard_clear_audit(db: Session = Depends(get_db),
+def dashboard_clear_audit(db: Session = Depends(get_db),
                                 admin: User = Depends(dashboard_admin),
                                 csrf = Depends(check_dashboard_csrf)):
     try:
@@ -1537,14 +1664,14 @@ async def dashboard_clear_audit(db: Session = Depends(get_db),
 #--- Freigaben schreibender Host-Aktionen: Administratoren vorbehalten. actor =
 #--- die User-ID des Kontos, unter dem der Turn lief; fremde Anfragen bleiben zu.
 @app.get("/v1/dashboard/confirmations", tags=["Dashboard"])
-async def dashboard_confirmations(admin: User = Depends(dashboard_admin)):
+def dashboard_confirmations(admin: User = Depends(dashboard_admin)):
     from rag_backend.action_engine.confirmation import confirmation_store
     pending = confirmation_store.list_pending(actor=admin.id)
     return {"confirmations": [r.model_dump() for r in pending]}
 
 
 @app.post("/v1/dashboard/confirmations/{confirmation_id}/approve", tags=["Dashboard"])
-async def dashboard_confirmation_approve(confirmation_id: str,
+def dashboard_confirmation_approve(confirmation_id: str,
                                          admin: User = Depends(dashboard_admin),
                                          csrf = Depends(check_dashboard_csrf)):
     from rag_backend.action_engine.confirmation import confirmation_store, ConfirmationStatus
@@ -1558,7 +1685,7 @@ async def dashboard_confirmation_approve(confirmation_id: str,
 
 
 @app.post("/v1/dashboard/confirmations/{confirmation_id}/confirm-cooldown", tags=["Dashboard"])
-async def dashboard_confirmation_cooldown(confirmation_id: str,
+def dashboard_confirmation_cooldown(confirmation_id: str,
                                           admin: User = Depends(dashboard_admin),
                                           csrf = Depends(check_dashboard_csrf)):
     from rag_backend.action_engine.confirmation import confirmation_store
@@ -1572,7 +1699,7 @@ async def dashboard_confirmation_cooldown(confirmation_id: str,
 
 
 @app.post("/v1/dashboard/confirmations/{confirmation_id}/reject", tags=["Dashboard"])
-async def dashboard_confirmation_reject(confirmation_id: str,
+def dashboard_confirmation_reject(confirmation_id: str,
                                         admin: User = Depends(dashboard_admin),
                                         csrf = Depends(check_dashboard_csrf)):
     from rag_backend.action_engine.confirmation import confirmation_store
@@ -1583,12 +1710,12 @@ async def dashboard_confirmation_reject(confirmation_id: str,
 
 
 @app.get("/v1/dashboard/state", tags=["Dashboard"])
-async def dashboard_state(db: Session = Depends(get_db),
+def dashboard_state(db: Session = Depends(get_db),
                           admin: User = Depends(dashboard_admin)):
     return {"indexed_documents": db.query(IngestedDocument).count()}
 
 @app.get("/v1/dashboard/documents", tags=["Dashboard"])
-async def list_dashboard_documents(db: Session = Depends(get_db),
+def list_dashboard_documents(db: Session = Depends(get_db),
                                    admin: User = Depends(dashboard_admin)):
     rows = db.query(IngestedDocument).order_by(IngestedDocument.ingested_at.desc()).all()
 
@@ -1609,7 +1736,7 @@ async def list_dashboard_documents(db: Session = Depends(get_db),
     ]}
 
 @app.delete("/v1/dashboard/documents", tags=["Dashboard"])
-async def clear_dashboard_documents(db: Session = Depends(get_db),
+def clear_dashboard_documents(db: Session = Depends(get_db),
                                     admin: User = Depends(dashboard_admin),
                                     csrf = Depends(check_dashboard_csrf)):
     '''Leert die ganze Collection: Qdrant-Chunks und Datensaetze.
@@ -1632,7 +1759,7 @@ async def clear_dashboard_documents(db: Session = Depends(get_db),
 
 
 @app.delete("/v1/dashboard/documents/{doc_id}", tags=["Dashboard"])
-async def delete_dashboard_document(doc_id: int, db: Session = Depends(get_db),
+def delete_dashboard_document(doc_id: int, db: Session = Depends(get_db),
                                     admin: User = Depends(dashboard_admin),
                                     csrf = Depends(check_dashboard_csrf)):
     doc = db.get(IngestedDocument, doc_id)
@@ -1685,7 +1812,7 @@ def _summarize_eval_file(fpath, fname):
 
 
 @app.get("/v1/dashboard/evals", tags=["Dashboard"])
-async def dashboard_evals(admin: User = Depends(dashboard_admin)):
+def dashboard_evals(admin: User = Depends(dashboard_admin)):
     # Quelle der Wahrheit sind die Run-Log-Dateien in Run_Logs/, nicht die DB.
     base = os.path.realpath(_EVAL_LOGS_DIR)
     rows = []
@@ -1706,7 +1833,7 @@ async def dashboard_evals(admin: User = Depends(dashboard_admin)):
 
 
 @app.delete("/v1/dashboard/evals", tags=["Dashboard"])
-async def dashboard_clear_evals(admin: User = Depends(dashboard_admin),
+def dashboard_clear_evals(admin: User = Depends(dashboard_admin),
                                 csrf = Depends(check_dashboard_csrf)):
     # Loescht die Run-Log-DATEIEN (bewusste, im Dashboard bestaetigte Aktion).
     base = os.path.realpath(_EVAL_LOGS_DIR)
@@ -1728,7 +1855,7 @@ async def dashboard_clear_evals(admin: User = Depends(dashboard_admin),
 # Dateien direkt.
 
 @app.get("/v1/dashboard/eval_logs", tags=["Dashboard"])
-async def dashboard_eval_logs(admin: User = Depends(dashboard_admin)):
+def dashboard_eval_logs(admin: User = Depends(dashboard_admin)):
     base = os.path.realpath(_EVAL_LOGS_DIR)
     files = []
     try:
@@ -1751,7 +1878,7 @@ async def dashboard_eval_logs(admin: User = Depends(dashboard_admin)):
     return {"dir": base, "files": files}
 
 @app.get("/v1/dashboard/eval_logs/{name}", tags=["Dashboard"])
-async def dashboard_eval_log(name: str, admin: User = Depends(dashboard_admin)):
+def dashboard_eval_log(name: str, admin: User = Depends(dashboard_admin)):
     # Path-Traversal-Schutz: nur Basename, nur .json, und die aufgeloeste Datei
     # MUSS direkt im Run_Logs-Verzeichnis liegen.
     if name != os.path.basename(name) or not name.lower().endswith(".json"):
@@ -1771,7 +1898,7 @@ async def dashboard_eval_log(name: str, admin: User = Depends(dashboard_admin)):
 class DashboardChatIn(BaseModel):
     #--- Obergrenzen gegen Speicher-Erschoepfung: der Body wird vor jeder
     #--- weiteren Pruefung komplett eingelesen.
-    message: str = Field(max_length=int(os.getenv("DASHBOARD_MAX_MESSAGE_CHARS", "200000")))
+    message: str = Field(max_length=_MAX_MESSAGE_CHARS)
     #--- KEIN history-Feld: der Verlauf kommt ausschliesslich aus der DB
     #--- (_chat_history_from_db an der session_id).
     session_id: int | None = None
@@ -1807,6 +1934,10 @@ def _chat_title(db, session_id: int) -> str:
     # eine Migration hier wuerde die Alembic-Kette ohne Setup4 zerreissen.
     m = (db.query(Message).filter_by(session_id=session_id, sender="user")
          .order_by(Message.id.asc()).first())
+    return _title_from_message(m, session_id)
+
+
+def _title_from_message(m, session_id: int) -> str:
     if not m:
         return "Neuer Chat"
     try:
@@ -1847,18 +1978,33 @@ def _chat_history_from_db(db, session_id: int, limit: int = 10) -> list:
 def dashboard_chats(db: Session = Depends(get_db), user: User = Depends(dashboard_user)):
     #--- Verlaeufe sind an das Konto gebunden. Der Agent haengt sein Gedaechtnis
     #--- an dieselbe ID -- jedes Konto hat damit sein eigenes.
+    from sqlalchemy import func
     rows = (db.query(ChatSession).filter_by(user_id=user.id)
             .order_by(ChatSession.created_at.desc()).limit(200).all())
+    ids = [s.id for s in rows]
+    #--- Drei Abfragen fuer die ganze Liste statt drei je Chat: Anzahl und letzte
+    #--- Nachricht je Chat, dann die erste Nutzernachricht je Chat fuer den Titel.
+    stats, first_user = {}, {}
+    if ids:
+        for sid, n, last in (db.query(Message.session_id, func.count(Message.id),
+                                      func.max(Message.timestamp))
+                             .filter(Message.session_id.in_(ids))
+                             .group_by(Message.session_id)):
+            stats[sid] = (n, last)
+        first_ids = (db.query(func.min(Message.id))
+                     .filter(Message.session_id.in_(ids), Message.sender == "user")
+                     .group_by(Message.session_id))
+        for m in db.query(Message).filter(Message.id.in_(first_ids)):
+            first_user[m.session_id] = m
     out = []
     for s in rows:
-        last = (db.query(Message).filter_by(session_id=s.id)
-                .order_by(Message.id.desc()).first())
+        n, last = stats.get(s.id, (0, None))
         out.append({
             "id": s.id,
-            "title": _chat_title(db, s.id),
-            "messages": db.query(Message).filter_by(session_id=s.id).count(),
+            "title": _title_from_message(first_user.get(s.id), s.id),
+            "messages": n,
             "created_at": s.created_at.isoformat() if s.created_at else None,
-            "last_at": last.timestamp.isoformat() if last and last.timestamp else None,
+            "last_at": last.isoformat() if last else None,
         })
     return {"chats": out}
 
@@ -1900,7 +2046,12 @@ def dashboard_chat_load(chat_id: int, db: Session = Depends(get_db),
             "latency_ms": m.latency_ms,
             "ts": m.timestamp.isoformat() if m.timestamp else None,
         })
-    return {"id": s.id, "title": _chat_title(db, s.id), "messages": out}
+    #--- Gespraech mit Firmendaten: Die Oberflaeche macht Links in Antworten dann
+    #--- nicht klickbar. Eine eingeschleuste Anweisung koennte sonst Daten in eine URL
+    #--- packen, und ein Klick truege sie hinaus.
+    from rag_backend.egress_guard import is_session_marked
+    sensitive = bool(getattr(s, "has_sensitive_data", False)) or is_session_marked(f"dashboard:{s.id}")
+    return {"id": s.id, "title": _chat_title(db, s.id), "messages": out, "sensitive": sensitive}
 
 
 @app.delete("/v1/dashboard/chats/{chat_id}/messages/{message_id}", tags=["Dashboard"])
@@ -2023,9 +2174,14 @@ async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
             detail="Websuche ist auf diesem Server nicht eingerichtet.",
         )
     from rag_backend.agent import _search_and_read, quellen_liste, quellen_zuruecksetzen
+    from rag_backend.egress_guard import activate_isolated_state
     q = (body.query or "").strip()[:300]
     if not q:
         raise HTTPException(status_code=400, detail="Leere Suchanfrage.")
+    #--- Eigener, frischer Sperr-Zustand je Aufruf: Diese Suche gehoert zu keinem
+    #--- Gespraech. Ohne ihn liefe sie gegen den gemeinsamen Zustand "default:global",
+    #--- und einmal dort gesetzt, saehen alle Aufrufe bis zum Neustart eine Sperre.
+    activate_isolated_state("websuche")
     quellen_zuruecksetzen()
     text = await _search_and_read(
         q,
@@ -2036,7 +2192,7 @@ async def dashboard_web_search(body: DashboardWebSearchIn, request: Request,
     return {"query": q, "text": text, "sources": quellen_liste()}
 
 
-@app.post("/v1/dashboard/chat", tags=["Dashboard"])
+@app.post("/v1/dashboard/chat", tags=["Dashboard"], max_body_size=_MAX_CHAT_BODY)
 @limiter.limit(lambda: os.getenv("DASHBOARD_CHAT_RATE_LIMIT", "60/minute"))
 async def dashboard_chat(body: DashboardChatIn, request: Request,
                          user: User = Depends(dashboard_user),
@@ -2312,7 +2468,12 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                             except Exception as e:
                                 log.warning(f"Nachreichen von Mission {_mid} fehlgeschlagen: {e}")
 
-            yield _orb_sse({"type": "done", "session_id": sid})
+            try:
+                from rag_backend.egress_guard import is_session_marked
+                _sensibel = await asyncio.to_thread(is_session_marked, f"dashboard:{sid}")
+            except Exception:
+                _sensibel = False
+            yield _orb_sse({"type": "done", "session_id": sid, "sensitive": bool(_sensibel)})
         finally:
             await stream.aclose()
             # Abgebrochener Turn (Tab zu, Stop-Knopf): er hat GPU-Zeit gekostet und
@@ -2371,7 +2532,7 @@ def _voice_auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-@app.post("/v1/dashboard/stt", tags=["Dashboard"])
+@app.post("/v1/dashboard/stt", tags=["Dashboard"], max_body_size=_MAX_STT_BODY)
 @limiter.limit(lambda: os.getenv("DASHBOARD_VOICE_RATE_LIMIT", "60/minute"))
 async def dashboard_stt(request: Request, file: UploadFile = File(...),
                         user: User = Depends(dashboard_user),
@@ -2455,7 +2616,6 @@ _WORKSPACE_ROOT = Path(
     or "/host/argus_workspace"
 )
 _UPLOAD_DIR = _WORKSPACE_ROOT / "Uploads"
-_MAX_UPLOAD_BYTES = int(os.getenv("UPLOAD_MAX_BYTES", str(500 * 1024 * 1024)))
 
 #--- Aufraeumen. In den Chat gezogene Dateien sind Arbeitsmaterial fuer EINE
 #--- Unterhaltung; was dauerhaft auffindbar bleiben soll, gehoert ueber
@@ -2600,7 +2760,51 @@ async def dashboard_uploads(admin: User = Depends(dashboard_admin)):
             "extensions": sorted(_UPLOAD_EXTENSIONS)}
 
 
-@app.post("/v1/dashboard/uploads", tags=["Dashboard"])
+async def _write_upload(file: UploadFile, folder: Path, name: str, max_bytes: int,
+                        budget: int | None = None) -> tuple[Path, int]:
+    """Schreibt einen Upload blockweise in eine NEUE Datei (user_files.open_new_file:
+    exklusiv, ohne Symlinks, belegte Namen werden durchnummeriert). Gezaehlt werden
+    die ankommenden Bytes, nicht der content-length-Header. budget ist der noch
+    freie Platz des Kontos; None = keine Kontogrenze."""
+    from rag_backend import user_files
+    try:
+        target, fd = user_files.open_new_file(folder, name)
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
+    written = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(_MB):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Datei groesser als {max_bytes // _MB} MB.")
+                if budget is not None and written > budget:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.")
+                out.write(chunk)
+    except HTTPException:
+        target.unlink(missing_ok=True)
+        raise
+    except OSError as e:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
+    return target, written
+
+
+#--- Uploads eines Kontos laufen nacheinander: Nur so ist "belegt + diese Datei"
+#--- gegen die Grenze eine verlaessliche Rechnung. Parallel konnten zwei Uploads
+#--- je fuer sich unter der Grenze bleiben und sie zusammen ueberschreiten.
+_USER_UPLOAD_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _user_upload_lock(user_id: int) -> asyncio.Lock:
+    return _USER_UPLOAD_LOCKS.setdefault(user_id, asyncio.Lock())
+
+
+@app.post("/v1/dashboard/uploads", tags=["Dashboard"], max_body_size=_MAX_UPLOAD_BODY)
 @limiter.limit(lambda: os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
 async def dashboard_upload(request: Request, file: UploadFile = File(...),
                            admin: User = Depends(dashboard_admin),
@@ -2614,40 +2818,8 @@ async def dashboard_upload(request: Request, file: UploadFile = File(...),
             detail = f"Dateityp '{suffix or '?'}' ist nicht zugelassen."
         raise HTTPException(status_code=415, detail=detail)
     _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    target = _upload_path(name)
     #--- Bestehende Datei nicht ueberschreiben, sondern durchnummerieren.
-    if target.exists():
-        stem, ext = Path(name).stem, Path(name).suffix
-        for i in range(2, 100):
-            target = _upload_path(f"{stem}_{i}{ext}")
-            if not target.exists():
-                break
-        else:
-            #--- Alle Nummern belegt: zufaelliger Zusatz statt still name_99 zu
-            #--- ueberschreiben.
-            target = _upload_path(f"{stem}_{uuid.uuid4().hex[:8]}{ext}")
-    #--- In Bloecken schreiben und mitzaehlen: ein content-length-Header ist
-    #--- Fremdeingabe, die ankommenden Bytes sind es nicht.
-    written = 0
-    try:
-        with open(target, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > _MAX_UPLOAD_BYTES:
-                    out.close()
-                    target.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Datei groesser als {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
-                out.write(chunk)
-    except HTTPException:
-        raise
-    except OSError as e:
-        target.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
+    target, written = await _write_upload(file, _UPLOAD_DIR, name, _MAX_UPLOAD_BYTES)
     log.info(f"Upload durch '{admin.email}': {target.name} ({written} Bytes)")
     return {"status": "ok", **_upload_entry(target, await _ingestable_extensions())}
 
@@ -2730,7 +2902,7 @@ async def dashboard_upload_ingest(name: str, admin: User = Depends(dashboard_adm
 
 
 @app.delete("/v1/dashboard/uploads/{name}", tags=["Dashboard"])
-async def dashboard_upload_delete(name: str, admin: User = Depends(dashboard_admin),
+def dashboard_upload_delete(name: str, admin: User = Depends(dashboard_admin),
                                   csrf = Depends(check_dashboard_csrf)):
     import shutil
 
@@ -2748,7 +2920,7 @@ async def dashboard_upload_delete(name: str, admin: User = Depends(dashboard_adm
 # ---- Benutzer-Dateibereich (fuer alle Rollen, strikt isoliert) ----
 
 @app.get("/v1/dashboard/files", tags=["Dashboard"])
-async def dashboard_user_files(user: User = Depends(dashboard_user)):
+def dashboard_user_files(user: User = Depends(dashboard_user)):
     from rag_backend import user_files
     dateien = user_files.list_user_files(user.id, "dateien")
     ergebnisse = user_files.list_user_files(user.id, "ergebnisse")
@@ -2762,7 +2934,7 @@ async def dashboard_user_files(user: User = Depends(dashboard_user)):
     }
 
 
-@app.post("/v1/dashboard/files", tags=["Dashboard"])
+@app.post("/v1/dashboard/files", tags=["Dashboard"], max_body_size=_MAX_UPLOAD_BODY)
 @limiter.limit(lambda: os.getenv("DASHBOARD_UPLOAD_RATE_LIMIT", "30/minute"))
 async def dashboard_user_file_upload(
     request: Request,
@@ -2791,50 +2963,13 @@ async def dashboard_user_file_upload(
         )
 
     dateien_dir = user_files.get_user_dir(user.id, "dateien", create=True)
-    target = dateien_dir / name
-    if target.exists():
-        stem, ext = Path(name).stem, Path(name).suffix
-        for i in range(2, 100):
-            cand = dateien_dir / f"{stem}_{i}{ext}"
-            if not cand.exists():
-                target = cand
-                name = target.name
-                break
-        else:
-            target = dateien_dir / f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
-            name = target.name
-
-    written = 0
-    max_upload = _MAX_UPLOAD_BYTES
-    try:
-        with open(target, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > max_upload:
-                    out.close()
-                    target.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Datei groesser als {max_upload // (1024 * 1024)} MB.",
-                    )
-                try:
-                    user_files.check_user_quota(user.id, len(chunk))
-                except ValueError:
-                    out.close()
-                    target.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.",
-                    )
-                out.write(chunk)
-    except HTTPException:
-        raise
-    except OSError as e:
-        target.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
+    async with _user_upload_lock(user.id):
+        used = await asyncio.to_thread(user_files.get_user_used_bytes, user.id)
+        budget = user_files.get_user_files_max_bytes() - used
+        if budget <= 0:
+            raise HTTPException(status_code=413,
+                                detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.")
+        target, written = await _write_upload(file, dateien_dir, name, _MAX_UPLOAD_BYTES, budget)
 
     st = target.stat()
     log.info(f"Benutzerdatei hochgeladen von '{user.email}' (ID {user.id}): {target.name} ({written} Bytes)")
@@ -2848,7 +2983,7 @@ async def dashboard_user_file_upload(
 
 
 @app.get("/v1/dashboard/files/{bereich}/{name}", tags=["Dashboard"])
-async def dashboard_user_file_download(
+def dashboard_user_file_download(
     bereich: str,
     name: str,
     user: User = Depends(dashboard_user),
@@ -2877,7 +3012,7 @@ async def dashboard_user_file_download(
 
 
 @app.delete("/v1/dashboard/files/{bereich}/{name}", tags=["Dashboard"])
-async def dashboard_user_file_delete(
+def dashboard_user_file_delete(
     bereich: str,
     name: str,
     user: User = Depends(dashboard_user),
