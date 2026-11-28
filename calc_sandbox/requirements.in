@@ -1,0 +1,8 @@
+# Laufzeit der Code-Sandbox. Gepinnt mit Hashes in requirements.lock:
+#   uv pip compile requirements.in --universal --python-version 3.13 --generate-hashes -o requirements.lock
+fastapi
+uvicorn
+sympy
+pandas
+tabulate
+openpyxl

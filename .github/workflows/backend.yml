@@ -19,9 +19,36 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v5
-      # Gleiche Installation wie rag_backend/Dockerfile.api.
+        with:
+          version: "0.11.32"
+      # Lock-Dateien passen zu ihren Quellen: uv.lock zu pyproject.toml, die Exporte zu
+      # uv.lock, und jede requirements*.lock der Dienste zu ihrer .in (neu aufgeloest mit
+      # den bisherigen Versionen als Vorgabe, also ohne Aktualisierung).
+      - name: Lock-Dateien aktuell
+        run: |
+          set -euo pipefail
+          cd rag_backend
+          uv lock --check
+          for spec in "requirements.lock:--no-dev" "requirements-dev.lock:--only-dev"; do
+            ziel="${spec%%:*}"; art="${spec#*:}"
+            uv export --frozen $art --no-emit-project --format requirements-txt --no-header -q -o "/tmp/$ziel"
+            diff <(grep -v '^#' "$ziel") <(grep -v '^#' "/tmp/$ziel")
+          done
+          cd ..
+          pruefe() {
+            local ordner="$1" eingabe="$2" ausgabe="$3"; shift 3
+            cp "$ordner/$ausgabe" "/tmp/$ausgabe"
+            (cd "$ordner" && uv pip compile "$eingabe" "$@" --generate-hashes --no-header -q -o "/tmp/$ausgabe")
+            diff <(grep -v '^#' "$ordner/$ausgabe") <(grep -v '^#' "/tmp/$ausgabe")
+          }
+          pruefe calc_sandbox requirements.in requirements.lock --universal --python-version 3.13
+          pruefe calc_sandbox requirements-test.in requirements-test.lock -c requirements.lock --universal --python-version 3.13
+          pruefe stt_service requirements.in requirements.lock --universal --python-version 3.13
+          pruefe stt_service requirements-gpu.in requirements-gpu.lock -c requirements.lock --universal --python-version 3.13
+          pruefe tts_service requirements.in requirements.lock --universal --python-version 3.12
+      # Gleiche Pakete wie rag_backend/Dockerfile.api, dazu die Testpakete.
       - name: Abhängigkeiten
-        run: uv pip install --system -r rag_backend/pyproject.toml
+        run: uv pip install --system --require-hashes -r rag_backend/requirements.lock -r rag_backend/requirements-dev.lock
       # Die Tests setzen ihre Umgebung selbst (SQLite, Test-Secrets) und brauchen
       # keine laufenden Container.
       - name: Tests

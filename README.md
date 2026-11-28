@@ -393,7 +393,11 @@ These are known and not solved yet:
   queries Google, Bing and others without a contract, and their terms usually rule out
   automated queries. For company use a search API under contract (such as the Brave Search
   API) belongs in as a replaceable provider.
-- No lock file for Python packages. The installer verifies the models by SHA-256.
+- Python packages are pinned with SHA-256 in lock files (backend `uv.lock` and its export
+  `requirements.lock`, services `requirements*.lock`), CI checks that locks match their
+  sources. Still open: the read-aloud models are downloaded at build time without a SHA-256
+  check (pinned to a commit only), apt packages are unpinned, GitHub Actions use version tags.
+  The installer verifies the models by SHA-256.
 - Linux: permissions for secrets and the workspace are reproduced and tested under Linux, but
   the stack has not yet been started on a real Linux server. With SELinux enforcing the
   installer sets `ARGUS_MOUNT_LABEL=,z`; this has not been tried on a real SELinux system.
@@ -564,7 +568,7 @@ text and images are one model, this covers both.
 ## Tests
 
 ```powershell
-uv pip install -r rag_backend/pyproject.toml
+uv pip install --require-hashes -r rag_backend/requirements.lock -r rag_backend/requirements-dev.lock
 python -m pytest rag_backend/tests -q
 ```
 

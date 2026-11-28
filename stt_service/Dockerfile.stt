@@ -3,19 +3,19 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-# av ab 19 kennt metadata_errors nicht mehr, das faster-whisper 1.2.1 beim Dekodieren uebergibt.
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart "faster-whisper==1.2.1" "av==18.1.0" requests
+# Feste Versionen mit Hashes (requirements.lock aus requirements.in, siehe dort).
+COPY requirements.lock requirements-gpu.lock /tmp/
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock
 # Auf der Grafikkarte (compose/gpu-sprache.yml, GPU=1): cuBLAS und cuDNN 9 fuer CTranslate2,
 # als Python-Pakete von NVIDIA (~1,5 GB). Ohne GPU=1 bleibt das Image so klein wie bisher.
 ARG GPU=0
 RUN if [ "$GPU" = "1" ]; then \
-        pip install --no-cache-dir "nvidia-cublas-cu12==12.8.4.1" "nvidia-cudnn-cu12==9.10.2.21"; \
-    fi
+        pip install --no-cache-dir --require-hashes -r /tmp/requirements-gpu.lock; \
+    fi \
+    && rm /tmp/requirements.lock /tmp/requirements-gpu.lock
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.13/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.13/site-packages/nvidia/cudnn/lib
 COPY app.py /app/app.py
 RUN useradd -m -u 1000 sttuser && mkdir -p /home/sttuser/.cache/huggingface && chown -R sttuser:sttuser /app /home/sttuser
-# Eigener Schritt vor USER, damit die grossen Schichten darueber im Build-Cache bleiben.
-RUN pip install --no-cache-dir cryptography
 USER sttuser
 ENV WHISPER_MODEL=large-v3-turbo \
     WHISPER_COMPUTE_TYPE=int8 \

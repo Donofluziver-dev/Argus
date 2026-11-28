@@ -1,0 +1,4 @@
+# Nur fuer die Test-Stufe des Images. Gepinnt passend zu requirements.lock:
+#   uv pip compile requirements-test.in -c requirements.lock --universal --python-version 3.13 --generate-hashes -o requirements-test.lock
+pytest
+httpx

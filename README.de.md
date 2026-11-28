@@ -596,9 +596,15 @@ sollte sie kennen.
   ab, deren Nutzungsbedingungen automatisierte Abfragen meist ausschließen. Für den Einsatz in
   einer Firma gehört deshalb eine Such-API mit Vertrag (etwa Brave Search API) als
   austauschbarer Anbieter dazu.
-- **Lieferkette:** Python-Pakete haben keine Lock-Datei, drei Images installieren Pakete ohne
-  feste Version. Die Modelle prüft die Installation per SHA-256, wer sie von Hand ablegt,
-  prüft selbst.
+- **Lieferkette:** Alle Python-Pakete kommen mit fester Version und SHA-256 aus Lock-Dateien
+  (Backend: `uv.lock`, daraus `requirements.lock`; Dienste: `requirements*.lock` aus
+  `requirements*.in`), auch `uv` selbst; das CI prüft, dass Lock und Quelle zusammenpassen.
+  Aktualisieren: im Backend `uv lock --upgrade` und die beiden `uv export`-Befehle aus dem
+  CI, bei den Diensten den `uv pip compile`-Befehl am Kopf der `.in`-Datei mit `--upgrade`.
+  Offen: Die Sprachmodelle des Vorlesens lädt der Bau von Hugging Face ohne SHA-256-Prüfung
+  (gepinnt nur auf einen Commit), Systempakete aus `apt-get` sind nicht gepinnt, und die
+  GitHub Actions stehen auf Versions-Tags statt auf Commit-Hashes. Die Modelle prüft die
+  Installation per SHA-256, wer sie von Hand ablegt, prüft selbst.
 - **Installation unter Linux:** Rechte für Geheimnisse und Arbeitsordner sind unter Linux
   nachgestellt und getestet, der Stapel ist aber noch nicht auf einem echten Linux-Server
   gestartet worden. Mit SELinux im Modus `enforcing` (RHEL, Rocky, Alma, Fedora) setzt die
@@ -1113,7 +1119,7 @@ noch als `sglang_api_key.txt`; `init_stack.py` benennt die Datei beim nächsten 
 ## Tests und Messungen
 
 ```powershell
-uv pip install -r rag_backend/pyproject.toml
+uv pip install --require-hashes -r rag_backend/requirements.lock -r rag_backend/requirements-dev.lock
 python -m pytest rag_backend/tests -q
 ```
 

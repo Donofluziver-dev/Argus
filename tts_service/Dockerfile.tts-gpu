@@ -55,7 +55,10 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pip ffmpeg wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn httpx
+# Feste Versionen mit Hashes, dieselbe Datei wie im CPU-Image (gilt fuer Python 3.12 und 3.13).
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --break-system-packages --require-hashes -r /tmp/requirements.lock \
+    && rm /tmp/requirements.lock
 
 COPY --from=modelle /app/models/ /app/models/
 COPY --from=bau /out/bin/ /usr/local/bin/
@@ -66,7 +69,6 @@ COPY app.py /app/app.py
 # Das Ubuntu-Image bringt einen Nutzer mit uid 1000 mit; ttsuser bekommt dieselbe uid wie
 # im CPU-Image.
 RUN (id -u ubuntu >/dev/null 2>&1 && userdel -r ubuntu || true) && useradd -m -u 1000 ttsuser
-RUN pip install --no-cache-dir --break-system-packages cryptography
 USER ttsuser
 ENV QWEN_TALKER=/app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf \
     QWEN_BASE_TALKER=/app/models/qwen-talker-1.7b-base-Q8_0.gguf \

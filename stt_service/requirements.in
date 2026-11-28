@@ -1,0 +1,10 @@
+# Laufzeit der Spracherkennung. Gepinnt mit Hashes in requirements.lock:
+#   uv pip compile requirements.in --universal --python-version 3.13 --generate-hashes -o requirements.lock
+fastapi
+uvicorn
+python-multipart
+# av ab 19 kennt metadata_errors nicht mehr, das faster-whisper 1.2.1 beim Dekodieren uebergibt.
+faster-whisper==1.2.1
+av==18.1.0
+requests
+cryptography

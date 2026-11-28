@@ -1,0 +1,7 @@
+# Laufzeit des Vorlesens, fuer beide Images: CPU (Python 3.13) und Grafikkarte
+# (Ubuntu 24.04, Python 3.12). Gepinnt mit Hashes in requirements.lock:
+#   uv pip compile requirements.in --universal --python-version 3.12 --generate-hashes -o requirements.lock
+fastapi
+uvicorn
+httpx
+cryptography

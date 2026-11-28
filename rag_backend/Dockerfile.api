@@ -5,10 +5,13 @@ RUN apt-get update \
     && sed -i '/^# *en_US.UTF-8 UTF-8/s/^# //' /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip uv
-COPY pyproject.toml .
+#--- Jedes Paket mit fester Version und Hash: requirements.lock ist aus uv.lock
+#--- erzeugt (ohne Testpakete), uv selbst kommt ebenso gepinnt. Ein Paket, dessen
+#--- Datei sich auf dem Index geaendert hat, bricht den Bau ab.
+COPY requirements-uv.lock requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements-uv.lock
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r pyproject.toml
+    uv pip install --system --require-hashes -r requirements.lock
 COPY . /app/rag_backend
 #--- /app/data (und /app/evals als Fallback) vorab mit 1777 anlegen: das benannte
 #--- Volume rag_data uebernimmt Besitzer und Rechte dieses Ordners und bleibt so

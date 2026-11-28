@@ -3,8 +3,9 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir fastapi uvicorn sympy pandas tabulate openpyxl
+# Feste Versionen mit Hashes (requirements.lock aus requirements.in, siehe dort).
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock && rm /tmp/requirements.lock
 COPY app.py /app/app.py
 # Zwei getrennte unprivilegierte Benutzer ohne Login und ohne Home ausserhalb von /tmp:
 # - runner (uid/gid 10001) fuer Code-Laeufe (/execute)
@@ -23,7 +24,8 @@ ENV ARGUS_SANDBOX_CONTAINER=1
 USER root
 
 FROM base AS test
-RUN pip install --no-cache-dir pytest httpx
+COPY requirements-test.lock /tmp/requirements-test.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-test.lock && rm /tmp/requirements-test.lock
 COPY test_app.py /app/test_app.py
 RUN chown root:root /app/test_app.py && chmod 0644 /app/test_app.py
 CMD ["python", "-B", "-m", "pytest", "/app/test_app.py", "-q", "-p", "no:cacheprovider"]

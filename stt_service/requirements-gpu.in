@@ -1,0 +1,4 @@
+# Zusatz fuer die Grafikkarte (Build-Argument GPU=1): cuBLAS und cuDNN 9 fuer CTranslate2.
+#   uv pip compile requirements-gpu.in -c requirements.lock --universal --python-version 3.13 --generate-hashes -o requirements-gpu.lock
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cudnn-cu12==9.10.2.21

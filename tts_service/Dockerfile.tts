@@ -5,7 +5,9 @@ RUN apt-get update \
         git cmake build-essential libopenblas-dev pkg-config \
         ffmpeg wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir fastapi uvicorn httpx
+# Feste Versionen mit Hashes (requirements.lock aus requirements.in, siehe dort).
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock && rm /tmp/requirements.lock
 
 # GGUF-Modelle ZUERST (grosse, stabile Layer). Gepinnt auf einen Repo-Commit.
 ARG GGUF_COMMIT=e0f336a048a3de02b29b8ad92969217d9ecffe3e
@@ -37,8 +39,6 @@ COPY app.py /app/app.py
 # KEIN 'chown -R /app': das kopiert die 4,4 GB GGUF-Modelle in einen
 # zweiten Layer. ttsuser braucht /app nur lesend.
 RUN useradd -m -u 1000 ttsuser
-# Eigener Schritt vor USER, damit GGUF-Modelle und qwentts-Build im Cache bleiben.
-RUN pip install --no-cache-dir cryptography
 USER ttsuser
 ENV QWEN_TALKER=/app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf \
     QWEN_BASE_TALKER=/app/models/qwen-talker-1.7b-base-Q8_0.gguf \
