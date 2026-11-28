@@ -50,9 +50,10 @@ class EpisodicMemory:
         return self._ws / "users" / str(user_id) / "MEMORY.md"
 
     def _read_memory(self, user_id: int) -> str:
+        from rag_backend.account_crypto import read_text
         p = self._memory_path(user_id)
         try:
-            return p.read_text(encoding="utf-8") if p.exists() else ""
+            return read_text(p, user_id) if p.exists() else ""
         except Exception:
             return ""
 
@@ -66,15 +67,18 @@ class EpisodicMemory:
         if not self._user_exists(user_id):
             log.info(f"Reflektion Schreiben unterdrueckt (user={user_id}): Konto existiert nicht mehr.")
             return
+        from rag_backend.account_crypto import write_encrypted_atomic, write_text
         p = self._memory_path(user_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        # Eine Backup-Generation vor dem Ueberschreiben.
+        #--- Eine Backup-Generation vor dem Ueberschreiben. Beide Dateien verschluesselt mit
+        #--- dem Schluessel des Kontos: Das Gedaechtnis sagt viel ueber die Person.
         try:
             if p.exists():
-                p.with_suffix(".md.bak").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+                from rag_backend.account_crypto import read_file_plaintext
+                write_encrypted_atomic(p.with_suffix(".md.bak"), read_file_plaintext(p, user_id), user_id)
         except Exception:
             pass
-        p.write_text(content, encoding="utf-8")
+        write_text(p, content, user_id)
 
     async def reflect(self, user_id: int) -> int:
         """Post-Session-Reflektion (dateibasiert): liest neue Nachrichten dieses
@@ -175,7 +179,7 @@ class EpisodicMemory:
     def _load_new_messages(self, user_id: int):
         from rag_backend.database import SessionLocal
         from rag_backend.models import Message, ChatSession, ReflectionState
-        from rag_backend.crypto_utils import decrypt_msg
+        from rag_backend.account_crypto import decrypt_for
         with SessionLocal() as db:
             state = db.get(ReflectionState, user_id)
             watermark = state.reflected_until if state else None
@@ -198,7 +202,7 @@ class EpisodicMemory:
                 if is_sensitive:
                     continue
                 try:
-                    text = decrypt_msg(m.content_encrypted)
+                    text = decrypt_for(user_id, m.content_encrypted)
                 except Exception:
                     continue
                 rows.append((m.sender, text))

@@ -64,7 +64,6 @@ services:
     # mit API-Key. Port wie bisher, damit die App-Einstellung gleich bleibt.
     volumes:
       - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     deploy:
       resources:
@@ -107,7 +106,6 @@ services:
       - EMBED_THREADS=6
     volumes:
       - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
@@ -140,7 +138,6 @@ services:
       - EMBED_THREADS=8
     volumes:
       - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
@@ -350,7 +347,6 @@ services:
     volumes:
       # Referenzstimme aus dem Repo (read-only) -> mit den Setup-Dateien versionier-/sicherbar.
       - ./voice_ref:/app/voice_ref:ro${ARGUS_MOUNT_LABEL:-}
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     security_opt:
       - no-new-privileges:true
@@ -398,7 +394,6 @@ services:
     # Argus Desktop erreicht STT ueber intern-proxy (127.0.0.1:8003), mit dem LLM-API-Key.
     volumes:
       - ${ARGUS_MODELS_DIR:-C:/Argus_Models}:/models:ro${ARGUS_MOUNT_LABEL:-}
-      - ./API_Tokens/fernet_key.txt:/run/secrets/fernet_key:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8003/healthz || exit 1"]
@@ -428,6 +423,10 @@ services:
       - "127.0.0.1:7860:7860"
     mem_limit: 8g
     cpus: "6.0"
+    # Klartext-Kopien einzelner Dateien, die Leseroutinen (PDF, Word, Excel) als Pfad
+    # brauchen: im Speicher, nie auf der Platte; jede Kopie verschwindet nach dem Lesen.
+    tmpfs:
+      - /run/argus-tmp:size=1g,mode=0700,uid=${ARGUS_UID:-1000},gid=${ARGUS_GID:-1000}
     volumes:
       - rag_data:/app/data
       - ./documents_to_ingest:/app/documents_to_ingest:rw${ARGUS_MOUNT_LABEL:-}
@@ -437,6 +436,8 @@ services:
       - ./alembic:/app/alembic:ro${ARGUS_MOUNT_LABEL:-}
       - ./alembic.ini:/app/alembic.ini:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/fernet_key.txt:/app/fernet_key.txt:ro${ARGUS_MOUNT_LABEL:-}
+      # Hauptschluessel der Verschluesselung je Konto: nur hier, in keinem anderen Dienst.
+      - ./API_Tokens/kek.txt:/run/secrets/kek:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/postgres_password.txt:/run/secrets/postgres_password:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/jwt_secret.txt:/run/secrets/jwt_secret:ro${ARGUS_MOUNT_LABEL:-}
       - ./API_Tokens/llm_api_key.txt:/run/secrets/llm_api_key:ro${ARGUS_MOUNT_LABEL:-}

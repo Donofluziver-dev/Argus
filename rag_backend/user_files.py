@@ -8,9 +8,12 @@ Struktur im Arbeitsverzeichnis:
   users/<user_id>/Ergebnisse   (vom Agenten fuer den Benutzer erzeugte Artefakte)
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 import re
 import stat
@@ -199,16 +202,66 @@ def open_new_file(folder: Path, name: str, max_tries: int = 100) -> tuple[Path, 
     raise FileExistsError(f"Kein freier Dateiname fuer {name!r}.")
 
 
-def write_new_file(folder: Path, name: str, data: bytes) -> Path:
-    """Schreibt data in eine neue Datei (siehe open_new_file) und liefert ihren Pfad."""
+def write_new_file(folder: Path, name: str, data: bytes, user_id: int | None = None) -> Path:
+    """Schreibt data in eine neue Datei (siehe open_new_file) und liefert ihren Pfad.
+    Mit user_id verschluesselt mit dem Schluessel dieses Kontos (account_crypto)."""
     path, fd = open_new_file(folder, name)
     try:
         with os.fdopen(fd, "wb") as fp:
-            fp.write(data)
+            if user_id is None:
+                fp.write(data)
+            else:
+                from rag_backend.account_crypto import EncryptedFileWriter
+                writer = EncryptedFileWriter(fp, user_id)
+                writer.write(data)
+                writer.close()
     except BaseException:
         path.unlink(missing_ok=True)
         raise
     return path
+
+
+def read_user_file(user_id: int, path: Path) -> bytes:
+    """Klartext einer Datei aus dem Bereich des Kontos (auch aeltere, unverschluesselte)."""
+    from rag_backend.account_crypto import read_file_plaintext
+    return read_file_plaintext(path, validate_user_id(user_id))
+
+
+def iter_user_file(user_id: int, path: Path):
+    from rag_backend.account_crypto import iter_file_plaintext
+    return iter_file_plaintext(path, validate_user_id(user_id))
+
+
+def _plaintext_root() -> Path:
+    """Ablage fuer Klartext-Kopien, die nur Leseroutinen brauchen (PDF, Word, Excel ...):
+    ein tmpfs im Speicher (/run/argus-tmp, siehe docker-compose.yml), sonst das
+    temporaere Verzeichnis des Systems."""
+    raw = (os.getenv("ARGUS_PLAINTEXT_DIR") or "").strip()
+    if raw:
+        return Path(raw)
+    default = Path("/run/argus-tmp")
+    return default if default.is_dir() else Path(tempfile.gettempdir())
+
+
+@contextmanager
+def plaintext_copy(user_id: int, path: Path):
+    """Pfad zu einer Klartext-Kopie fuer Routinen, die einen Dateipfad brauchen. Die Kopie
+    liegt in einem eigenen Ordner (0700) und verschwindet danach. Aeltere unverschluesselte
+    Dateien werden direkt gelesen."""
+    from rag_backend.account_crypto import is_encrypted_file
+    if not is_encrypted_file(path):
+        yield path
+        return
+    folder = Path(tempfile.mkdtemp(prefix="klartext-", dir=_plaintext_root()))
+    try:
+        target = folder / path.name
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fp:
+            for chunk in iter_user_file(user_id, path):
+                fp.write(chunk)
+        yield target
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def get_user_files_max_bytes() -> int:
@@ -231,7 +284,10 @@ def get_user_used_bytes(user_id: int) -> int:
                     if p.is_symlink() or os.path.islink(str(p)):
                         continue
                     if p.is_file():
-                        total += p.stat().st_size
+                        #--- Klartextgroesse: Die Grenze gilt fuer das, was hochgeladen wurde,
+                        #--- nicht fuer die paar Bytes, die die Verschluesselung dazugibt.
+                        from rag_backend.account_crypto import plaintext_size
+                        total += plaintext_size(p)
                 except OSError:
                     continue
         except OSError:
@@ -262,9 +318,10 @@ def list_user_files(user_id: int, bereich: str) -> list[dict]:
                 if not p.is_file():
                     continue
                 st = p.stat()
+                from rag_backend.account_crypto import plaintext_size
                 entries.append({
                     "name": p.name,
-                    "size": st.st_size,
+                    "size": plaintext_size(p),
                     "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
                 })
             except OSError:

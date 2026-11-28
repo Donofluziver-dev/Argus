@@ -72,6 +72,17 @@ class AuditLog(Base):
     hmac_signature = Column(String, nullable=False)
 
 
+class UserKey(Base):
+    #--- Datenschluessel je Konto, verpackt mit dem Hauptschluessel (account_crypto.py).
+    #--- key_ref nennt den Hauptschluessel (lokal mit Fingerabdruck oder die Key-Vault-kid).
+    __tablename__ = "user_keys"
+    user_id = Column(Integer, primary_key=True)
+    provider = Column(String, nullable=False)
+    key_ref = Column(String, nullable=False)
+    wrapped_dek = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class ReflectionState(Base):
     # Wasserzeichen fuer die Post-Session-Reflektion: bis zu welchem
     # Timestamp wurde bereits reflektiert.

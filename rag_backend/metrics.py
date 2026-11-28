@@ -217,12 +217,13 @@ def load_historical_metrics(db_session):
     from datetime import timezone
     import logging
 
-    from rag_backend.crypto_utils import decrypt_msg
-    from rag_backend.models import Message
+    from rag_backend.account_crypto import decrypt_for
+    from rag_backend.models import ChatSession, Message
 
     try:
         messages = (
-            db_session.query(Message)
+            db_session.query(Message, ChatSession.user_id)
+            .join(ChatSession, Message.session_id == ChatSession.id)
             .filter(Message.sender == "assistant")
             .filter(Message.latency_ms.isnot(None))
             .order_by(Message.timestamp.desc())
@@ -231,9 +232,9 @@ def load_historical_metrics(db_session):
         )
         _requests.clear()
 
-        for msg in reversed(messages):
+        for msg, owner in reversed(messages):
             try:
-                decrypted = decrypt_msg(msg.content_encrypted)
+                decrypted = decrypt_for(owner, msg.content_encrypted)
                 completion_chars = len(decrypted)
             except Exception:
                 completion_chars = 0

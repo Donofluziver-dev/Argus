@@ -171,14 +171,15 @@ def _append_dashboard_message(session_id, text: str) -> bool:
     if not session_id or not text:
         return False
     try:
-        from rag_backend.crypto_utils import encrypt_msg
+        from rag_backend.account_crypto import encrypt_for
         from rag_backend.models import ChatSession, Message
         with _get_session() as db:
-            if db.get(ChatSession, int(session_id)) is None:
+            chat = db.get(ChatSession, int(session_id))
+            if chat is None:
                 log.warning(f"Argus-Chat-Session {session_id} existiert nicht mehr.")
                 return False
             db.add(Message(session_id=int(session_id), sender="assistant",
-                           content_encrypted=encrypt_msg(text)))
+                           content_encrypted=encrypt_for(chat.user_id, text)))
             db.commit()
         return True
     except Exception as e:
@@ -193,14 +194,15 @@ def _append_dashboard_message(session_id, text: str) -> bool:
 def create_mission(user_id: int, goal_redacted: str, context_redacted: str,
                    pii_map: dict, provider: str, origin: str = "api",
                    dashboard_session_id: int | None = None) -> int:
-    from rag_backend.crypto_utils import encrypt_msg
+    from rag_backend.account_crypto import encrypt_for
     from rag_backend.models import Mission
+    uid = user_id if user_id is not None else USER_ID_DEFAULT
     with _get_session() as db:
         m = Mission(
-            user_id=user_id if user_id is not None else USER_ID_DEFAULT,
-            goal_encrypted=encrypt_msg(goal_redacted),
-            context_encrypted=encrypt_msg(context_redacted or ""),
-            pii_map_encrypted=encrypt_msg(json.dumps(pii_map or {}, ensure_ascii=False)),
+            user_id=uid,
+            goal_encrypted=encrypt_for(uid, goal_redacted),
+            context_encrypted=encrypt_for(uid, context_redacted or ""),
+            pii_map_encrypted=encrypt_for(uid, json.dumps(pii_map or {}, ensure_ascii=False)),
             provider=(provider or "gemini"),
             status="queued",
             current_step="wartet auf Missions-Loop",
@@ -269,7 +271,7 @@ async def launch_mission(goal: str, context: str, provider: str = "") -> tuple:
 
 
 def _load(mission_id: int) -> dict | None:
-    from rag_backend.crypto_utils import decrypt_msg
+    from rag_backend.account_crypto import decrypt_for
     from rag_backend.models import Mission
     with _get_session() as db:
         m = db.get(Mission, mission_id)
@@ -278,9 +280,9 @@ def _load(mission_id: int) -> dict | None:
         return {
             "id": m.id,
             "user_id": m.user_id,
-            "goal": decrypt_msg(m.goal_encrypted),
-            "context": decrypt_msg(m.context_encrypted) if m.context_encrypted else "",
-            "pii_map": json.loads(decrypt_msg(m.pii_map_encrypted) or "{}") if m.pii_map_encrypted else {},
+            "goal": decrypt_for(m.user_id, m.goal_encrypted),
+            "context": decrypt_for(m.user_id, m.context_encrypted) if m.context_encrypted else "",
+            "pii_map": json.loads(decrypt_for(m.user_id, m.pii_map_encrypted) or "{}") if m.pii_map_encrypted else {},
             "provider": m.provider,
             "status": m.status,
             "origin": getattr(m, "origin", None) or "api",
@@ -303,10 +305,14 @@ def _update(mission_id: int, **fields) -> None:
 def _finish(mission_id: int, status: str, result: str | None = None, error: str | None = None,
             calls_used: int | None = None, tokens_in: int | None = None,
             tokens_out: int | None = None) -> None:
-    from rag_backend.crypto_utils import encrypt_msg
+    from rag_backend.account_crypto import encrypt_for
+    from rag_backend.models import Mission
     fields = {"status": status, "current_step": status}
     if result is not None:
-        fields["result_encrypted"] = encrypt_msg(result)
+        with _get_session() as db:
+            m = db.get(Mission, mission_id)
+            owner = m.user_id if m is not None else None
+        fields["result_encrypted"] = encrypt_for(owner, result)
     if error is not None:
         fields["error"] = error[:2000]
     if calls_used is not None:
@@ -352,13 +358,13 @@ def request_cancel(mission_id: int) -> bool:
 
 
 def list_missions_brief(limit: int = 8) -> list:
-    from rag_backend.crypto_utils import decrypt_msg
+    from rag_backend.account_crypto import decrypt_for
     from rag_backend.models import Mission
     with _get_session() as db:
         rows = db.query(Mission).order_by(Mission.id.desc()).limit(limit).all()
         out = []
         for m in rows:
-            goal = decrypt_msg(m.goal_encrypted)
+            goal = decrypt_for(m.user_id, m.goal_encrypted)
             out.append({
                 "id": m.id,
                 "status": m.status,
@@ -374,13 +380,13 @@ def list_missions_brief(limit: int = 8) -> list:
 
 
 def get_result_text(mission_id: int) -> str | None:
-    from rag_backend.crypto_utils import decrypt_msg
+    from rag_backend.account_crypto import decrypt_for
     from rag_backend.models import Mission
     with _get_session() as db:
         m = db.get(Mission, mission_id)
         if m is None or not m.result_encrypted:
             return None
-        return decrypt_msg(m.result_encrypted)
+        return decrypt_for(m.user_id, m.result_encrypted)
 
 
 # Terminal-Status -> Kennwort der Abschluss-Meldung. Die _deliver-Texte in
@@ -397,7 +403,7 @@ def delivery_text(mission_id: int) -> str | None:
     Format-Quelle fuer Follow-Stream (main.py) und Zustellung.
     Der Wortlaut "Mission <id> <kennwort>" ist zugleich die Zustell-Needle
     (_TERMINAL_NEEDLES). None, solange die Mission nicht terminal ist.'''
-    from rag_backend.crypto_utils import decrypt_msg
+    from rag_backend.account_crypto import decrypt_for
     from rag_backend.models import Mission
     cap = int(os.getenv("CLOUD_MISSION_RESULT_CHARS", "6000"))
     with _get_session() as db:
@@ -405,9 +411,9 @@ def delivery_text(mission_id: int) -> str | None:
         if m is None or m.status not in _TERMINAL_NEEDLES:
             return None
         if m.status == "done":
-            pii_map = json.loads(decrypt_msg(m.pii_map_encrypted) or "{}") if m.pii_map_encrypted else {}
-            goal = redactor.rehydrate(decrypt_msg(m.goal_encrypted), pii_map)
-            result = decrypt_msg(m.result_encrypted) if m.result_encrypted else ""
+            pii_map = json.loads(decrypt_for(m.user_id, m.pii_map_encrypted) or "{}") if m.pii_map_encrypted else {}
+            goal = redactor.rehydrate(decrypt_for(m.user_id, m.goal_encrypted), pii_map)
+            result = decrypt_for(m.user_id, m.result_encrypted) if m.result_encrypted else ""
             return (
                 f"Mission {m.id} abgeschlossen ({m.provider}, {m.calls_used or 0} Cloud-Calls, "
                 f"{m.tokens_in or 0}/{m.tokens_out or 0} Tokens rein/raus).\n"

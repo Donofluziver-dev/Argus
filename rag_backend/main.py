@@ -41,7 +41,8 @@ from rag_backend.agent import agent_executor, startup_load_models, startup_mcp_a
 from rag_backend.memory import run_reflection_cycle
 from rag_backend import features
 from rag_backend.features import is_tracing_available, is_voice_available, is_web_available
-from rag_backend.crypto_utils import encrypt_msg, decrypt_msg, load_secret
+from rag_backend.crypto_utils import load_secret
+from rag_backend.account_crypto import encrypt_for, decrypt_for
 from rag_backend import metrics
 from rag_backend.security_audit import audit_auth
 from rag_backend.utils import cloud_enabled
@@ -263,12 +264,19 @@ async def _reflection_idle_watcher(app: FastAPI):
 async def lifespan(app: FastAPI):
     app.state.last_activity = None
     await asyncio.to_thread(_run_migrations)
+    #--- Verschluesselung je Konto: Ohne Hauptschluessel lassen sich weder Chats noch
+    #--- Dateien schreiben. Lieber gar nicht starten als jede Anfrage scheitern lassen.
+    from rag_backend import account_crypto
+    _ = account_crypto.keys().provider
     db = SessionLocal()
     try:
         create_service_user_if_not_exists(db)
         metrics.load_historical_metrics(db)
     finally:
         db.close()
+    #--- Aeltere Chats (gemeinsamer Fernet-Schluessel) und unverschluesselte Dateien auf
+    #--- die Schluessel je Konto umstellen. Im Hintergrund; lesbar bleibt beides auch vorher.
+    app.state.crypto_migration_task = asyncio.create_task(asyncio.to_thread(account_crypto.migrate_all))
     await asyncio.to_thread(_ensure_qdrant_collection)
 
     #--- MCP + Graph synchron vor yield, damit erste Requests ein komplettes
@@ -1353,6 +1361,14 @@ def dashboard_user_delete(user_id: int, db: Session = Depends(get_db),
     db.delete(target)
     db.commit()
     _remove_user_files(user_id)
+    #--- Datenschluessel des Kontos entfernen: Was von ihm noch irgendwo liegt (etwa im
+    #--- Verzeichnis einer Sicherung), ist ohne ihn nicht mehr zu entschluesseln, solange
+    #--- die Sicherung nicht auch die Tabelle user_keys enthaelt.
+    try:
+        from rag_backend import account_crypto
+        account_crypto.keys().forget(user_id)
+    except Exception as e:
+        log.warning(f"Schluessel von Konto {user_id} nicht entfernt: {e}")
     audit_auth("account.delete", status="success", request=request, user_id=admin.id, account=admin.email, account_exists=True, details={"target_id": target_id, "target_account": target_account, "chats_removed": chats_removed})
     return {"status": "deleted", "id": user_id, "chats_removed": chats_removed}
 
@@ -1472,18 +1488,17 @@ def reject_confirmation(confirmation_id: str, current_user: User = Depends(get_c
 # ---- Mission-Endpoints (Cloud-Agenten, Setup4) #---
 
 def _mission_to_dict(m: Mission, include_result: bool) -> dict:
-    from rag_backend.crypto_utils import decrypt_msg
     d = {
         "id": m.id, "status": m.status, "provider": m.provider,
         "current_step": m.current_step, "calls_used": m.calls_used,
         "tokens_in": m.tokens_in, "tokens_out": m.tokens_out, "error": m.error,
         "origin": getattr(m, "origin", None),
-        "goal": decrypt_msg(m.goal_encrypted),
+        "goal": decrypt_for(m.user_id, m.goal_encrypted),
         "created_at": m.created_at.isoformat() if m.created_at else None,
         "updated_at": m.updated_at.isoformat() if m.updated_at else None,
     }
     if include_result:
-        d["result"] = decrypt_msg(m.result_encrypted) if m.result_encrypted else None
+        d["result"] = decrypt_for(m.user_id, m.result_encrypted) if m.result_encrypted else None
     return d
 
 def _mission_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -1930,19 +1945,19 @@ def _orb_sse(d: dict) -> str:
     return f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
 
 
-def _chat_title(db, session_id: int) -> str:
+def _chat_title(db, session_id: int, user_id: int) -> str:
     # Titel = erste Nutzernachricht, gekuerzt. Bewusst ohne eigene title-Spalte:
     # eine Migration hier wuerde die Alembic-Kette ohne Setup4 zerreissen.
     m = (db.query(Message).filter_by(session_id=session_id, sender="user")
          .order_by(Message.id.asc()).first())
-    return _title_from_message(m, session_id)
+    return _title_from_message(m, session_id, user_id)
 
 
-def _title_from_message(m, session_id: int) -> str:
+def _title_from_message(m, session_id: int, user_id: int) -> str:
     if not m:
         return "Neuer Chat"
     try:
-        first_line = decrypt_msg(m.content_encrypted).strip().splitlines()[0]
+        first_line = decrypt_for(user_id, m.content_encrypted).strip().splitlines()[0]
     except Exception as e:
         # Mit lautem Log, nicht still: ein zu breites except hat hier schon einen
         # NameError als Krypto-Problem getarnt.
@@ -1954,7 +1969,7 @@ def _title_from_message(m, session_id: int) -> str:
     return t[:60] + "…" if len(t) > 60 else t
 
 
-def _chat_history_from_db(db, session_id: int, limit: int = 10) -> list:
+def _chat_history_from_db(db, session_id: int, user_id: int, limit: int = 10) -> list:
     # Verlauf kommt aus der DB, nicht vom Client: ein manipulierter Client
     # koennte dem Agenten sonst eine Vorgeschichte unterschieben.
     rows = (db.query(Message).filter_by(session_id=session_id)
@@ -1962,7 +1977,7 @@ def _chat_history_from_db(db, session_id: int, limit: int = 10) -> list:
     out = []
     for m in reversed(rows):
         try:
-            content = decrypt_msg(m.content_encrypted)
+            content = decrypt_for(user_id, m.content_encrypted)
         except Exception as e:
             log.warning(f"Verlauf: Nachricht {m.id} uebersprungen ({type(e).__name__}: {e})")
             continue
@@ -2002,7 +2017,7 @@ def dashboard_chats(db: Session = Depends(get_db), user: User = Depends(dashboar
         n, last = stats.get(s.id, (0, None))
         out.append({
             "id": s.id,
-            "title": _title_from_message(first_user.get(s.id), s.id),
+            "title": _title_from_message(first_user.get(s.id), s.id, user.id),
             "messages": n,
             "created_at": s.created_at.isoformat() if s.created_at else None,
             "last_at": last.isoformat() if last else None,
@@ -2020,9 +2035,9 @@ def dashboard_chat_load(chat_id: int, db: Session = Depends(get_db),
     out = []
     for m in msgs:
         try:
-            content = decrypt_msg(m.content_encrypted)
+            content = decrypt_for(s.user_id, m.content_encrypted)
         except Exception as e:
-            # Fernet-Key gewechselt: die einzelne Zeile bleibt sichtbar, statt den
+            # Schluessel fehlt oder gewechselt: die einzelne Zeile bleibt sichtbar, statt den
             # ganzen Verlauf unlesbar zu machen. Mit Log.
             log.warning(f"Nachricht {m.id} nicht entschluesselbar: {type(e).__name__}: {e}")
             content = "[nicht entschluesselbar]"
@@ -2031,7 +2046,7 @@ def dashboard_chat_load(chat_id: int, db: Session = Depends(get_db),
         steps = None
         if getattr(m, "steps_encrypted", None):
             try:
-                steps = json.loads(decrypt_msg(m.steps_encrypted))
+                steps = json.loads(decrypt_for(s.user_id, m.steps_encrypted))
             except Exception as e:
                 log.warning(f"Schritte zu Nachricht {m.id} nicht lesbar: {type(e).__name__}")
         out.append({
@@ -2052,7 +2067,7 @@ def dashboard_chat_load(chat_id: int, db: Session = Depends(get_db),
     #--- packen, und ein Klick truege sie hinaus.
     from rag_backend.egress_guard import is_session_marked
     sensitive = bool(getattr(s, "has_sensitive_data", False)) or is_session_marked(f"dashboard:{s.id}")
-    return {"id": s.id, "title": _chat_title(db, s.id), "messages": out, "sensitive": sensitive}
+    return {"id": s.id, "title": _chat_title(db, s.id, s.user_id), "messages": out, "sensitive": sensitive}
 
 
 @app.delete("/v1/dashboard/chats/{chat_id}/messages/{message_id}", tags=["Dashboard"])
@@ -2215,12 +2230,12 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
             db0.commit()
             db0.refresh(chat_session)
         sid = chat_session.id
-        chat_history = _chat_history_from_db(db0, sid)
+        chat_history = _chat_history_from_db(db0, sid, uid)
         #--- Bildmarke wie im Proxy, sonst steht im Verlauf eine leere Nutzerzeile.
         images = _dashboard_images(body.images)
         db0.add(Message(session_id=sid, sender="user",
-                        content_encrypted=encrypt_msg(
-                            ("[Bild angehaengt] " if images else "") + body.message)))
+                        content_encrypted=encrypt_for(
+                            uid, ("[Bild angehaengt] " if images else "") + body.message)))
         db0.commit()
     #--- Aktivitaet melden: Ohne diesen Zeitpunkt sah der Idle-Watcher nie einen
     #--- Leerlauf, und das Langzeitgedaechtnis wurde im normalen Chat nie fortgeschrieben.
@@ -2507,12 +2522,12 @@ async def dashboard_chat(body: DashboardChatIn, request: Request,
                             gefaltet.append(sch)
                         if denk:
                             gefaltet.append({"art": "denken", "text": "".join(denk)})
-                        mitschrift = encrypt_msg(json.dumps(
+                        mitschrift = encrypt_for(uid, json.dumps(
                             {"schritte": gefaltet, "quellen": quellen,
                              "dokumente": dokumente, "dateien": dateien},
                             ensure_ascii=False)) if (gefaltet or quellen or dokumente or dateien) else None
                         db2.add(Message(session_id=sid, sender="assistant",
-                                        content_encrypted=encrypt_msg(answer),
+                                        content_encrypted=encrypt_for(uid, answer),
                                         steps_encrypted=mitschrift,
                                         latency_ms=total_ms, ttft_ms=ttft_val,
                                         tokens_per_sec=tokens_sec_val))
@@ -2851,11 +2866,12 @@ async def dashboard_uploads(admin: User = Depends(dashboard_admin)):
 
 
 async def _write_upload(file: UploadFile, folder: Path, name: str, max_bytes: int,
-                        budget: int | None = None) -> tuple[Path, int]:
+                        budget: int | None = None, user_id: int | None = None) -> tuple[Path, int]:
     """Schreibt einen Upload blockweise in eine NEUE Datei (user_files.open_new_file:
     exklusiv, ohne Symlinks, belegte Namen werden durchnummeriert). Gezaehlt werden
     die ankommenden Bytes, nicht der content-length-Header. budget ist der noch
-    freie Platz des Kontos; None = keine Kontogrenze."""
+    freie Platz des Kontos; None = keine Kontogrenze. Mit user_id landet die Datei
+    verschluesselt mit dem Schluessel dieses Kontos auf der Platte."""
     from rag_backend import user_files
     try:
         target, fd = user_files.open_new_file(folder, name)
@@ -2863,7 +2879,12 @@ async def _write_upload(file: UploadFile, folder: Path, name: str, max_bytes: in
         raise HTTPException(status_code=500, detail=f"Schreiben fehlgeschlagen: {e}")
     written = 0
     try:
-        with os.fdopen(fd, "wb") as out:
+        with os.fdopen(fd, "wb") as raw_out:
+            if user_id is not None:
+                from rag_backend.account_crypto import EncryptedFileWriter
+                out = await asyncio.to_thread(EncryptedFileWriter, raw_out, user_id)
+            else:
+                out = raw_out
             while chunk := await file.read(_MB):
                 written += len(chunk)
                 if written > max_bytes:
@@ -2875,6 +2896,8 @@ async def _write_upload(file: UploadFile, folder: Path, name: str, max_bytes: in
                         status_code=413,
                         detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.")
                 out.write(chunk)
+            if out is not raw_out:
+                out.close()
     except HTTPException:
         target.unlink(missing_ok=True)
         raise
@@ -3059,7 +3082,8 @@ async def dashboard_user_file_upload(
         if budget <= 0:
             raise HTTPException(status_code=413,
                                 detail="Speicherplatzgrenze fuer dieses Konto ueberschritten.")
-        target, written = await _write_upload(file, dateien_dir, name, _MAX_UPLOAD_BYTES, budget)
+        target, written = await _write_upload(file, dateien_dir, name, _MAX_UPLOAD_BYTES, budget,
+                                              user_id=user.id)
 
     st = target.stat()
     log.info(f"Benutzerdatei hochgeladen von '{user.email}' (ID {user.id}): {target.name} ({written} Bytes)")
@@ -3067,13 +3091,13 @@ async def dashboard_user_file_upload(
         "status": "ok",
         "bereich": "dateien",
         "name": target.name,
-        "size": st.st_size,
+        "size": written,
         "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
     }
 
 
 @app.get("/v1/dashboard/files/{bereich}/{name}", tags=["Dashboard"])
-def dashboard_user_file_download(
+async def dashboard_user_file_download(
     bereich: str,
     name: str,
     user: User = Depends(dashboard_user),
@@ -3091,11 +3115,31 @@ def dashboard_user_file_download(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Datei nicht gefunden.")
 
-    return FileResponse(
-        path=target,
-        filename=target.name,
+    #--- Die Datei liegt verschluesselt mit dem Schluessel des Kontos; ausgeliefert wird
+    #--- sie entschluesselt und blockweise. Der erste Block wird vorab gelesen: Passt der
+    #--- Schluessel nicht, gibt es eine Fehlermeldung statt eines abgebrochenen Downloads.
+    from urllib.parse import quote
+    from rag_backend.account_crypto import AccountCryptoError, plaintext_size
+    blocks = user_files.iter_user_file(user.id, target)
+    try:
+        first = await asyncio.to_thread(next, blocks, b"")
+    except AccountCryptoError as e:
+        log.warning(f"Download von {target.name} (Konto {user.id}) nicht entschluesselbar: {e}")
+        raise HTTPException(status_code=500, detail="Datei laesst sich nicht entschluesseln.")
+
+    def _rest():
+        yield first
+        yield from blocks
+
+    quoted = quote(target.name)
+    disposition = (f"attachment; filename*=utf-8''{quoted}" if quoted != target.name
+                   else f'attachment; filename="{target.name}"')
+    return StreamingResponse(
+        _rest(),
         media_type="application/octet-stream",
         headers={
+            "Content-Disposition": disposition,
+            "Content-Length": str(plaintext_size(target)),
             "X-Content-Type-Options": "nosniff",
         },
     )

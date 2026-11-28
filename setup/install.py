@@ -1439,6 +1439,14 @@ def doctor_check_secrets_and_dirs(repo_root: Path) -> DoctorResult:
             if f_mode != 0o644:
                 errors.append(f"API_Tokens/{name} hat Rechte {oct(f_mode)} statt 0o644")
 
+    llm_key = tokens_dir / init_mod.LLM_API_KEY_FILE
+    try:
+        if llm_key.is_file() and llm_key.read_text(encoding="utf-8").strip().startswith(init_mod.ENC_PREFIX):
+            errors.append("API_Tokens/llm_api_key.txt ist noch verschluesselt; Modell und Sprachdienste "
+                          "lesen ihn ohne Fernet-Schluessel (setup/init_stack.py erneut ausfuehren)")
+    except OSError:
+        pass
+
     env_path = repo_root / ".env"
     env_data = (
         init_mod.parse_env(env_path.read_bytes().decode("utf-8"))

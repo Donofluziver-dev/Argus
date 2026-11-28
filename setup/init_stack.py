@@ -34,12 +34,17 @@ LEGACY_LLM_API_KEY_FILE = "sglang_api_key.txt"
 ENC_PREFIX = "ENC:"
 
 # (Datei, verschluesselt, Zufallsbytes). postgres_password bleibt Klartext:
-# Postgres liest die Datei direkt.
+# Postgres liest die Datei direkt. Der Modell-Schluessel ebenso: Ihn lesen llm, embed,
+# rerank, stt und tts, und mit Fernet verschluesselt braeuchten sie dafuer den
+# Fernet-Schluessel, an dem frueher auch die Chats hingen. Im selben Ordner wie dieser
+# schuetzte die Verschluesselung ihn ohnehin nicht. kek.txt ist der Hauptschluessel der
+# Verschluesselung je Konto (rag_backend/account_crypto.py), nur in rag-backend eingebunden.
 GENERATED = [
-    (LLM_API_KEY_FILE, True, 32),
+    (LLM_API_KEY_FILE, False, 32),
     ("jwt_secret.txt", True, 48),
     ("audit_hmac_key.txt", True, 32),
     ("postgres_password.txt", False, 24),
+    ("kek.txt", False, 32),
 ]
 # Optionale Schluessel des Nutzers. Leer angelegt, damit Docker die Einbindung
 # nicht als Ordner anlegt. Einen LangSmith-Schluessel gibt es nicht mehr: Ablaufdaten
@@ -161,8 +166,25 @@ def ensure_stack_secrets(directory: Path, restrict_acl=restrict_to_owner) -> tup
         os.replace(legacy, directory / LLM_API_KEY_FILE)
         files[LEGACY_LLM_API_KEY_FILE] = "umbenannt"
 
+    #--- Bindet Docker eine fehlende Datei ein, legt es an ihrer Stelle einen leeren
+    #--- Ordner an (etwa kek.txt nach einem Update ohne diesen Lauf). Den entfernen.
+    for name, _encrypt, _nbytes in GENERATED:
+        path = directory / name
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+
+    #--- Aeltere Installationen: Modell-Schluessel einmal entschluesseln (siehe GENERATED).
+    llm_path = directory / LLM_API_KEY_FILE
+    llm_val = _read_trimmed(llm_path)
+    if llm_val.startswith(ENC_PREFIX):
+        _write_atomic(llm_path, fernet.decrypt(llm_val[len(ENC_PREFIX):].encode("ascii")).decode("utf-8"),
+                      mode=file_mode)
+        files[LLM_API_KEY_FILE] = "entschluesselt"
+
     for name, encrypt, nbytes in GENERATED:
         path = directory / name
+        if name in files:
+            continue
         if _read_trimmed(path):
             files[name] = "behalten"
             continue

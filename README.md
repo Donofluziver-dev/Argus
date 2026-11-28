@@ -111,7 +111,7 @@ Qwen3.6-35B-A3B. The measurements are in the repository and can be repeated.
 | Output speed of the model | 79 tokens per second, 47 each with two requests at once | `bench.sh` in the container |
 | Text one request can hold | 72,000 tokens, roughly 100 pages | setting `LLM_CTX_PER_SLOT` |
 | Transcribing scans, photos and handwriting | 111 of 111 checks on 11 test pages; wrong digits only below 150 dpi or with 4 pt print | fax, phone photo, form, drawing, stamp and stress series, `eval/scans` |
-| Automated tests | 554 for the backend, 80 for the calculation and code sandbox | on every change in CI, together with the network isolation check |
+| Automated tests | 656 for the backend, 88 for the calculation and code sandbox (under runc and gVisor) | on every change in CI, together with the network isolation check |
 
 ## Why Argus is secure
 
@@ -370,8 +370,11 @@ model behaving well.
 
 These are known and not solved yet:
 
-- Files in the per-account areas are separated inside Argus, not encrypted per account: whoever
-  operates the server or Docker can read them.
+- Per-account encryption protects what is stored (database, workspace, backups) with one data
+  key per account, wrapped by a master key in `API_Tokens/kek.txt` or in Azure Key Vault
+  (`ARGUS_KEK_PROVIDER=azure-keyvault`). It does not protect against whoever operates
+  `rag-backend` at runtime (Docker, root). The shared knowledge base (Qdrant) and metadata stay
+  unencrypted. Back up the master key separately; without it chats and files are lost.
 - No source-level permissions in document search, no SSO (OIDC). The chosen way is SSO
   through Entra ID, then searching SharePoint and Teams through Microsoft Graph with the
   signed-in person's delegated rights, so Microsoft returns only what that person may see and

@@ -137,7 +137,7 @@ Modell Qwen3.6-35B-A3B. Die Messungen liegen im Repo und lassen sich wiederholen
 | Schreibtempo des Modells | 79 Token je Sekunde, bei zwei Anfragen gleichzeitig je 47 | `bench.sh` im Container |
 | Text, den eine Anfrage fassen kann | 72.000 Token, rund 100 Seiten | Einstellung `LLM_CTX_PER_SLOT` |
 | Scans, Fotos und Handschrift abschreiben | 111 von 111 Prüfungen auf 11 Testseiten; falsche Zahlen erst unter 150 dpi oder bei 4 pt Schrift | Fax, Handyfoto, Formular, Zeichnung, Stempel und Belastungsreihen, `eval/scans` |
-| Automatische Tests | 554 für das Backend, 80 für die Rechen- und Code-Sandbox | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
+| Automatische Tests | 656 für das Backend, 88 für die Rechen- und Code-Sandbox (unter runc und gVisor) | bei jeder Änderung im CI, zusammen mit der Prüfung der Netz-Abschottung |
 
 Die Aufgaben der Agenten-Messung prüfen unter anderem, ob Argus interne Fragen aus den
 Dokumenten beantwortet statt aus dem Gedächtnis, ob es Internes nicht im Web sucht und ob es
@@ -163,8 +163,8 @@ kein Schaden entsteht. Die Schutzmaßnahmen sitzen außerhalb des Modells:
 
 Die Einzelheiten stehen im [Sicherheitskonzept](#sicherheitskonzept). Was noch fehlt, steht
 unter [Offen für einen Einsatz im Unternehmen](#offen-für-einen-einsatz-im-unternehmen), vor
-allem: Wer den Server bedient, kann die Dateien lesen, und eine Anmeldung über das
-Firmenverzeichnis (SSO) gibt es noch nicht.
+allem: Wer das Backend zur Laufzeit bedienen darf, kann die Daten lesen (gespeichert sind sie je
+Konto verschlüsselt), und eine Anmeldung über das Firmenverzeichnis (SSO) gibt es noch nicht.
 
 ### Wer hat was getan: Auditprotokoll und SIEM
 
@@ -563,16 +563,42 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
 - **Geheimnisse** liegen nie im Repo, sondern in `API_Tokens/`. Unter Windows darf nur der
   Besitzer den Ordner öffnen. Unter Linux hat der Ordner `0700` und die Dateien darin `0644`:
   Andere Nutzer des Rechners kommen nicht hinein, die Container lesen die einzeln
-  eingebundenen Dateien trotzdem, auch ohne Root-Rechte.
+  eingebundenen Dateien trotzdem, auch ohne Root-Rechte. Jeder Dienst bekommt nur, was er
+  braucht: Modell, Suche und Sprache nur den Modell-Schlüssel, den Fernet-Schlüssel und den
+  Hauptschlüssel der Verschlüsselung je Konto sieht nur `rag-backend`.
+- **Verschlüsselung je Konto:** Jedes Konto hat einen eigenen Datenschlüssel (AES-256-GCM).
+  Mit ihm liegen seine Chats samt Werkzeugschritten, seine Missionen, seine Dateien und
+  Ergebnisse sowie `USER.md`, `MEMORY.md` (samt Sicherung) und das Tagesgedächtnis
+  verschlüsselt in der Datenbank und im Arbeitsordner. Ein Datensatz oder eine Datei lässt
+  sich nur mit dem Schlüssel des eigenen Kontos öffnen; vertauschte, abgeschnittene oder
+  veränderte Dateien fallen beim Lesen auf. Die Datenschlüssel stehen nur verpackt in der
+  Tabelle `user_keys`. Verpackt sind sie mit dem Hauptschlüssel: lokal in
+  `API_Tokens/kek.txt` (`ARGUS_KEK_PROVIDER=local`, Standard) oder als RSA-Schlüssel in
+  Azure Key Vault (`ARGUS_KEK_PROVIDER=azure-keyvault`, `AZURE_KEYVAULT_URL`,
+  `AZURE_KEYVAULT_KEY`, Anmeldung über die Managed Identity der VM, optional
+  `AZURE_CLIENT_ID`; die Identität braucht im Key Vault „Key Vault Crypto User“). Mit Key
+  Vault verlässt der Hauptschlüssel den Key Vault nie. Leseroutinen, die einen Dateipfad
+  brauchen (PDF, Word, Excel), bekommen eine Klartext-Kopie in einem tmpfs im Speicher, die
+  nach dem Lesen verschwindet. Beim ersten Start stellt das Backend ältere Chats und
+  Dateien im Hintergrund um; vorher bleiben sie lesbar. Ein gelöschtes Konto verliert seinen
+  Schlüssel.
 
 ### Offen für einen Einsatz im Unternehmen
 
 Diese Punkte sind bekannt und noch nicht gelöst. Wer Argus mit mehreren Personen betreibt,
 sollte sie kennen.
 
-- **Dateien bleiben lesbar für den Server:** Die Bereiche je Konto trennen die Konten in
-  Argus. Wer den Server oder Docker bedienen darf, liest sie trotzdem. Eine Verschlüsselung je
-  Konto gibt es nicht.
+- **Grenzen der Verschlüsselung je Konto:** Sie schützt alles, was gespeichert ist: Eine Kopie
+  der Datenbank, des Arbeitsordners oder einer Sicherung davon ist ohne den Hauptschlüssel
+  unlesbar. Sie schützt nicht vor jemandem, der `rag-backend` zur Laufzeit bedient (Docker,
+  Root auf dem Server): Das Backend muss die Daten entschlüsseln können, um mit ihnen zu
+  arbeiten, und mit `docker exec` kommt man an Schlüssel im Speicher und an
+  `API_Tokens/kek.txt`. Mit Azure Key Vault liegt der Hauptschlüssel außerhalb, die Managed
+  Identity der VM darf ihn aber benutzen. Eine Sicherung, die die Tabelle `user_keys` und den
+  Hauptschlüssel enthält, öffnet auch die Daten gelöschter Konten. Gemeinsam und
+  unverschlüsselt bleiben die Wissensbasis (Qdrant, für alle Konten dieselbe) und Metadaten
+  (Kontonamen, Zeitstempel, Dateinamen). Den Hauptschlüssel zu wechseln (alle
+  Datenschlüssel neu verpacken) übernimmt noch kein Befehl.
 - **Rechte der Quellen:** Die Dokumentensuche kennt eine gemeinsame Wissensbasis. Für Firmen
   müsste sie die Rechte der Quelle mitprüfen (etwa SharePoint). Die Anmeldung läuft über
   eigene Konten, nicht über SSO (OIDC). Entschiedener Weg: zuerst SSO über Entra ID, dann
@@ -1169,9 +1195,14 @@ dann nicht mit, nur ein API-Token im Header.
 
 `API_Tokens/`, `.env` und Stimmaufnahmen in `voice_ref/` sind per `.gitignore` ausgeschlossen.
 Im Repo liegt nur `.env.example` (gut 50 Einstellungen; alles andere nimmt den Standard aus dem
-Code). Werte mit `ENC:` in `API_Tokens/` sind mit `fernet_key.txt` verschlüsselt; an diesem
-Schlüssel hängen auch die gespeicherten Chats. Ältere Installationen haben den Modell-Schlüssel
-noch als `sglang_api_key.txt`; `init_stack.py` benennt die Datei beim nächsten Lauf um.
+Code). Werte mit `ENC:` in `API_Tokens/` sind mit `fernet_key.txt` verschlüsselt; an ihm hängen
+noch ältere Chats bis zu ihrer Umstellung. Chats, Dateien und Gedächtnis hängen am
+Hauptschlüssel `kek.txt` (oder am Schlüssel in Azure Key Vault): **Ohne ihn sind sie verloren;
+er gehört getrennt von den Daten gesichert.** Ältere Installationen haben den Modell-Schlüssel
+noch als `sglang_api_key.txt` oder verschlüsselt; `init_stack.py` benennt die Datei beim
+nächsten Lauf um und legt den Schlüssel im Klartext ab (Modell und Sprachdienste bekommen den
+Fernet-Schlüssel nicht mehr). Nach einem Update deshalb einmal `./install.sh` bzw.
+`python setup/init_stack.py` laufen lassen, dann `docker compose up -d`.
 
 ## Tests und Messungen
 

@@ -28,3 +28,4 @@ argus-bundle-*/
 docker-compose.bundle.yml
 *.log
 
+rag_backend/tests/.account_crypto_test.json

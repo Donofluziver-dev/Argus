@@ -48,7 +48,7 @@ def test_secrets_are_created_and_decryptable(init_stack, tmp_path):
     files, _ = init_stack.ensure_stack_secrets(tmp_path, restrict_acl=_no_acl)
     key = (tmp_path / "fernet_key.txt").read_text(encoding="utf-8")
     assert init_stack.is_valid_fernet_key(key)
-    for name in ("llm_api_key.txt", "jwt_secret.txt", "audit_hmac_key.txt"):
+    for name in ("jwt_secret.txt", "audit_hmac_key.txt"):
         raw = (tmp_path / name).read_text(encoding="utf-8")
         assert raw.startswith("ENC:") and "\n" not in raw
         plain = Fernet(key.encode()).decrypt(raw[4:].encode()).decode()
@@ -61,6 +61,30 @@ def test_secrets_are_created_and_decryptable(init_stack, tmp_path):
     #--- Postgres liest sein Passwort direkt, also Klartext.
     pg = (tmp_path / "postgres_password.txt").read_text(encoding="utf-8")
     assert not pg.startswith("ENC:") and len(pg) >= 24
+    #--- Modell-Schluessel im Klartext: Modell und Sprachdienste bekommen keinen Fernet-Schluessel.
+    llm = (tmp_path / "llm_api_key.txt").read_text(encoding="utf-8")
+    assert not llm.startswith("ENC:") and re.fullmatch(r"[A-Za-z0-9_-]{32,}", llm)
+    #--- Hauptschluessel der Verschluesselung je Konto: 32 Bytes, Base64 ohne Auffuellung.
+    import base64
+    kek = (tmp_path / "kek.txt").read_text(encoding="utf-8")
+    assert len(base64.urlsafe_b64decode(kek + "=" * (-len(kek) % 4))) == 32
+    assert files["kek.txt"] == "angelegt"
+
+
+def test_encrypted_model_key_is_converted_to_plaintext(init_stack, tmp_path):
+    files, _ = init_stack.ensure_stack_secrets(tmp_path, restrict_acl=_no_acl)
+    key = (tmp_path / "fernet_key.txt").read_text(encoding="utf-8")
+    (tmp_path / "llm_api_key.txt").write_text(
+        "ENC:" + Fernet(key.encode()).encrypt(b"alter-modell-schluessel").decode(), encoding="utf-8")
+    files, _ = init_stack.ensure_stack_secrets(tmp_path, restrict_acl=_no_acl)
+    assert (tmp_path / "llm_api_key.txt").read_text(encoding="utf-8") == "alter-modell-schluessel"
+    assert files["llm_api_key.txt"] == "entschluesselt"
+
+
+def test_empty_directory_left_by_docker_is_replaced(init_stack, tmp_path):
+    (tmp_path / "kek.txt").mkdir()
+    files, _ = init_stack.ensure_stack_secrets(tmp_path, restrict_acl=_no_acl)
+    assert (tmp_path / "kek.txt").is_file() and files["kek.txt"] == "angelegt"
 
 
 def test_placeholders_exist_as_empty_files(init_stack, tmp_path):

@@ -338,7 +338,9 @@ async def test_save_artifact_saves_to_ergebnisse_without_windows_path(tmp_path, 
 
     target = tmp_path / "users" / "15" / "Ergebnisse" / "analyse.md"
     assert target.is_file()
-    assert "# Analyseergebnis" in target.read_text(encoding="utf-8")
+    #--- Auf der Platte verschluesselt mit dem Schluessel des Kontos.
+    assert b"Analyseergebnis" not in target.read_bytes()
+    assert "# Analyseergebnis" in user_files.read_user_file(15, target).decode("utf-8")
 
     # SSE-Reporting: Datei muss gemerkt sein
     gemerkt = agent.dateien_liste()
@@ -403,7 +405,8 @@ async def test_execute_code_sends_user_files_and_saves_results(tmp_path, monkeyp
     # 3. Geprueft: Datei landet in Ergebnisse
     erg_file = tmp_path / "users" / "20" / "Ergebnisse" / "auswertung.csv"
     assert erg_file.is_file()
-    assert erg_file.read_bytes() == b"Ergebnisdaten"
+    assert b"Ergebnisdaten" not in erg_file.read_bytes()
+    assert user_files.read_user_file(20, erg_file) == b"Ergebnisdaten"
 
 
 @pytest.mark.asyncio
