@@ -193,6 +193,7 @@ nvidia-smi                     # Grafikspeicher und Auslastung
 | Passwort zurücksetzen | `./install.sh reset-password <konto>` |
 | Sprachmodell wechseln | `./install.sh --llm gemma` (oder `--llm qwen`) |
 | Suche oder Sprache auf CPU/Grafikkarte umstellen | `./install.sh --suche cpu` bzw. `--sprache gpu` |
+| Code-Sandbox unter gVisor (einmal `runsc` einrichten, siehe README, „Code-Sandbox unter gVisor“) | `./install.sh --gvisor`, abschalten mit `--no-gvisor` |
 
 `docker compose down` hält den Stapel an und entfernt die Container; Daten, Konten und
 Dokumente bleiben. Die Ordner unter `~/argus` und die Docker-Volumes nur löschen, wenn du

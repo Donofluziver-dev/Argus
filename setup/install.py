@@ -577,6 +577,104 @@ def set_gpu_groups(repo_root: Path, gpu: list[str]) -> None:
     init_mod.write_env_file(env_path, template_text, {"COMPOSE_PATH_SEPARATOR": ":", "COMPOSE_FILE": value})
 
 
+#--- Code-Sandbox unter gVisor. Eingeschaltet, sobald Docker die Laufzeit runsc kennt.
+GVISOR_COMPOSE = "compose/sandbox-gvisor.yml"
+
+
+def docker_runtimes() -> set[str]:
+    """Laufzeiten, die der Docker-Daemon kennt (runc, runsc ...). ARGUS_DOCKER_RUNTIMES
+    (Komma-getrennt) ersetzt die Abfrage, etwa in Tests oder wenn docker nicht erreichbar ist."""
+    override = os.environ.get("ARGUS_DOCKER_RUNTIMES")
+    if override is not None:
+        return {r.strip() for r in override.split(",") if r.strip()}
+    if not shutil.which("docker"):
+        return set()
+    try:
+        res = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"],
+                             capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if res.returncode != 0:
+        return set()
+    try:
+        data = json.loads(res.stdout.strip() or "{}")
+    except ValueError:
+        return set()
+    return set(data) if isinstance(data, dict) else set()
+
+
+def compose_file_with_gvisor(env_data: dict, use: bool) -> str | None:
+    """COMPOSE_FILE mit oder ohne compose/sandbox-gvisor.yml (nach Basis und GPU-Dateien,
+    vor anderen Dateien wie dem Override des Offline-Pakets). None = nichts zu aendern."""
+    files = compose_files_from_env(env_data)
+    if use:
+        if GVISOR_COMPOSE in files:
+            return None
+        files = files or [_BASIS_COMPOSE]
+        fest = {_BASIS_COMPOSE} | {d["datei"] for d in GPU_GRUPPEN.values()}
+        pos = max((i for i, f in enumerate(files) if f in fest), default=-1) + 1
+        files.insert(pos, GVISOR_COMPOSE)
+    else:
+        if GVISOR_COMPOSE not in files:
+            return None
+        files = [f for f in files if f != GVISOR_COMPOSE]
+    return ":".join(files)
+
+
+def set_sandbox_gvisor(repo_root: Path, use: bool) -> bool:
+    """Schaltet gVisor fuer die Code-Sandbox in der .env ein oder aus. True = geaendert."""
+    init_mod = _load_init_stack_module(repo_root)
+    env_path = repo_root / ".env"
+    template_text = (repo_root / ".env.example").read_bytes().decode("utf-8")
+    current = init_mod.parse_env(env_path.read_bytes().decode("utf-8")) if env_path.exists() else {}
+    value = compose_file_with_gvisor(current, use)
+    if value is None:
+        return False
+    init_mod.write_env_file(env_path, template_text, {"COMPOSE_PATH_SEPARATOR": ":", "COMPOSE_FILE": value})
+    return True
+
+
+def sandbox_container_runtimes() -> list[str]:
+    """Laufzeit der laufenden Sandbox-Container (leer, wenn keiner laeuft)."""
+    if os.environ.get("ARGUS_DOCKER_RUNTIMES") is not None or not shutil.which("docker"):
+        return []
+    try:
+        ids = subprocess.run(
+            ["docker", "ps", "-q", "--filter", "label=com.docker.compose.service=calc-sandbox"],
+            capture_output=True, text=True, timeout=30, check=False).stdout.split()
+        if not ids:
+            return []
+        res = subprocess.run(["docker", "inspect", "--format", "{{.HostConfig.Runtime}}", *ids],
+                             capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [r.strip() for r in res.stdout.splitlines() if r.strip()]
+
+
+def doctor_check_sandbox_runtime(env_data: dict[str, str], runtimes: set[str] | None = None,
+                                 running: list[str] | None = None) -> DoctorResult:
+    runtimes = docker_runtimes() if runtimes is None else runtimes
+    running = sandbox_container_runtimes() if running is None else running
+    use = GVISOR_COMPOSE in compose_files_from_env(env_data)
+    if use and "runsc" not in runtimes:
+        return DoctorResult("FEHLER", "Code-Sandbox",
+                            f"COMPOSE_FILE nennt {GVISOR_COMPOSE}, Docker kennt die Laufzeit runsc aber "
+                            "nicht (gVisor installieren oder ./install.sh --no-gvisor).")
+    if use and running and any(r != "runsc" for r in running):
+        return DoctorResult("WARNUNG", "Code-Sandbox",
+                            "gVisor ist eingetragen, laufende Sandbox-Container nutzen es noch nicht "
+                            "(docker compose up -d calc-sandbox).")
+    if use:
+        return DoctorResult("OK", "Code-Sandbox", "Code laeuft unter gVisor (runsc).")
+    if "runsc" in runtimes:
+        return DoctorResult("WARNUNG", "Code-Sandbox",
+                            "gVisor (runsc) ist installiert, die Code-Sandbox nutzt es nicht "
+                            "(./install.sh --gvisor).")
+    return DoctorResult("OK", "Code-Sandbox",
+                        "Code laeuft unter runc; mit gVisor waere er staerker vom Host-Kernel "
+                        "getrennt (README, Code-Sandbox).")
+
+
 def llm_need_gb(entry: dict | None) -> float:
     """Grafikspeicher, wenn das ganze Sprachmodell samt Bild-Encoder auf der Karte liegt."""
     s = (entry or {}).get("speicher") or {}
@@ -2036,6 +2134,7 @@ def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[
         doctor_check_models(models_dir, models_spec_path, verify_sha256=verify_models, auswahl=auswahl),
         doctor_check_networks(repo_root),
         doctor_check_proxy(repo_root, env_data),
+        doctor_check_sandbox_runtime(env_data),
         doctor_check_stack(repo_root, env_data=env_data),
     ]
     results.extend(doctor_check_switches(env_data))
@@ -2110,6 +2209,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--acme-ca", type=str, default=None,
                         help="ACME-CA: production oder staging (Let's Encrypt, Modus acme) bzw. die "
                              "https-Adresse der eigenen CA (Modus acme-intern).")
+    parser.add_argument("--gvisor", dest="use_gvisor", action="store_true", default=None,
+                        help="Code-Sandbox unter gVisor (runsc); Standard: an, wenn Docker runsc kennt.")
+    parser.add_argument("--no-gvisor", dest="use_gvisor", action="store_false", default=None,
+                        help="Code-Sandbox unter runc, auch wenn gVisor installiert ist.")
     parser.add_argument("--voice", dest="use_voice", action="store_true", default=None,
                         help="Spracheingabe und Vorlesen (Profil 'voice') aktivieren.")
     parser.add_argument("--no-voice", dest="use_voice", action="store_false", default=None,
@@ -2434,6 +2537,16 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError) as exc:
         print(f"Fehler: {exc}")
         return 1
+    #--- gVisor nur fuer die Code-Sandbox: an, sobald Docker runsc kennt, sonst runc.
+    hat_runsc = "runsc" in docker_runtimes()
+    if args.use_gvisor and not hat_runsc:
+        print("Fehler: --gvisor verlangt, Docker kennt die Laufzeit runsc aber nicht. "
+              "gVisor einrichten (README, Code-Sandbox) und erneut starten.")
+        return 1
+    use_gvisor = hat_runsc if args.use_gvisor is None else args.use_gvisor
+    set_sandbox_gvisor(repo_root, use_gvisor)
+    print("  Code-Sandbox unter " + ("gVisor (runsc)." if use_gvisor else "runc."
+          + (" gVisor ist nicht installiert." if not hat_runsc else "")))
     print("")
 
     # -------------------------------------------------------------------------

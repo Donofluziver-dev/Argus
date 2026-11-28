@@ -1619,7 +1619,8 @@ async def execute_code(code: str) -> str:
     """Runs Python code in an isolated, hardened sandbox and returns stdout.
     Available modules: pandas (as pd), json, csv, re, math, statistics,
     collections, itertools, datetime, tabulate.
-    Files of the user are available under ./data/ for reading.
+    Files of the user are available under ./data/ for reading. Name the files you need
+    in the code (e.g. pd.read_csv('data/werte.csv')); then only those are passed in.
     Write result files into ./out/ to offer them to the user for download.
     IMPORTANT: ALWAYS output results via print() -- tables via tabulate() or df.to_markdown().
     For simple math use 'calculate' instead.
@@ -1647,6 +1648,12 @@ async def execute_code(code: str) -> str:
                         except OSError:
                             continue
                     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    #--- Nur, was der Code braucht: Nennt er Dateien beim Namen, gehen nur
+                    #--- diese in die Sandbox. Nennt er keine (etwa os.listdir('data')),
+                    #--- wie bisher alle, damit er sie finden kann.
+                    genannt = [p for p in candidates if p.name in code]
+                    if genannt:
+                        candidates = genannt
                     total_b = 0
                     for p in candidates:
                         if len(files_payload) >= max_files:

@@ -406,6 +406,36 @@ async def test_execute_code_sends_user_files_and_saves_results(tmp_path, monkeyp
     assert erg_file.read_bytes() == b"Ergebnisdaten"
 
 
+@pytest.mark.asyncio
+async def test_execute_code_sends_only_files_named_in_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGUS_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(user_files, "get_workspace_root", lambda: tmp_path)
+
+    async def _noop():
+        pass
+    monkeypatch.setattr(agent, "_ensure_models_loaded", _noop)
+    user_d = tmp_path / "users" / "21" / "Dateien"
+    user_d.mkdir(parents=True)
+    (user_d / "werte.csv").write_bytes(b"a\n1\n")
+    (user_d / "vertrag.pdf").write_bytes(b"%PDF vertraulich")
+    agent.request_origin_var.set({"user_id": 21, "user_role": "user"})
+    agent.dateien_zuruecksetzen()
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"result": "ok", "files": []}
+    gesendet = []
+
+    async def fake_post(path, payload, timeout):
+        gesendet.append(sorted(f["name"] for f in payload.get("files", [])))
+        return resp
+
+    monkeypatch.setattr(agent, "_sandbox_post", fake_post)
+    await agent.execute_code.ainvoke({"code": "df = pd.read_csv('data/werte.csv')\nprint(len(df))"})
+    await agent.execute_code.ainvoke({"code": "import os\nprint(os.listdir('data'))"})
+    assert gesendet == [["werte.csv"], ["vertrag.pdf", "werte.csv"]]
+
+
 # ==============================================================================
 # 4. Sperre nach Firmendaten: _genannte_uploads
 # ==============================================================================

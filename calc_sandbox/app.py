@@ -3,12 +3,14 @@ import base64
 import ctypes
 import hmac
 import os
+import platform
 import re as _re
 import resource
 import select
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -303,6 +305,8 @@ def _run_sympy_in_process(expr: str, label: str, timeout: float = _CALC_TIMEOUT_
                 resource.setrlimit(resource.RLIMIT_DATA, (_CALC_MEM_LIMIT_BYTES, _CALC_MEM_LIMIT_BYTES))
             resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            if not _install_seccomp(_SECCOMP_PROG) and _SECCOMP_REQUIRED:
+                raise RuntimeError("Schutzfilter (seccomp) liess sich nicht setzen.")
             res_str = _eval_sympy_expr(expr, label)
             data = res_str.encode("utf-8", "replace")
             view = memoryview(data)
@@ -724,6 +728,133 @@ def _cleanup_sandbox(protected_pids: set[int] | None = None, kill_processes: boo
     _clean_tmp_dir()
 
 
+#--- seccomp-Filter fuer jeden Lauf. Der Lauf-Prozess setzt ihn auf sich selbst, bevor
+#--- fremder Code startet (Rechnungen im Kindprozess ebenso), unabhaengig davon, ob der
+#--- Container unter runc oder gVisor laeuft. Er sperrt, was fremder Code nie braucht:
+#--- - Sockets ausser AF_UNIX: kein Weg zu anderen Repliken, zum Backend oder zum eigenen
+#---   Dienst (multiprocessing nutzt AF_UNIX und bleibt moeglich)
+#--- - SysV-IPC: Unter runc sperren es zusaetzlich die Sysctls der Compose-Datei, gVisor
+#---   wertet diese nicht aus; hier gilt die Sperre unter beiden Laufzeiten
+#--- - ptrace, process_vm_*, kcmp, io_uring, userfaultfd, bpf, perf_event_open,
+#---   Schluesselbund, Namensraeume, mount, pivot_root, chroot, personality
+#--- Gesperrte Aufrufe enden mit EACCES; Aufrufe einer anderen Architektur (32-Bit-ABI,
+#--- x32) beenden den Prozess. Kosten: ein paar BPF-Befehle je Systemaufruf.
+_AUDIT_ARCH = {"x86_64": 0xC000003E, "aarch64": 0xC00000B7}
+_DENIED_SYSCALLS = {
+    "x86_64": (
+        29, 30, 31, 64, 65, 66, 67, 68, 69, 70, 71, 220,  # SysV: shm*, sem*, msg*
+        101, 135, 155, 161, 165,                          # ptrace, personality, pivot_root, chroot, mount
+        248, 249, 250, 272, 298, 308,                     # add_key, request_key, keyctl, unshare, perf_event_open, setns
+        310, 311, 312, 321, 323,                          # process_vm_readv/writev, kcmp, bpf, userfaultfd
+        425, 426, 427,                                    # io_uring_*
+    ),
+    "aarch64": (
+        186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197,  # SysV: msg*, sem*, shm*
+        117, 92, 41, 51, 40,                              # ptrace, personality, pivot_root, chroot, mount
+        217, 218, 219, 97, 241, 268,                      # add_key, request_key, keyctl, unshare, perf_event_open, setns
+        270, 271, 272, 280, 282,                          # process_vm_readv/writev, kcmp, bpf, userfaultfd
+        425, 426, 427,                                    # io_uring_*
+    ),
+}
+_SOCKET_SYSCALLS = {"x86_64": (41, 53), "aarch64": (198, 199)}  # socket, socketpair
+_AF_UNIX = 1
+_EACCES = 13
+
+
+def _seccomp_program(machine: str | None = None) -> bytes | None:
+    """BPF-Programm des Filters fuer diese Architektur, None fuer eine unbekannte."""
+    machine = machine or platform.machine()
+    if machine not in _AUDIT_ARCH:
+        return None
+    ld_abs, jeq, jge, ret = 0x20, 0x15, 0x35, 0x06
+    allow, errno, kill = 0x7FFF0000, 0x00050000 | _EACCES, 0x80000000
+    insns: list[list] = []
+    labels: dict[str, int] = {}
+
+    def emit(code: int, k: int, jt=0, jf=0) -> int:
+        insns.append([code, jt, jf, k])
+        return len(insns) - 1
+
+    emit(ld_abs, 4)                                    # seccomp_data.arch
+    emit(jeq, _AUDIT_ARCH[machine], jt=0, jf="kill")
+    emit(ld_abs, 0)                                    # seccomp_data.nr
+    if machine == "x86_64":
+        emit(jge, 0x40000000, jt="errno", jf=0)        # x32-ABI
+    for nr in _SOCKET_SYSCALLS[machine]:
+        emit(jeq, nr, jt="socket", jf=0)
+    for nr in sorted(set(_DENIED_SYSCALLS[machine])):
+        emit(jeq, nr, jt="errno", jf=0)
+    emit(ret, allow)
+    labels["socket"] = emit(ld_abs, 16)                # args[0], unteres Wort: Adressfamilie
+    emit(jeq, _AF_UNIX, jt=0, jf="errno")
+    emit(ret, allow)
+    labels["errno"] = emit(ret, errno)
+    labels["kill"] = emit(ret, kill)
+
+    out = bytearray()
+    for idx, (code, jt, jf, k) in enumerate(insns):
+        def rel(target):
+            if isinstance(target, int):
+                return target
+            dist = labels[target] - idx - 1
+            if not 0 <= dist <= 255:
+                raise ValueError("seccomp-Sprung ausserhalb des Bereichs")
+            return dist
+        out += struct.pack("=HBBI", code, rel(jt), rel(jf), k)
+    return bytes(out)
+
+
+_SECCOMP_PROG = _seccomp_program()
+#--- Im Sandbox-Abbild Pflicht: Laesst sich der Filter nicht setzen, laeuft kein Code.
+#--- Ausserhalb (Entwicklung, Tests ohne Container) nur, wenn es geht.
+_SECCOMP_REQUIRED = os.environ.get("ARGUS_SANDBOX_CONTAINER") == "1"
+
+
+def _install_seccomp(prog: bytes | None) -> bool:
+    """Setzt den Filter im aktuellen Prozess (PR_SET_NO_NEW_PRIVS, dann
+    PR_SET_SECCOMP mit SECCOMP_MODE_FILTER). Danach laesst er sich nicht mehr aufheben."""
+    if not prog or not sys.platform.startswith("linux"):
+        return False
+
+    class _SockFprog(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+
+    buf = ctypes.create_string_buffer(prog, len(prog))
+    fprog = _SockFprog(len(prog) // 8, ctypes.cast(buf, ctypes.c_void_p))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:
+        return False
+    return libc.prctl(22, 2, ctypes.byref(fprog), 0, 0) == 0
+
+
+def _runner_seccomp_lines() -> list[str]:
+    """Derselbe Filter als Quelltext fuer den Lauf-Prozess (python -I -c ...)."""
+    if not _SECCOMP_PROG:
+        return ["_argus_ok = False"] + (
+            ["sys.stderr.write('Sandbox: Architektur ohne Schutzfilter.\\n')", "sys.exit(70)"]
+            if _SECCOMP_REQUIRED else [])
+    lines = [
+        "def _argus_seccomp():",
+        "    import ctypes",
+        "    class _P(ctypes.Structure):",
+        "        _fields_ = [('len', ctypes.c_ushort), ('filter', ctypes.c_void_p)]",
+        f"    prog = bytes.fromhex('{_SECCOMP_PROG.hex()}')",
+        "    buf = ctypes.create_string_buffer(prog, len(prog))",
+        "    fp = _P(len(prog) // 8, ctypes.cast(buf, ctypes.c_void_p))",
+        "    libc = ctypes.CDLL(None, use_errno=True)",
+        "    return libc.prctl(38, 1, 0, 0, 0) == 0 and libc.prctl(22, 2, ctypes.byref(fp), 0, 0) == 0",
+        "_argus_ok = sys.platform.startswith('linux') and _argus_seccomp()",
+        "del _argus_seccomp",
+    ]
+    if _SECCOMP_REQUIRED:
+        lines += [
+            "if not _argus_ok:",
+            "    sys.stderr.write('Sandbox: Schutzfilter (seccomp) liess sich nicht setzen.\\n')",
+            "    sys.exit(70)",
+        ]
+    return lines
+
+
 # Runner laeuft als isolierter Kindprozess (python -I -B) unter dem unprivilegierten
 # Benutzer "runner" (uid 10001) mit eigenen rlimits als Defense-in-Depth.
 _EXEC_RUNNER = chr(10).join([
@@ -743,8 +874,140 @@ _EXEC_RUNNER = chr(10).join([
     "    tabulate = None",
     "_ns = {'__name__': '__main__', 'pd': pd, 'tabulate': tabulate, 'json': json, 'csv': csv, 're': re, 'math': math, 'statistics': statistics, 'collections': collections, 'itertools': itertools, 'datetime': datetime}",
     "_src = sys.stdin.buffer.read().decode('utf-8', 'replace')",
+    *_runner_seccomp_lines(),
     "exec(compile(_src, '<execute_code>', 'exec'), _ns)",
 ])
+
+
+def _make_run_dir() -> tuple[str, str, str]:
+    """Arbeitsordner eines Laufs: run_dir und out/ mit Sticky-Bit fuer runner
+    beschreibbar, data/ schreibgeschuetzt (0755, Dateien 0644, gehoert root)."""
+    tmp_root = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    run_dir = tempfile.mkdtemp(prefix="exec_run_", dir=tmp_root)
+    data_dir = os.path.join(run_dir, "data")
+    out_dir = os.path.join(run_dir, "out")
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        os.chmod(run_dir, 0o1777)
+        os.chmod(data_dir, 0o755)
+        os.chmod(out_dir, 0o1777)
+    except OSError:
+        pass
+    return run_dir, data_dir, out_dir
+
+
+def _spawn_runner(run_dir: str) -> subprocess.Popen:
+    """Startet den Lauf-Prozess (python -I -B mit _EXEC_RUNNER) unter runner. Er laedt
+    pandas und wartet dann auf den Code auf stdin."""
+    popen_kwargs: dict = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "start_new_session": True,
+        "cwd": run_dir,
+        "env": {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/tmp",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+        },
+    }
+    if _can_switch_to_runner():
+        popen_kwargs["user"] = _RUNNER_UID
+        popen_kwargs["group"] = _RUNNER_GID
+        popen_kwargs["extra_groups"] = []
+    #--- Starten und Eintragen unter einer Sperre: sonst koennte der Rechenpfad
+    #--- einen sofort beendeten Lauf ernten, bevor er eingetragen ist.
+    with _CHILD_LOCK:
+        proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _EXEC_RUNNER], **popen_kwargs)
+        _TRACKED_CHILD_PIDS.add(proc.pid)
+    return proc
+
+
+#--- Vorgewaermter Lauf: In einem Ein-Lauf-Container steht der Lauf-Prozess schon
+#--- bereit, bevor eine Anfrage kommt. pandas zu laden kostet unter runc rund 0,3 s,
+#--- unter gVisor rund 1 s; das faellt so in die Wartezeit der Replik statt in den
+#--- Lauf. Der Prozess fuehrt bis dahin nur _EXEC_RUNNER aus, keinen fremden Code.
+class _WarmRunner:
+    def __init__(self, proc: subprocess.Popen, run_dir: str):
+        self.proc = proc
+        self.run_dir = run_dir
+
+
+_WARM_LOCK = threading.Lock()
+_WARM: _WarmRunner | None = None
+_WARM_DONE = threading.Event()
+_WARM_WAIT_SEC = 10.0
+
+
+def _prewarm_enabled() -> bool:
+    return (_one_run_enabled()
+            and os.environ.get("ARGUS_SANDBOX_CONTAINER") == "1"
+            and os.environ.get("SANDBOX_PREWARM", "true").strip().lower() not in ("0", "false", "no", "off"))
+
+
+def _prepare_warm_runner() -> None:
+    """Legt den vorgewaermten Lauf an. Unter _EXEC_LOCK: Ein Lauf, der schon begonnen
+    hat, raeumt erst auf; danach wird nichts mehr vorgewaermt."""
+    global _WARM
+    if not _EXEC_LOCK.acquire(timeout=30.0):
+        return
+    try:
+        if _CLAIMED:
+            return
+        _ensure_container_privilege_drop()
+        run_dir, _, _ = _make_run_dir()
+        proc = _spawn_runner(run_dir)
+        with _WARM_LOCK:
+            _WARM = _WarmRunner(proc, run_dir)
+    except Exception as e:
+        print(f"[calc-sandbox] Vorwaermen fehlgeschlagen ({type(e).__name__}) -- Laeufe starten kalt.",
+              flush=True)
+    finally:
+        _EXEC_LOCK.release()
+        _WARM_DONE.set()
+
+
+def _take_warm_runner() -> _WarmRunner | None:
+    """Uebernimmt den vorgewaermten Lauf. Kommt die Anfrage, waehrend er noch angelegt
+    wird, wartet sie darauf (hoechstens _WARM_WAIT_SEC) statt kalt zu starten."""
+    global _WARM
+    if _prewarm_enabled():
+        _WARM_DONE.wait(timeout=_WARM_WAIT_SEC)
+    with _WARM_LOCK:
+        warm, _WARM = _WARM, None
+    return warm
+
+
+def _warm_runner_usable(warm: _WarmRunner, protected_pids: set[int] | None) -> bool:
+    if warm.proc.poll() is not None:
+        return False
+    if os.environ.get("ARGUS_SANDBOX_CONTAINER") != "1" or not os.path.isdir("/proc"):
+        return True
+    keep = {1, os.getpid(), warm.proc.pid}
+    try:
+        keep.add(os.getppid())
+    except Exception:
+        pass
+    keep.update(protected_pids or ())
+    keep.update(_EXTRA_PROTECTED_PIDS)
+    return not _list_runner_processes(keep, target_uid=_RUNNER_UID)
+
+
+def _discard_warm_runner(warm: _WarmRunner) -> None:
+    try:
+        os.killpg(os.getpgid(warm.proc.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        warm.proc.kill()
+        warm.proc.communicate(timeout=5)
+    except Exception:
+        pass
+    _untrack_child(warm.proc.pid)
+    shutil.rmtree(warm.run_dir, ignore_errors=True)
 
 
 class ExecRequest(BaseModel):
@@ -761,6 +1024,26 @@ def _exec_code(
     files: list[dict] | None = None,
     protected_pids: set[int] | None = None,
     kill_processes: bool = True,
+    warm: _WarmRunner | None = None,
+) -> dict:
+    try:
+        return _exec_code_inner(code, language, timeout, files, protected_pids,
+                                kill_processes, warm)
+    finally:
+        #--- Ein uebernommener Prozess endet mit dem Lauf; ein nicht genutzter (frueher
+        #--- Abbruch, ungueltige Anfrage) wird hier beendet.
+        if warm is not None and warm.proc.poll() is None:
+            _discard_warm_runner(warm)
+
+
+def _exec_code_inner(
+    code: str,
+    language: str,
+    timeout: float,
+    files: list[dict] | None,
+    protected_pids: set[int] | None,
+    kill_processes: bool,
+    warm: _WarmRunner | None,
 ) -> dict:
     code = (code or "").strip()
     if not code:
@@ -812,31 +1095,28 @@ def _exec_code(
 
     result_payload: dict
     try:
-        # Vor dem Lauf: Reste frueherer Laeufe und verwaiste Prozesse saeubern.
-        # Laesst sich nicht bestaetigen, dass kein Prozess des Lauf-Benutzers mehr
-        # existiert, bricht die Sandbox ab (Fail-Closed).
-        try:
-            _cleanup_sandbox(protected_pids=protected_pids, kill_processes=kill_processes)
-        except RuntimeError as e:
-            return {"error": str(e)}
-
-        tmp_root = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
-        run_dir = tempfile.mkdtemp(prefix="exec_run_", dir=tmp_root)
-        tracked_pid: int | None = None
-        try:
+        #--- Vorgewaermter Lauf-Prozess (Ein-Lauf-Container): Er wurde beim Start dieses
+        #--- frischen Containers angelegt, hat pandas schon geladen und wartet auf den
+        #--- Code. Ausser ihm darf kein Prozess des Lauf-Benutzers existieren; sonst und
+        #--- wenn er nicht mehr lebt, geht es den ueblichen Weg mit vollem Aufraeumen.
+        if warm is not None and not _warm_runner_usable(warm, protected_pids):
+            _discard_warm_runner(warm)
+            warm = None
+        if warm is None:
+            # Vor dem Lauf: Reste frueherer Laeufe und verwaiste Prozesse saeubern.
+            # Laesst sich nicht bestaetigen, dass kein Prozess des Lauf-Benutzers mehr
+            # existiert, bricht die Sandbox ab (Fail-Closed).
+            try:
+                _cleanup_sandbox(protected_pids=protected_pids, kill_processes=kill_processes)
+            except RuntimeError as e:
+                return {"error": str(e)}
+            run_dir, data_dir, out_dir = _make_run_dir()
+        else:
+            run_dir = warm.run_dir
             data_dir = os.path.join(run_dir, "data")
             out_dir = os.path.join(run_dir, "out")
-            os.makedirs(data_dir, exist_ok=True)
-            os.makedirs(out_dir, exist_ok=True)
-            # run_dir und out_dir mit Sticky-Bit fuer runner beschreibbar machen;
-            # data_dir bleibt schreibgeschuetzt (0755/0644, gehoert root).
-            try:
-                os.chmod(run_dir, 0o1777)
-                os.chmod(data_dir, 0o755)
-                os.chmod(out_dir, 0o1777)
-            except OSError:
-                pass
-
+        tracked_pid: int | None = None
+        try:
             for clean_name, data_bytes in decoded_files:
                 target_file = os.path.join(data_dir, clean_name)
                 try:
@@ -846,34 +1126,12 @@ def _exec_code(
                 except Exception:
                     continue
 
-            popen_kwargs: dict = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "start_new_session": True,
-                "cwd": run_dir,
-                "env": {
-                    "PATH": "/usr/local/bin:/usr/bin:/bin",
-                    "HOME": "/tmp",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "OPENBLAS_NUM_THREADS": "1",
-                    "OMP_NUM_THREADS": "1",
-                },
-            }
-            if _can_switch_to_runner():
-                popen_kwargs["user"] = _RUNNER_UID
-                popen_kwargs["group"] = _RUNNER_GID
-                popen_kwargs["extra_groups"] = []
-
-            #--- Starten und Eintragen unter einer Sperre: sonst koennte der Rechenpfad
-            #--- einen sofort beendeten Lauf ernten, bevor er eingetragen ist.
-            with _CHILD_LOCK:
-                proc = subprocess.Popen(
-                    [sys.executable, "-I", "-B", "-c", _EXEC_RUNNER],
-                    **popen_kwargs,
-                )
+            if warm is not None:
+                proc = warm.proc
                 tracked_pid = proc.pid
-                _TRACKED_CHILD_PIDS.add(tracked_pid)
+            else:
+                proc = _spawn_runner(run_dir)
+                tracked_pid = proc.pid
             try:
                 out, err = proc.communicate(input=code.encode("utf-8"), timeout=t)
             except subprocess.TimeoutExpired:
@@ -1085,8 +1343,10 @@ async def execute(req: ExecRequest, background_tasks: BackgroundTasks):
         # Watchdog: 30s Wartezeit auf Lock + max 30s Ausfuehrung + 15s Puffer
         max_run = min(float(req.timeout or 15.0), 30.0)
         watchdog_timeout = 30.0 + max_run + 15.0
+        warm = await asyncio.to_thread(_take_warm_runner) if _one_run_enabled() else None
         return await asyncio.wait_for(
-            asyncio.to_thread(_exec_code, req.code, req.language, req.timeout, req.files),
+            asyncio.to_thread(_exec_code, req.code, req.language, req.timeout, req.files,
+                              None, True, warm),
             timeout=watchdog_timeout,
         )
     except asyncio.TimeoutError:
@@ -1098,3 +1358,7 @@ async def execute(req: ExecRequest, background_tasks: BackgroundTasks):
 @app.get("/healthz")
 async def health():
     return {"status": "ok"}
+
+
+if _prewarm_enabled():
+    threading.Thread(target=_prepare_warm_runner, name="argus-vorwaermen", daemon=True).start()

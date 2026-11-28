@@ -94,9 +94,40 @@ jobs:
           docker compose --profile voice --profile tracing --profile web --profile proxy config -q
           # Suche und Sprache auf der Grafikkarte (die Installation bindet diese Dateien ein).
           docker compose -f docker-compose.yml -f compose/gpu-suche.yml -f compose/gpu-sprache.yml --profile voice config -q
+          # Code-Sandbox unter gVisor.
+          docker compose -f docker-compose.yml -f compose/sandbox-gvisor.yml config -q
       # Wer ins Internet darf, wer Ports veroeffentlicht. Das Skript gibt nur Namen aus.
       - name: Netz-Abschottung
         run: |
           docker compose config --format json | python3 setup/check_networks.py
           docker compose --profile voice --profile tracing --profile web --profile proxy config --format json | python3 setup/check_networks.py
           docker compose -f docker-compose.yml -f compose/gpu-suche.yml -f compose/gpu-sprache.yml --profile voice --profile tracing --profile web --profile proxy config --format json | python3 setup/check_networks.py
+          docker compose -f docker-compose.yml -f compose/sandbox-gvisor.yml --profile voice --profile tracing --profile web --profile proxy config --format json | python3 setup/check_networks.py
+
+  # Dieselben Sandbox-Tests unter gVisor: Die Installation nutzt es, sobald runsc auf dem
+  # Server eingerichtet ist (compose/sandbox-gvisor.yml).
+  sandbox-gvisor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gVisor einrichten
+        run: |
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          sudo runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q runsc
+      - name: Calc-Sandbox Tests unter gVisor
+        run: |
+          docker build -q --target test -t argus-sandbox-test -f calc_sandbox/Dockerfile.sandbox calc_sandbox
+          docker run --rm --runtime runsc --network none --read-only \
+            --tmpfs /tmp:size=256m,noexec \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            --ipc private --sysctl kernel.shmmni=0 --sysctl kernel.shmall=0 \
+            --sysctl kernel.msgmni=0 --sysctl "kernel.sem=0 0 0 0" \
+            --memory 512m --cpus 1.0 --pids-limit 256 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            argus-sandbox-test

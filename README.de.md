@@ -504,6 +504,13 @@ der das ändert. Code läuft nur in der Sandbox ohne Internet.
   Prozesse des Lauf-Benutzers, prüft, dass keiner übrig ist, und leert `/tmp` und `/dev/shm`;
   SysV-IPC ist abgeschaltet. Lässt sich das Aufräumen nicht bestätigen, führt sie nichts mehr
   aus. Anfragen aus der Sandbox weist das Backend ab, auch von frisch gestarteten Repliken.
+  Vor dem fremden Code setzt der Lauf einen **seccomp-Filter** auf sich selbst: keine
+  Netz-Sockets außer AF_UNIX (also kein Weg zu anderen Repliken, zum Backend oder zum eigenen
+  Dienst), kein SysV-IPC, kein ptrace, kein io_uring, keine Namensräume, kein mount; die
+  Repliken nehmen außerdem nur Anfragen mit `SANDBOX_TOKEN` an. Ist **gVisor** (`runsc`)
+  installiert, läuft die Sandbox darunter, gegen einen eigenen Kernel im Userspace statt
+  direkt gegen den des Hosts (unten, Code-Sandbox unter gVisor). An die Sandbox gehen nur die
+  Dateien, die der Code beim Namen nennt; nennt er keine, alle des Kontos.
 - **Freigaben:** Mit dem Cloud-Modul fragt eine Mission vor dem Versand per Karte im Chat
   nach. Freigeben kann nur das Konto, das sie ausgelöst hat.
 - **Anmeldung:** Sitzung als HttpOnly-Cookie, Passwörter mit Argon2, keine
@@ -576,10 +583,12 @@ sollte sie kennen.
   (Retrieval für SharePoint auch nutzungsabhängig bezahlt); das kostenlose Copilot Chat hat
   keine Schnittstelle. Als Cloud-Modell für eine Firma passt eher Azure OpenAI im eigenen
   Tenant als Gemini.
-- **Sandbox:** Jeder Code-Lauf hat seinen eigenen, frisch gestarteten Container, aber alle
-  teilen sich den Kernel des Hosts. Wer stärker trennen will, braucht eine Laufzeit wie gVisor
-  oder Kata; das richtet Argus nicht ein. Ein Container steht nach einem Lauf rund 10 Sekunden
-  nicht bereit; folgen mehr Läufe dicht aufeinander, als es Repliken gibt, warten sie
+- **Sandbox:** Jeder Code-Lauf hat seinen eigenen, frisch gestarteten Container. Ohne gVisor
+  teilen sich alle den Kernel des Hosts; gVisor muss auf dem Server installiert sein (unten),
+  die Installation nutzt es dann von selbst. Unter Docker Desktop (Windows) gibt es gVisor
+  nicht. Kata (eigene VM je Container) richtet Argus nicht ein; es braucht verschachtelte
+  Virtualisierung. Ein Container steht nach einem Lauf rund 10 Sekunden nicht bereit, unter
+  gVisor 1,5 s länger; folgen mehr Läufe dicht aufeinander, als es Repliken gibt, warten sie
   (höchstens `SANDBOX_WAIT_SECONDS`, 30 s).
 - **Name in der Anrede:** Er leitet sich aus dem Kontonamen ab; mit SSO käme er aus dem
   Verzeichnis.
@@ -850,6 +859,36 @@ mit CUDA gebaut. Dessen erster Bau lädt das CUDA-Entwicklungs-Image von NVIDIA 
 und kompiliert einige Minuten. Fertige Images aus einer Registry gibt es nur für die CPU; ein
 Offline-Paket enthält die GPU-Varianten, wenn es auf einem Rechner mit dieser Einstellung
 gebaut wurde.
+
+### Code-Sandbox unter gVisor
+
+gVisor fängt jeden Systemaufruf der Sandbox in einem eigenen Kernel im Userspace ab. Ein
+Fehler im Linux-Kernel des Hosts reicht dann nicht mehr, um aus der Sandbox auszubrechen.
+Argus nutzt es nur für `calc-sandbox`; Modell, Suche, Sprache und Datenbanken laufen weiter
+unter runc und werden nicht langsamer. Einrichten unter Ubuntu oder Debian (einmal, als
+root), danach `./install.sh` erneut laufen lassen; ohne `runsc` bleibt alles wie bisher:
+
+```bash
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+sudo apt-get update && sudo apt-get install -y runsc
+sudo runsc install && sudo systemctl restart docker
+```
+
+`./install.sh --no-gvisor` schaltet es ab, `doctor` meldet, ob die laufenden
+Sandbox-Container wirklich unter `runsc` laufen. Gemessen auf diesem Stand (ein Code-Lauf
+mit pandas, Median aus drei Läufen, CPU ohne KVM):
+
+| | heute (runc, ohne Vorwärmen) | runc | gVisor |
+|---|---|---|---|
+| Code-Lauf, Anfrage bis Antwort | 0,51 s | 0,17 s | 0,43 s |
+| Replik nach einem Lauf wieder bereit | 1,1 s nach der Mindestlaufzeit von 10 s | 1,1 s | 2,6 s |
+
+Teuer ist unter gVisor nur das Laden von pandas (0,3 s statt 1 s), reines Rechnen läuft
+gleich schnell. Deshalb startet jede Replik ihren Lauf-Prozess schon beim Hochfahren, lädt
+pandas in der Wartezeit und übernimmt dann nur noch den Code (`SANDBOX_PREWARM`, Standard
+an). Mit gVisor ist ein Lauf so schneller als vorher ohne. Wer viele Läufe kurz
+hintereinander erwartet, erhöht `ARGUS_SANDBOX_REPLICAS`.
 
 **Grenzen beim Vorlesen.** Der Sprachdienst rechnet eine Synthese nach der anderen. Damit
 ein Konto ihn nicht für alle belegt, liest die Oberfläche eine Antwort in Abschnitten von

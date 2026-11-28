@@ -1,0 +1,10 @@
+# Code-Sandbox unter gVisor (runsc): Der Code laeuft gegen einen eigenen Kernel im
+# Userspace statt direkt gegen den Kernel des Hosts. Ein Fehler im Linux-Kernel reicht
+# dann nicht mehr, um aus der Sandbox auszubrechen. Nur calc-sandbox; Modell, Suche und
+# Sprache laufen weiter unter runc, ihre Leistung aendert sich nicht.
+# Die Installation bindet diese Datei ueber COMPOSE_FILE ein, wenn Docker die Laufzeit
+# runsc kennt (./install.sh --gvisor bzw. --no-gvisor). Gemessen: ein Code-Lauf mit
+# pandas 0,43 s statt 0,51 s unter runc ohne Vorwaermen (README, "Code-Sandbox").
+services:
+  calc-sandbox:
+    runtime: runsc

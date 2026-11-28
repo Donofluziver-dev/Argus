@@ -200,8 +200,9 @@ def test_two_consecutive_runs_isolate_files_and_tmp():
 @nur_im_container
 def test_sysv_ipc_is_disabled_but_multiprocessing_works():
     """SysV-Objekte (shmget, msgget, semget) ueberlebten das Aufraeumen zwischen zwei
-    Laeufen und gehoerten alle dem Benutzer runner. Die sysctls aus compose schalten sie
-    ab; multiprocessing nutzt POSIX-Semaphoren und laeuft weiter."""
+    Laeufen und gehoerten alle dem Benutzer runner. Unter runc schalten die sysctls aus
+    compose sie ab, unter gVisor (das diese sysctls nicht auswertet) und zusaetzlich unter
+    runc der seccomp-Filter des Laufs; multiprocessing nutzt POSIX-Semaphoren und laeuft weiter."""
     code = (
         "import ctypes, ctypes.util, multiprocessing as mp\n"
         "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
@@ -214,6 +215,120 @@ def test_sysv_ipc_is_disabled_but_multiprocessing_works():
     res = _exec_code(code, "python", timeout=10.0, files=[])
     assert "error" not in res, res
     assert "SHM:-1,MSG:-1,SEM:-1,MP:7" in res.get("result", "")
+
+
+
+nur_linux = pytest.mark.skipif(not os.sys.platform.startswith("linux"), reason="seccomp nur unter Linux")
+
+
+@nur_linux
+def test_runner_cannot_open_network_sockets_but_unix_works():
+    """Der seccomp-Filter des Lauf-Prozesses: kein Weg zu anderen Repliken, zum Backend
+    oder zum eigenen Dienst; AF_UNIX (multiprocessing) bleibt."""
+    code = (
+        "import socket\n"
+        "out = []\n"
+        "for fam in (socket.AF_INET, socket.AF_INET6):\n"
+        "    try:\n"
+        "        socket.socket(fam, socket.SOCK_STREAM); out.append('offen')\n"
+        "    except PermissionError:\n"
+        "        out.append('gesperrt')\n"
+        "a, b = socket.socketpair(); a.send(b'x'); out.append(b.recv(1).decode())\n"
+        "print(','.join(out))\n"
+    )
+    res = _exec_code(code, "python", timeout=10.0, files=[])
+    assert "error" not in res, res
+    assert res["result"].strip() == "gesperrt,gesperrt,x"
+
+
+@nur_linux
+def test_runner_cannot_ptrace_or_use_io_uring():
+    code = (
+        "import ctypes, ctypes.util\n"
+        "libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n"
+        "r1 = libc.ptrace(0, 0, 0, 0); e1 = ctypes.get_errno()\n"
+        "r2 = libc.syscall(425, 8, 0); e2 = ctypes.get_errno()\n"
+        "print(f'{r1}/{e1},{r2}/{e2}')\n"
+    )
+    res = _exec_code(code, "python", timeout=10.0, files=[])
+    assert "error" not in res, res
+    assert res["result"].strip() == "-1/13,-1/13"
+
+
+
+@nur_im_container
+def test_prewarmed_runner_runs_code_with_files_and_leaves_nothing_behind():
+    import sys
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    mod._prepare_warm_runner()
+    warm = mod._take_warm_runner()
+    assert warm is not None and warm.proc.poll() is None
+    files = [{"name": "werte.csv", "content": base64.b64encode(b"a\n1\n2\n3\n").decode()}]
+    code = (
+        "import sys\n"
+        "df = pd.read_csv('data/werte.csv')\n"
+        "open('out/summe.txt', 'w').write(str(int(df['a'].sum())))\n"
+        "print('pandas' in sys.modules, int(df['a'].sum()))\n"
+    )
+    res = _exec_code(code, "python", timeout=10.0, files=files, warm=warm)
+    assert "error" not in res, res
+    assert res["result"].strip() == "True 6"
+    assert [f["name"] for f in res["files"]] == ["summe.txt"]
+    assert warm.proc.poll() is not None
+    assert not os.path.exists(warm.run_dir)
+    keep = {1, os.getpid()}
+    assert mod._list_runner_processes(keep, target_uid=mod._RUNNER_UID) == []
+
+
+@nur_im_container
+def test_prewarmed_runner_is_not_used_when_another_runner_process_exists():
+    """Laeuft ausser dem vorgewaermten noch ein Prozess des Lauf-Benutzers, wird der
+    vorgewaermte verworfen und der Lauf geht den Weg mit vollem Aufraeumen."""
+    import subprocess
+    import sys
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    mod._prepare_warm_runner()
+    warm = mod._take_warm_runner()
+    fremd = subprocess.Popen(["sleep", "60"], user=mod._RUNNER_UID, group=mod._RUNNER_GID,
+                             extra_groups=[], start_new_session=True)
+    try:
+        assert mod._warm_runner_usable(warm, None) is False
+        res = _exec_code("print(41 + 1)", "python", timeout=10.0, files=[], warm=warm)
+        assert "error" not in res, res
+        assert res["result"].strip() == "42"
+        assert warm.proc.poll() is not None
+        fremd.wait(timeout=5)
+    finally:
+        if fremd.poll() is None:
+            fremd.kill()
+
+
+def test_dead_warm_runner_falls_back_to_cold_start():
+    import subprocess
+    import sys
+    from pathlib import Path
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc.wait(timeout=10)
+    #--- Nicht tmp_path: Im Abbild leert die Sandbox /tmp zwischen den Laeufen.
+    run_dir = Path(tempfile.mkdtemp(prefix="warm_tot_"))
+    (run_dir / "data").mkdir(parents=True)
+    (run_dir / "out").mkdir()
+    warm = mod._WarmRunner(proc, str(run_dir))
+    res = _exec_code("print(6 * 7)", "python", timeout=10.0, files=[], warm=warm)
+    assert "error" not in res, res
+    assert res["result"].strip() == "42"
+    assert not run_dir.exists()
+
+
+def test_seccomp_program_for_both_architectures():
+    import sys
+    mod = sys.modules.get("calc_sandbox.app") or sys.modules["app"]
+    for arch in ("x86_64", "aarch64"):
+        prog = mod._seccomp_program(arch)
+        assert prog and len(prog) % 8 == 0 and len(prog) // 8 < 100
+    assert mod._seccomp_program("riscv64") is None
 
 
 @nur_im_container

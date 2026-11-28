@@ -378,10 +378,14 @@ These are known and not solved yet:
   nothing is copied. The Copilot APIs need a Microsoft 365 Copilot license per person; the
   free Copilot Chat has no API. For a company, Azure OpenAI in its own tenant fits better as
   the cloud model than Gemini.
-- Every code run has its own freshly started container, but all share the host kernel; a
-  stronger separation needs a runtime such as gVisor or Kata, which Argus does not set up.
-  After a run a container is not ready for about 10 s; more back-to-back runs than replicas
-  wait (at most `SANDBOX_WAIT_SECONDS`, 30 s).
+- Every code run has its own freshly started container. Without gVisor they share the host
+  kernel; with `runsc` installed on the server (see README.de.md, "Code-Sandbox unter gVisor")
+  the installer runs the sandbox under gVisor automatically, only the sandbox, nothing else.
+  Measured: a code run with pandas takes 0.43 s under gVisor with the prewarmed runner,
+  0.51 s before without gVisor. Each run also sets a seccomp filter on itself (no network
+  sockets except AF_UNIX, no SysV IPC, no ptrace, no io_uring, no namespaces). Kata is not set
+  up. After a run a container is not ready for about 10 s; more back-to-back runs than
+  replicas wait (at most `SANDBOX_WAIT_SECONDS`, 30 s).
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); the log is final only in the SIEM. Over UDP, entries lost on the way to the
   SIEM go unnoticed.
