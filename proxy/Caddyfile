@@ -1,13 +1,16 @@
 # TLS-Reverse-Proxy vor rag-backend:7860 (Compose-Profil "proxy").
 #
-# Drei TLS-Arten ueber ARGUS_TLS_MODE (Standard: internal):
-#   internal - eigene lokale CA von Caddy (fuer Tests und Firmen mit CA-Verteilung);
-#              das Stammzertifikat liegt danach unter
-#              proxy/data/caddy/pki/authorities/local/root.crt
-#   acme     - automatisches Zertifikat ueber Let's Encrypt (oeffentlicher DNS-Name,
-#              Ports 80 und 443 aus dem Internet erreichbar)
-#   files    - eigenes Zertifikat aus /certs/cert.pem und /certs/key.pem
-#              (ARGUS_TLS_DIR, Standard proxy/certs)
+# Vier TLS-Arten ueber ARGUS_TLS_MODE (Standard: internal):
+#   internal    - eigene lokale CA von Caddy (fuer Tests und Firmen mit CA-Verteilung);
+#                 das Stammzertifikat liegt danach unter
+#                 proxy/data/caddy/pki/authorities/local/root.crt
+#   acme        - automatisches Zertifikat ueber Let's Encrypt (oeffentlicher DNS-Name,
+#                 Port 80 oder 443 aus dem Internet erreichbar). ARGUS_ACME_CA waehlt
+#                 Produktion oder Staging, ARGUS_ACME_EMAIL das Konto (optional).
+#   acme-intern - automatisches Zertifikat von der ACME-CA der Firma (etwa step-ca):
+#                 Adresse in ARGUS_ACME_CA, ihr Stammzertifikat als /certs/acme-root.pem
+#   files       - eigenes Zertifikat aus /certs/cert.pem und /certs/key.pem
+#                 (ARGUS_TLS_DIR, Standard proxy/certs)
 {
 	# Die eigene CA nicht in den Vertrauensspeicher des Containers eintragen;
 	# ohne Root geht das ohnehin nicht. Verteilt wird root.crt von Hand.
@@ -23,7 +26,18 @@
 }
 
 (tls_acme) {
-	# Automatischer Bezug per ACME ist in Caddy fuer HTTPS-Sites voreingestellt.
+	# Genau ein Aussteller (die CA aus ARGUS_ACME_CA): Ohne Angabe fiele Caddy nach
+	# Let's Encrypt auf ZeroSSL zurueck, einen zweiten Anbieter, den niemand gewaehlt hat.
+	tls {$ARGUS_ACME_EMAIL} {
+		ca {$ARGUS_ACME_CA:https://acme-v02.api.letsencrypt.org/directory}
+	}
+}
+
+(tls_acme-intern) {
+	tls {$ARGUS_ACME_EMAIL} {
+		ca {$ARGUS_ACME_CA}
+		ca_root /certs/acme-root.pem
+	}
 }
 
 (tls_files) {

@@ -599,6 +599,9 @@ services:
       - ARGUS_DOMAIN=${ARGUS_DOMAIN:-localhost}
       - ARGUS_TLS_MODE=${ARGUS_TLS_MODE:-internal}
       - ARGUS_PROXY_MAX_BODY=${ARGUS_PROXY_MAX_BODY:-600MB}
+      # Nur fuer ARGUS_TLS_MODE=acme und acme-intern (siehe proxy/Caddyfile).
+      - ARGUS_ACME_EMAIL=${ARGUS_ACME_EMAIL:-}
+      - ARGUS_ACME_CA=${ARGUS_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
     # Ports 80 und 443 ohne Root und ohne Capability. Docker setzt das seit 20.10
     # ohnehin; hier steht es ausdruecklich, falls eine Installation es aendert.
     sysctls:

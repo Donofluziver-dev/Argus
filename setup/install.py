@@ -7,11 +7,13 @@ import ctypes
 import getpass
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import math
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -120,8 +122,54 @@ def validate_server_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
-VALID_TLS_MODES = ("internal", "acme", "files")
+VALID_TLS_MODES = ("internal", "acme", "acme-intern", "files")
 DEFAULT_EDGE_SUBNET = "172.31.250.0/29"
+#--- ACME-Verzeichnisse von Let's Encrypt. Staging stellt Zertifikate ohne die engen
+#--- Grenzen der Produktion aus (zum Ausprobieren), denen vertraut aber kein Browser.
+ACME_CA_URLS = {
+    "production": "https://acme-v02.api.letsencrypt.org/directory",
+    "staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
+}
+ACME_STAGING_HOST = "acme-staging-v02.api.letsencrypt.org"
+#--- Namen, die es im oeffentlichen DNS nicht gibt: Let's Encrypt stellt dafuer nichts aus.
+_NON_PUBLIC_SUFFIXES = (
+    ".local", ".localdomain", ".lan", ".internal", ".intranet", ".corp", ".home",
+    ".home.arpa", ".test", ".example", ".invalid", ".localhost",
+)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def resolve_acme_ca(value: str | None, *, allow_custom: bool = True) -> str:
+    """'production', 'staging' oder eine eigene https-Adresse eines ACME-Verzeichnisses."""
+    v = (value or "").strip()
+    if not v:
+        return ACME_CA_URLS["production"]
+    if v.lower() in ACME_CA_URLS:
+        return ACME_CA_URLS[v.lower()]
+    parsed = urllib.parse.urlsplit(v)
+    if not allow_custom or parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError(f"ACME-CA '{v}' ist weder 'production', 'staging' noch eine https-Adresse.")
+    return v
+
+
+def validate_acme_email(value: str | None) -> str:
+    v = (value or "").strip()
+    if v and not _EMAIL_RE.match(v):
+        raise ValueError(f"'{v}' ist keine E-Mail-Adresse.")
+    return v
+
+
+def is_public_dns_name(name: str) -> bool:
+    """Grob: ein Name mit Punkt, keine IP-Adresse, keine Endung, die es nur intern gibt."""
+    n = (name or "").strip().lower().rstrip(".")
+    if not n or "." not in n:
+        return False
+    try:
+        ipaddress.ip_address(n)
+        return False
+    except ValueError:
+        pass
+    return not any(n.endswith(suf) for suf in _NON_PUBLIC_SUFFIXES)
 
 
 def _merge_compose_profiles(existing: str, add=(), remove=()) -> str:
@@ -150,6 +198,8 @@ def compute_server_env(
     use_proxy: bool = False,
     tls_mode: str = "internal",
     existing_env: dict[str, str] | None = None,
+    acme_email: str | None = None,
+    acme_ca: str | None = None,
 ) -> dict[str, str]:
     """Erzeugt die .env-Werte fuer den Serverbetrieb (optional mit TLS-Proxy)."""
     valid, err = validate_server_url(url)
@@ -176,6 +226,22 @@ def compute_server_env(
         #--- Eine Adresse mit Port (https://ki.firma.de:8443) heisst: Caddy auf diesem Port.
         if parsed.port:
             out["ARGUS_PROXY_HTTPS_PORT"] = str(parsed.port)
+        if mode in ("acme", "acme-intern"):
+            if acme_email is not None:
+                out["ARGUS_ACME_EMAIL"] = validate_acme_email(acme_email)
+            if mode == "acme":
+                #--- Ohne Angabe bleibt eine schon eingetragene Let's-Encrypt-Wahl stehen.
+                kept = (cur.get("ARGUS_ACME_CA") or "").strip()
+                if acme_ca is None and kept not in ACME_CA_URLS.values():
+                    kept = ""
+                out["ARGUS_ACME_CA"] = (resolve_acme_ca(acme_ca, allow_custom=False)
+                                        if acme_ca is not None else (kept or ACME_CA_URLS["production"]))
+            else:
+                ca = acme_ca if acme_ca is not None else (cur.get("ARGUS_ACME_CA") or "")
+                if not ca.strip() or ca.strip() in ACME_CA_URLS.values():
+                    raise ValueError("TLS-Modus acme-intern braucht die Adresse der eigenen ACME-CA "
+                                     "(--acme-ca https://.../directory).")
+                out["ARGUS_ACME_CA"] = resolve_acme_ca(ca)
     return out
 
 
@@ -876,6 +942,8 @@ def update_server_env(
     server_url: str,
     use_proxy: bool = False,
     tls_mode: str = "internal",
+    acme_email: str | None = None,
+    acme_ca: str | None = None,
 ) -> dict[str, str]:
     """Aktualisiert die Server-Werte (und optional den TLS-Proxy) in der .env."""
     init_mod = _load_init_stack_module(repo_root)
@@ -892,6 +960,8 @@ def update_server_env(
         use_proxy=use_proxy,
         tls_mode=tls_mode,
         existing_env=existing_env,
+        acme_email=acme_email,
+        acme_ca=acme_ca,
     )
     init_mod.write_env_file(env_path, template_text, server_values)
     if not use_proxy:
@@ -913,8 +983,14 @@ def update_server_env(
         print("  Caddy stellt das Zertifikat mit einer eigenen CA aus. Deren Stammzertifikat liegt nach dem")
         print(f"  ersten Start unter {data_dir / 'caddy' / 'pki' / 'authorities' / 'local' / 'root.crt'}")
         print("  und muss auf den Rechnern der Nutzer als vertrauenswuerdig eingetragen werden.")
+    elif tls_mode == "acme":
+        staging = ACME_STAGING_HOST in server_values.get("ARGUS_ACME_CA", "")
+        print(f"  Let's Encrypt ({'Staging, Zertifikat vertraut kein Browser' if staging else 'Produktion'}):")
+        print("  Der Name muss im oeffentlichen DNS auf diesen Server zeigen, und Port 80 oder 443")
+        print("  muss aus dem Internet erreichbar sein. 'doctor' prueft beides vorab.")
     else:
-        print("  Let's Encrypt braucht einen oeffentlichen DNS-Namen und die Ports 80 und 443 aus dem Internet.")
+        print(f"  Eigene ACME-CA: {server_values.get('ARGUS_ACME_CA', '')}")
+        print(f"  Ihr Stammzertifikat ablegen als {tls_dir / 'acme-root.pem'}.")
     return server_values
 
 
@@ -1847,14 +1923,90 @@ def doctor_check_proxy(
     if not trusted_proxies:
         errors.append("ARGUS_TRUSTED_PROXIES nicht gesetzt")
 
+    warnings: list[str] = []
+    if tls_mode in ("acme", "acme-intern") and domain:
+        acme_errors, acme_warnings = doctor_acme_checks(env_data, domain, tls_dir, uid, gid, tls_mode)
+        errors.extend(acme_errors)
+        warnings.extend(acme_warnings)
+
     if errors:
-        return DoctorResult("FEHLER", "TLS-Proxy", "; ".join(errors) + ".")
+        return DoctorResult("FEHLER", "TLS-Proxy", "; ".join(errors + warnings) + ".")
+    if warnings:
+        return DoctorResult("WARNUNG", "TLS-Proxy", "; ".join(warnings) + ".")
 
     return DoctorResult(
         "OK",
         "TLS-Proxy",
         f"Profil 'proxy' aktiv (Domain: {domain}, TLS-Modus: {tls_mode}).",
     )
+
+
+def doctor_acme_checks(
+    env_data: dict[str, str],
+    domain: str,
+    tls_dir: Path,
+    uid: int,
+    gid: int,
+    tls_mode: str,
+    resolver=socket.getaddrinfo,
+) -> tuple[list[str], list[str]]:
+    """Was ein Zertifikat per ACME vorab verhindert: Ports, Bindung, Name und CA.
+    Liefert (Fehler, Warnungen). Prueft nur lesend, fragt keine CA an."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    http_port = (env_data.get("ARGUS_PROXY_HTTP_PORT") or "80").strip()
+    https_port = (env_data.get("ARGUS_PROXY_HTTPS_PORT") or "443").strip()
+    #--- Die CA prueft den Server ueber Port 80 (HTTP-01) oder 443 (TLS-ALPN-01), immer
+    #--- auf diesen Ports, egal was in der Adresse steht.
+    if http_port != "80" and https_port != "443":
+        errors.append(f"ACME braucht Port 80 oder 443 von aussen, eingestellt sind {http_port} und {https_port}")
+    elif http_port != "80":
+        warnings.append(f"HTTP auf Port {http_port}: ACME geht nur ueber TLS-ALPN auf 443")
+    elif https_port != "443":
+        warnings.append(f"HTTPS auf Port {https_port}: ACME geht nur ueber HTTP-01 auf Port 80")
+    bind = (env_data.get("ARGUS_PROXY_BIND") or "0.0.0.0").strip()
+    if bind in ("127.0.0.1", "::1", "localhost"):
+        errors.append(f"ARGUS_PROXY_BIND={bind}: von aussen erreicht niemand den Proxy, auch die CA nicht")
+
+    ca = (env_data.get("ARGUS_ACME_CA") or "").strip()
+    if tls_mode == "acme":
+        if not is_public_dns_name(domain):
+            errors.append(f"{domain} ist kein oeffentlicher DNS-Name; dafuer stellt Let's Encrypt "
+                          "nichts aus (TLS-Modus internal oder files nehmen)")
+        else:
+            try:
+                addrs = {info[4][0] for info in resolver(domain, None)}
+            except OSError:
+                addrs = set()
+            if not addrs:
+                warnings.append(f"{domain} loest von hier aus nicht auf")
+            else:
+                def _privat(a: str) -> bool:
+                    try:
+                        return not ipaddress.ip_address(a.split("%")[0]).is_global
+                    except ValueError:
+                        return False
+                if all(_privat(a) for a in addrs):
+                    warnings.append(f"{domain} zeigt auf interne Adressen ({', '.join(sorted(addrs))}); "
+                                    "Let's Encrypt erreicht den Server dann nicht")
+        if ca and ca not in ACME_CA_URLS.values():
+            errors.append(f"ARGUS_ACME_CA={ca} ist keine Adresse von Let's Encrypt (fuer eine eigene "
+                          "CA TLS-Modus acme-intern nehmen)")
+        if ACME_STAGING_HOST in ca:
+            warnings.append("Let's Encrypt Staging: dem Zertifikat vertraut kein Browser, nur zum Ausprobieren")
+    else:
+        parsed = urllib.parse.urlsplit(ca)
+        if parsed.scheme != "https" or not parsed.hostname:
+            errors.append("ARGUS_ACME_CA fehlt oder ist keine https-Adresse (TLS-Modus acme-intern)")
+        root = tls_dir / "acme-root.pem"
+        if not root.is_file():
+            errors.append(f"Stammzertifikat der eigenen ACME-CA fehlt ({root})")
+        elif not _is_readable_for_ugid(root, uid, gid):
+            errors.append(f"{root} ist fuer UID {uid} nicht lesbar (Caddy laeuft als ARGUS_UID)")
+    email = (env_data.get("ARGUS_ACME_EMAIL") or "").strip()
+    if email and not _EMAIL_RE.match(email):
+        errors.append(f"ARGUS_ACME_EMAIL={email} ist keine E-Mail-Adresse")
+    return errors, warnings
 
 
 def run_doctor(repo_root: Path, verify_models: bool = False) -> tuple[int, list[DoctorResult]]:
@@ -1952,7 +2104,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-proxy", dest="use_proxy", action="store_false", default=None,
                         help="Mitgelieferten TLS-Proxy nicht aktivieren.")
     parser.add_argument("--tls-mode", type=str, default=None,
-                        help="TLS-Modus fuer den Proxy (internal, acme, files; Standard: internal).")
+                        help="TLS-Modus fuer den Proxy (internal, acme, acme-intern, files; Standard: internal).")
+    parser.add_argument("--acme-email", type=str, default=None,
+                        help="E-Mail fuer das ACME-Konto (optional, Modi acme und acme-intern).")
+    parser.add_argument("--acme-ca", type=str, default=None,
+                        help="ACME-CA: production oder staging (Let's Encrypt, Modus acme) bzw. die "
+                             "https-Adresse der eigenen CA (Modus acme-intern).")
     parser.add_argument("--voice", dest="use_voice", action="store_true", default=None,
                         help="Spracheingabe und Vorlesen (Profil 'voice') aktivieren.")
     parser.add_argument("--no-voice", dest="use_voice", action="store_false", default=None,
@@ -2129,6 +2286,8 @@ def main(argv: list[str] | None = None) -> int:
     server_url = ""
     use_proxy = False
     tls_mode = "internal"
+    acme_email: str | None = args.acme_email
+    acme_ca: str | None = args.acme_ca
     if args.server_url:
         valid, err = validate_server_url(args.server_url)
         if not valid:
@@ -2158,11 +2317,29 @@ def main(argv: list[str] | None = None) -> int:
                 tls_mode = args.tls_mode
             else:
                 tls_mode = prompt_choice(
-                    "TLS-Modus [internal = eigene CA, acme = Let's Encrypt, files = eigenes Zertifikat]",
+                    "TLS-Modus [internal = eigene CA, acme = Let's Encrypt, acme-intern = ACME-CA "
+                    "der Firma, files = eigenes Zertifikat]",
                     choices=list(VALID_TLS_MODES),
                     default="internal",
                     non_interactive=args.yes,
                 )
+            if tls_mode in ("acme", "acme-intern") and acme_email is None:
+                acme_email = prompt_text("E-Mail fuer das ACME-Konto (leer = ohne)", "",
+                                         non_interactive=args.yes)
+            if tls_mode == "acme" and acme_ca is None:
+                acme_ca = "staging" if prompt_bool(
+                    "Zuerst mit der Test-CA (Staging) von Let's Encrypt? Ihren Zertifikaten "
+                    "vertraut kein Browser, dafuer gibt es keine engen Grenzen beim Ausprobieren.",
+                    default=False, non_interactive=args.yes) else "production"
+            if tls_mode == "acme-intern" and acme_ca is None:
+                acme_ca = prompt_text("Adresse der eigenen ACME-CA (https://.../directory)", "",
+                                      non_interactive=args.yes)
+            try:
+                compute_server_env(server_url, use_proxy=True, tls_mode=tls_mode,
+                                   acme_email=acme_email, acme_ca=acme_ca)
+            except ValueError as e:
+                print(f"Fehler: {e}")
+                return 1
 
     if args.use_voice is not None:
         use_voice = args.use_voice
@@ -2241,7 +2418,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{gesetzt['LLM_N_CPU_MOE']} Schichten mit Experten im RAM, Bild-Encoder {auf_karte}.")
 
     if server_url:
-        update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode)
+        update_server_env(repo_root, server_url, use_proxy=use_proxy, tls_mode=tls_mode,
+                          acme_email=acme_email, acme_ca=acme_ca)
     update_compose_profiles(repo_root, use_voice=use_voice, use_tracing=use_tracing, use_web=use_web)
     if selinux_enforcing():
         configure_selinux_label(repo_root, non_interactive=args.yes)

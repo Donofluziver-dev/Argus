@@ -385,8 +385,9 @@ These are known and not solved yet:
 - An administrator can clear the audit log in the database (this is recorded and forwarded
   to the SIEM); the log is final only in the SIEM. Over UDP, entries lost on the way to the
   SIEM go unnoticed.
-- The bundled TLS proxy is tested locally with its own CA and with a company certificate, not
-  yet with Let's Encrypt.
+- The bundled TLS proxy is tested locally with its own CA, with a company certificate and
+  against Pebble (Let's Encrypt's test server, mode `acme-intern`); a run against the real Let's
+  Encrypt on a server with a public name is still missing.
 - Web search (SearXNG, AGPL) and tracing (Phoenix, Elastic License) can be switched off
   (profiles `web`, `tracing`) but not replaced by other services. The AGPL is no obstacle:
   Argus runs SearXNG unmodified and internally. The engines behind it are the issue: SearXNG
@@ -467,7 +468,7 @@ memory, speech about 5 GB. The GPU variants are separate images (`…-gpu`) adde
 `compose/gpu-suche.yml` and `compose/gpu-sprache.yml` in `COMPOSE_FILE`; the read-aloud build
 downloads NVIDIA's CUDA development image (about 4 GB) once. Options: `--yes`,
 `--llm qwen|gemma`, `--suche gpu|cpu`, `--sprache gpu|cpu`, `--workspace`, `--models`, `--server-url`,
-`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme`, `--voice` / `--no-voice`,
+`--proxy` / `--no-proxy`, `--tls-mode internal|files|acme|acme-intern`, `--acme-ca`, `--acme-email`, `--voice` / `--no-voice`,
 `--tracing` / `--no-tracing`, `--web` / `--no-web`, `--bundle <dir>`,
 `--image-prefix` / `--image-version`,
 `--no-models`, `--no-start`, `--models-only`. `install.cmd` is plain batch without PowerShell;
@@ -539,7 +540,9 @@ For a server with several users the stack brings Caddy as a TLS proxy (compose p
 `proxy`, off by default). The installer sets it up when it is given a server address, for
 example `./install.sh --server-url https://argus.example.org --tls-mode files`. TLS modes:
 `internal` (Caddy's own CA; its root certificate has to be trusted on the users' machines),
-`files` (the company's `cert.pem` and `key.pem` in `proxy/certs`) and `acme` (Let's Encrypt).
+`files` (the company's `cert.pem` and `key.pem` in `proxy/certs`), `acme` (Let's Encrypt only,
+`ARGUS_ACME_CA` production or staging, needs a public DNS name and port 80 or 443 from the
+internet) and `acme-intern` (the company's own ACME CA, its root as `proxy/certs/acme-root.pem`).
 Caddy runs as `ARGUS_UID` without capabilities, only in the network `edge` shared with
 `rag-backend`. The backend takes client address and scheme from `X-Forwarded-*` only from
 `ARGUS_TRUSTED_PROXIES`. The rate limit counts per account (session or API token); only login,

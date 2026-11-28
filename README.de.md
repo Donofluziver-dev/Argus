@@ -587,8 +587,9 @@ sollte sie kennen.
   vermerkt und mit `AUDIT_SIEM` auch ans SIEM gemeldet. Unveränderlich ist das Protokoll erst
   dort. Über UDP bemerkt Argus nicht, wenn ein Eintrag unterwegs verloren geht.
 - **Betrieb:** Wer Docker auf dem Server bedienen darf, hat dort praktisch Admin-Rechte. Der
-  mitgelieferte TLS-Proxy ist lokal mit eigener CA und mit eigenem Zertifikat getestet, mit
-  Let's Encrypt noch nicht.
+  mitgelieferte TLS-Proxy ist lokal mit eigener CA, mit eigenem Zertifikat und gegen Pebble
+  (den Test-Server von Let's Encrypt, Modus `acme-intern`, Bezug per TLS-ALPN-01) getestet.
+  Gegen die echte Let's Encrypt fehlt noch ein Lauf auf einem Server mit öffentlichem Namen.
 - **Lizenzen als Module:** Websuche (SearXNG, AGPL) und Ablaufverfolgung (Phoenix, Elastic
   License) lassen sich abschalten (Profile `web`, `tracing`), aber nicht gegen andere Dienste
   austauschen. Die AGPL ist kein Hindernis: Argus nutzt SearXNG unverändert und nur intern.
@@ -883,7 +884,24 @@ Server-Adresse läuft, etwa `./install.sh --server-url https://argus.example.org
 |---|---|
 | `internal` (Standard) | Caddy stellt es mit einer eigenen CA aus. Deren Stammzertifikat liegt nach dem ersten Start unter `proxy/data/caddy/pki/authorities/local/root.crt` und muss auf den Rechnern der Nutzer als vertrauenswürdig eingetragen werden, etwa per Gruppenrichtlinie. |
 | `files` | Zertifikat der Firma: `cert.pem` (samt Zwischenzertifikaten) und `key.pem` in `proxy/certs` (`ARGUS_TLS_DIR`). Unter Linux reicht es, wenn beide dem installierenden Nutzer gehören, auch mit Rechten `0600`. |
-| `acme` | Let's Encrypt. Braucht einen öffentlichen DNS-Namen und die Ports 80 und 443 aus dem Internet. |
+| `acme` | Let's Encrypt, nur dieser Aussteller. Braucht einen öffentlichen DNS-Namen, der auf den Server zeigt, und Port 80 oder 443 aus dem Internet. `ARGUS_ACME_CA` wählt Produktion oder Staging (zum Ausprobieren, Zertifikat vertraut kein Browser), `ARGUS_ACME_EMAIL` das Konto (optional). |
+| `acme-intern` | ACME-CA der Firma (etwa step-ca): Adresse in `ARGUS_ACME_CA`, ihr Stammzertifikat als `proxy/certs/acme-root.pem`. Kein öffentlicher DNS-Name nötig, die CA muss den Server nur im Firmennetz erreichen. |
+
+**Welche Art wofür.** Ein Server mit öffentlichem Namen, etwa eine Test-VM in Azure: `acme`.
+Ein Server im Firmennetz ohne Zugang aus dem Internet: `files` mit einem Zertifikat der
+Firmen-CA, oder `acme-intern`, wenn die Firma eine ACME-CA betreibt; `internal` nur, wenn
+die eigene CA von Caddy per Gruppenrichtlinie verteilt wird. Let's Encrypt veröffentlicht
+jeden ausgestellten Namen im Certificate-Transparency-Log; ein interner Servername gehört
+dort nicht hin.
+
+**Let's Encrypt auf einer Azure-VM:** In der Netzwerksicherheitsgruppe der VM 80 und 443
+eingehend freigeben (sonst nichts), der öffentlichen IP ein DNS-Label geben
+(`<label>.<region>.cloudapp.azure.com`) oder einen eigenen Namen per DNS-Eintrag auf sie
+zeigen lassen, dann
+`./install.sh --server-url https://<name> --tls-mode acme --acme-ca staging`. Erscheint im
+Log von `caddy` „certificate obtained successfully“, mit `--acme-ca production` noch einmal
+laufen lassen und `caddy` neu starten. `./install.sh doctor` prüft Name, Ports und Bindung
+vorab. Das Zertifikat liegt in `proxy/data` und überlebt Neustarts; Caddy erneuert es selbst.
 
 Caddy läuft als `ARGUS_UID` ohne Capabilities und mit schreibgeschütztem Dateisystem. Er
 leitet HTTP auf HTTPS um, setzt HSTS und puffert den Chat-Stream nicht. Ein `X-Forwarded-For`,

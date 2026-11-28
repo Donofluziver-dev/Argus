@@ -937,7 +937,8 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     # 3. Interaktive Fragen (Auswahl 2 -> URL -> Proxy Ja -> TLS-Modus acme -> Sprache Ja -> Tracing Ja
     #    -> Web Ja -> Suche CPU -> Sprache CPU)
     (repo / ".env").unlink()
-    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "j", "j", "j", "2", "2", "n", "n"])
+    answers = iter(["2", "https://interaktiv.example.org", "j", "acme", "it@example.org", "n",
+                    "j", "j", "j", "2", "2", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     rc3 = installer.main([
         "--no-models", "--no-start",
@@ -949,6 +950,8 @@ def test_installer_main_proxy_cli_and_interactive_questions(installer, tmp_path,
     assert env3["ARGUS_DOMAIN"] == "interaktiv.example.org"
     assert env3["ARGUS_TLS_MODE"] == "acme"
     assert env3["ARGUS_TRUSTED_PROXIES"] == "172.31.250.0/29"
+    assert env3["ARGUS_ACME_EMAIL"] == "it@example.org"
+    assert env3["ARGUS_ACME_CA"] == installer.ACME_CA_URLS["production"]
 
 
 def _own_ugid() -> dict[str, str]:
