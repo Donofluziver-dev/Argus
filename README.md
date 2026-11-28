@@ -490,6 +490,14 @@ Optional parts are compose profiles, set in `COMPOSE_PROFILES` in `.env` (defaul
 - `web`: SearXNG and `local-proxy`
 - `proxy`: Caddy
 
+Read-aloud has limits so that one account cannot occupy the speech service for everyone: the
+UI reads an answer in sections of about 450 characters (the next is fetched while the current
+one plays, stop cancels pending requests in the speech service too), the backend accepts at
+most `DASHBOARD_TTS_MAX_CHARS` (1500) per request, `DASHBOARD_TTS_PARALLEL` (2) at a time and
+`DASHBOARD_TTS_CHARS_PER_MINUTE` (8000) per account, and at most `TTS_MAX_QUEUE` (4) requests
+wait behind the running synthesis. The audio cache is separated per account; the text read
+aloud appears in no container log.
+
 The backend detects what runs. Without `voice` the interface hides microphone and read-aloud.
 Without `web` Argus offers no tool that reaches the internet; only the cloud module remains,
 if it is switched on. The installer or `setup/init_stack.py` migrates an older `.env`

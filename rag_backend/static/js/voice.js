@@ -243,7 +243,16 @@ window.argusAudioLevel = (function () {
       if (hint) hint.textContent = (on || !voiceOn) ? 'Esc bricht ab' : 'Leertaste zum Sprechen · Esc bricht ab';
     }
 
+    // Laufendes Vorlesen: Jeder Stopp zaehlt sprechLauf hoch und beendet damit die
+    // Abschnitt-Schleife in speak(); ttsAbbruch bricht die offenen Abrufe ab. Das
+    // Backend reicht den Abbruch an den Sprachdienst weiter, der dann nicht mehr
+    // weiterrechnet -- sonst wartete jeder andere hinter einer verworfenen Synthese.
+    let sprechLauf = 0;
+    let ttsAbbruch = null;
+
     function stopAudio() {
+      sprechLauf++;
+      if (ttsAbbruch) { ttsAbbruch.abort(); ttsAbbruch = null; }
       if (audio) { audio.pause(); audio = null; }
       window.argusAudioLevel.stop();
     }
@@ -276,14 +285,64 @@ window.argusAudioLevel = (function () {
       });
     }
 
-    // Gesprochene Absaetze bleiben als Blob liegen: ein zweites VORLESEN
+    // Gesprochene Abschnitte bleiben als Blob liegen: ein zweites VORLESEN
     // desselben Textes soll nicht noch einmal synthetisiert werden. Der
     // tts-service cacht ebenfalls -- das hier spart zusaetzlich den Transfer.
-    // Klein gehalten, ein Absatz Audio sind schnell ein paar hundert KB.
+    // Klein gehalten, ein Abschnitt Audio sind schnell ein paar hundert KB.
     const ttsCache = new Map();
-    const TTS_CACHE_MAX = 8;
+    const TTS_CACHE_MAX = 16;
+    // Laenge eines Abschnitts. Das Backend nimmt hoechstens DASHBOARD_TTS_MAX_CHARS
+    // (1500) am Stueck; 450 Zeichen sind rund 30 s Sprache und auf der CPU in etwa
+    // 40 s gerechnet, auf der Grafikkarte in rund 10 s.
+    const TTS_ABSCHNITT = 450;
 
-    async function ttsBlob(text) {
+    // Quellenliste am Ende und Code-Bloecke vor dem Teilen entfernen: Danach stuenden
+    // sie in eigenen Abschnitten, und der Sprachdienst erkennte sie nicht mehr.
+    function ttsVorbereiten(text) {
+      let t = String(text || '').replace(/```[\s\S]*?```/g, ' Codeblock. ');
+      const ende = t.search(/\n[ \t]*(verwendete[ \t]+quellen|verwendete[ \t]+urls|quellenangaben|quellen|sources)[ \t]*:/i);
+      if (ende >= 0) t = t.slice(0, ende);
+      return t;
+    }
+
+    function ttsZerlege(satz) {
+      if (satz.length <= TTS_ABSCHNITT) return [satz];
+      const out = [];
+      let rest = satz;
+      while (rest.length > TTS_ABSCHNITT) {
+        let cut = Math.max(rest.lastIndexOf(', ', TTS_ABSCHNITT), rest.lastIndexOf('; ', TTS_ABSCHNITT));
+        if (cut < TTS_ABSCHNITT / 2) cut = rest.lastIndexOf(' ', TTS_ABSCHNITT);
+        if (cut < TTS_ABSCHNITT / 2) cut = TTS_ABSCHNITT;
+        out.push(rest.slice(0, cut + 1).trim());
+        rest = rest.slice(cut + 1).trim();
+      }
+      if (rest) out.push(rest);
+      return out;
+    }
+
+    // Abschnitte von hoechstens TTS_ABSCHNITT Zeichen, geteilt an Satzenden, zur Not
+    // an Kommas und Leerzeichen. Kurze Absaetze (Ueberschriften, Aufzaehlungen)
+    // teilen sich einen Abschnitt; ein Absatz ohne Satzzeichen am Ende bekommt einen
+    // Punkt, damit die Stimme dort absetzt.
+    function ttsAbschnitte(text) {
+      const teile = [];
+      let akt = '';
+      ttsVorbereiten(text).split(/\n\s*\n/).forEach(function (absatz) {
+        absatz = absatz.replace(/\s+/g, ' ').trim();
+        if (!absatz) return;
+        if (!/[.!?:\u2026]$/.test(absatz)) absatz += '.';
+        absatz.split(/(?<=[.!?\u2026])\s+/).forEach(function (satz) {
+          ttsZerlege(satz).forEach(function (stueck) {
+            if (akt && akt.length + 1 + stueck.length > TTS_ABSCHNITT) { teile.push(akt); akt = stueck; }
+            else akt = akt ? akt + ' ' + stueck : stueck;
+          });
+        });
+      });
+      if (akt) teile.push(akt);
+      return teile.filter(function (t) { return /[A-Za-z0-9\u00c0-\u024f]/.test(t); });
+    }
+
+    async function ttsBlob(text, signal) {
       const treffer = ttsCache.get(text);
       if (treffer) {
         // Neu einsortieren, damit Haeufiges nicht herausfaellt.
@@ -293,36 +352,76 @@ window.argusAudioLevel = (function () {
       }
       const r = await fetch('/v1/dashboard/tts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: text })
+        body: JSON.stringify({ input: text }), signal: signal
       });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (!r.ok) {
+        let grund = '';
+        try { grund = (await r.json()).detail || ''; } catch (e) { /* kein JSON */ }
+        throw new Error(grund || ('HTTP ' + r.status));
+      }
       const blob = await r.blob();
       ttsCache.set(text, blob);
       while (ttsCache.size > TTS_CACHE_MAX) ttsCache.delete(ttsCache.keys().next().value);
       return blob;
     }
 
+    // Spielt einen Abschnitt; das Versprechen erfuellt sich am Ende, bei einem Fehler
+    // oder wenn stopAudio() anhaelt.
+    function ttsSpiele(blob) {
+      return new Promise(function (resolve) {
+        const url = URL.createObjectURL(blob);
+        const a = new Audio(url);
+        audio = a;
+        a.crossOrigin = 'anonymous';
+        let fertig = false;
+        const ende = function () {
+          if (fertig) return;
+          fertig = true;
+          URL.revokeObjectURL(url);
+          if (audio === a) audio = null;
+          resolve();
+        };
+        a.onended = ende;
+        a.onerror = ende;
+        a.onpause = ende;
+        // Pegel erst nach play(): vorher ist der Audio-Kontext in manchen Browsern
+        // noch gesperrt und der Pegel bliebe auf null.
+        a.play().then(function () { window.argusAudioLevel.vomAudio(a); }).catch(ende);
+      });
+    }
+
+    // Liest in Abschnitten vor: Der naechste wird geholt, waehrend der aktuelle
+    // laeuft. So beginnt die Ausgabe nach dem ersten Abschnitt statt nach der ganzen
+    // Antwort, und keine Anfrage sprengt die Grenzen des Backends.
     async function speak(text) {
       const voiceOn = !window.argusFeatures || window.argusFeatures.voice !== false;
       if (!ttsOn || !voiceOn || !text) { setState('idle'); return; }
+      stopAudio();
+      const lauf = sprechLauf;
+      const abbruch = new AbortController();
+      ttsAbbruch = abbruch;
+      const teile = ttsAbschnitte(text);
+      if (!teile.length) { setState('idle'); return; }
+      setState('speaking');
+      let naechster = ttsBlob(teile[0], abbruch.signal);
       try {
-        setState('speaking');
-        const url = URL.createObjectURL(await ttsBlob(text));
-        audio = new Audio(url);
-        audio.crossOrigin = 'anonymous';
-        audio.onended = function () {
-          URL.revokeObjectURL(url); audio = null;
-          window.argusAudioLevel.stop(); setState('idle');
-        };
-        audio.onerror = function () {
-          URL.revokeObjectURL(url); audio = null;
-          window.argusAudioLevel.stop(); setState('idle');
-        };
-        await audio.play();
-        // Erst nach play(): vorher ist der Audio-Kontext in manchen Browsern noch
-        // gesperrt und der Pegel bliebe auf null.
-        window.argusAudioLevel.vomAudio(audio);
-      } catch (e) { setState('idle'); }
+        for (let i = 0; i < teile.length; i++) {
+          const blob = await naechster;
+          if (lauf !== sprechLauf) return;
+          naechster = i + 1 < teile.length ? ttsBlob(teile[i + 1], abbruch.signal) : null;
+          if (naechster) naechster.catch(function () { /* wird beim await behandelt */ });
+          await ttsSpiele(blob);
+          if (lauf !== sprechLauf) return;
+        }
+      } catch (e) {
+        if (lauf === sprechLauf && !(e && e.name === 'AbortError')) note('Vorlesen: ' + ((e && e.message) || e));
+      } finally {
+        if (lauf === sprechLauf) {
+          ttsAbbruch = null;
+          window.argusAudioLevel.stop();
+          setState('idle');
+        }
+      }
     }
 
     let rec = null, chunks = [], recording = false;

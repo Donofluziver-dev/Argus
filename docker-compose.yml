@@ -338,6 +338,9 @@ services:
       # Audio-Cache: gleicher Text = gleiche Bytes, zweites Vorlesen ist gratis.
       - TTS_CACHE_MAX_ENTRIES=${TTS_CACHE_MAX_ENTRIES:-64}
       - TTS_CACHE_MAX_MB=${TTS_CACHE_MAX_MB:-256}
+      # Schutzgrenzen: wartende Anfragen hinter der laufenden Synthese, Zeichen je Anfrage.
+      - TTS_MAX_QUEUE=${TTS_MAX_QUEUE:-4}
+      - TTS_MAX_INPUT_CHARS=${TTS_MAX_INPUT_CHARS:-4000}
       # OMP/OPENBLAS auf 1 gegen Oversubscription neben den GGML-Threads.
       # GGML_NUM_THREADS=6 = gemessener Sweet Spot (SMT im BIOS aus).
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
@@ -354,6 +357,9 @@ services:
     cap_drop:
       - ALL
     mem_limit: 12g
+    # Obergrenze fuer die CPU: Die Synthese rechnet mit GGML_NUM_THREADS (6) Threads
+    # und soll Modell, Backend und Suche auf demselben Rechner nicht verdraengen.
+    cpus: "${ARGUS_TTS_CPUS:-6.0}"
     pids_limit: 256
     ulimits:
       memlock: -1

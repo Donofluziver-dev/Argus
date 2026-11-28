@@ -11,6 +11,7 @@ import json
 import secrets
 import re
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2577,7 +2578,65 @@ async def dashboard_stt(request: Request, file: UploadFile = File(...),
 
 class DashboardTtsIn(BaseModel):
     input: str
-    voice: str | None = None
+    voice: str | None = Field(default=None, max_length=32)
+
+
+#--- Schutzgrenzen fuers Vorlesen. Der Sprachdienst rechnet eine Synthese nach der
+#--- anderen, und auf der CPU dauert eine Sekunde Sprache rund 1,3 s. Ohne Grenzen
+#--- konnte ein einziges Konto ihn mit langen Texten fuer alle anderen belegen. Die
+#--- Oberflaeche schickt eine Antwort darum in Abschnitten (voice.js), jeder davon
+#--- muss unter DASHBOARD_TTS_MAX_CHARS bleiben.
+_TTS_MAX_CHARS = _env_int("DASHBOARD_TTS_MAX_CHARS", 1500)
+_TTS_CHARS_PER_MINUTE = _env_int("DASHBOARD_TTS_CHARS_PER_MINUTE", 8000)
+_TTS_PARALLEL = _env_int("DASHBOARD_TTS_PARALLEL", 2)
+try:
+    _TTS_SECONDS_PER_CHAR = float(os.getenv("DASHBOARD_TTS_SECONDS_PER_CHAR", "0.15"))
+except ValueError:
+    _TTS_SECONDS_PER_CHAR = 0.15
+_TTS_USAGE: dict[int, deque] = {}
+_TTS_ACTIVE: dict[int, int] = {}
+
+
+def _tts_budget_take(user_id: int, chars: int) -> bool:
+    """Zeichenbudget je Konto und Minute. Nur im Event-Loop aufgerufen, ohne await
+    dazwischen; eine Sperre braucht es deshalb nicht."""
+    now = time.monotonic()
+    used = _TTS_USAGE.setdefault(user_id, deque())
+    while used and now - used[0][0] > 60:
+        used.popleft()
+    if sum(c for _, c in used) + chars > _TTS_CHARS_PER_MINUTE:
+        return False
+    used.append((now, chars))
+    return True
+
+
+def _tts_cache_scope(user_id: int) -> str:
+    """Kennung fuer den Audio-Cache des Sprachdienstes, je Konto verschieden und ohne
+    Rueckschluss auf die Konto-ID. Ein Treffer im fremden Cache verriete sonst, dass
+    ein anderes Konto genau diesen Text vorlesen liess."""
+    return hmac.new(JWT_SECRET.encode("utf-8"), f"tts-cache:{user_id}".encode("utf-8"),
+                    "sha256").hexdigest()[:32]
+
+
+async def _post_unless_disconnected(request: Request, client, url: str, **kwargs):
+    """POST an einen Nachbardienst, abgebrochen, sobald der Browser die Anfrage
+    aufgibt (Stopp, Mikrofon, neue Frage). Der Abbruch schliesst die Verbindung zum
+    Dienst; der Sprachdienst verwirft die Synthese dann ebenfalls. None = Client weg."""
+    post = asyncio.ensure_future(client.post(url, **kwargs))
+    try:
+        while True:
+            done, _ = await asyncio.wait({post}, timeout=0.5)
+            if done:
+                return post.result()
+            if await request.is_disconnected():
+                return None
+    finally:
+        if not post.done():
+            post.cancel()
+            try:
+                await post
+            except BaseException:
+                pass
 
 
 @app.post("/v1/dashboard/tts", tags=["Dashboard"])
@@ -2591,19 +2650,50 @@ async def dashboard_tts(body: DashboardTtsIn, request: Request,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Sprache ist auf diesem Server nicht eingerichtet.",
         )
+    text = body.input or ""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Kein Text zum Vorlesen.")
+    if len(text) > _TTS_MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Zu viel Text am Stueck zum Vorlesen (hoechstens {_TTS_MAX_CHARS} Zeichen).")
+    uid = user.id
+    if _TTS_ACTIVE.get(uid, 0) >= _TTS_PARALLEL:
+        raise HTTPException(status_code=429, detail="Es wird bereits vorgelesen.")
+    if not _tts_budget_take(uid, len(text)):
+        raise HTTPException(status_code=429,
+                            detail="Zu viel Text zum Vorlesen in kurzer Zeit. Bitte kurz warten.")
     import httpx
     url = os.getenv("TTS_SERVICE_URL", "http://tts-service:8002").rstrip("/") + "/v1/audio/speech"
-    payload = {"model": os.getenv("AUDIO_TTS_MODEL", "tts-1"), "input": body.input,
+    payload = {"model": os.getenv("AUDIO_TTS_MODEL", "tts-1"), "input": text,
                "voice": body.voice or os.getenv("AUDIO_TTS_VOICE", "alloy")}
+    _TTS_ACTIVE[uid] = _TTS_ACTIVE.get(uid, 0) + 1
     try:
         headers = _voice_auth_headers()
-        async with httpx.AsyncClient(timeout=120.0) as c:
-            r = await c.post(url, headers=headers, json=payload)
+        headers["X-Argus-Cache-Scope"] = _tts_cache_scope(uid)
+        #--- Zeit nach Laenge: ein Abschnitt von 500 Zeichen braucht auf der CPU rund
+        #--- 45 s, dazu kommt die Wartezeit hinter anderen Synthesen.
+        timeout = 30.0 + len(text) * _TTS_SECONDS_PER_CHAR
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await _post_unless_disconnected(request, c, url, headers=headers, json=payload)
+        if r is None:
+            return Response(status_code=499)
+        if r.status_code == 503:
+            raise HTTPException(status_code=503,
+                                detail="Vorlesen ist ausgelastet, bitte gleich noch einmal versuchen.")
         r.raise_for_status()
         return Response(content=r.content, media_type=r.headers.get("content-type", "audio/wav"))
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         log.exception("TTS-Dienst-Aufruf fehlgeschlagen")
         raise HTTPException(status_code=502, detail="TTS-Dienst nicht erreichbar.")
+    finally:
+        left = _TTS_ACTIVE.get(uid, 1) - 1
+        if left > 0:
+            _TTS_ACTIVE[uid] = left
+        else:
+            _TTS_ACTIVE.pop(uid, None)
 
 
 # ---- Dateien: hochladen, indexieren #---

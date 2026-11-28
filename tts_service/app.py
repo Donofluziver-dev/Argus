@@ -16,7 +16,7 @@ from cryptography.fernet import Fernet
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --- Konfiguration (alle via docker-compose/.env ueberschreibbar) ---
 QWEN_TALKER = os.getenv("QWEN_TALKER", "/app/models/qwen-talker-1.7b-customvoice-Q8_0.gguf")
@@ -54,29 +54,43 @@ CLONE_CONFIGURED = bool(QWEN_CLONE_REF_WAV or QWEN_CLONE_REF_SPK)
 CLONE_MODE = _ref_present(QWEN_CLONE_REF_WAV) or _ref_present(QWEN_CLONE_REF_SPK)
 
 MAX_INPUT_CHARS = int(os.getenv("TTS_MAX_INPUT_CHARS", "4000"))
+#--- Schutzgrenzen. Der Rohtext wird vor der Bereinigung gekuerzt: Die Bereinigung
+#--- soll nie mehr Text sehen, als danach ueberhaupt gesprochen werden kann.
+#--- Laengere Anfragen weist der Dienst ganz ab (422), ohne sie zu verarbeiten.
+RAW_MAX_CHARS = int(os.getenv("TTS_RAW_MAX_CHARS", str(4 * MAX_INPUT_CHARS)))
+REQUEST_MAX_CHARS = int(os.getenv("TTS_REQUEST_MAX_CHARS", "100000"))
+#--- Eine Synthese zur Zeit (das Modell ist einmal geladen). Mehr als TTS_MAX_QUEUE
+#--- wartende Anfragen bekommen sofort 503 statt minutenlang zu warten.
+MAX_QUEUE = int(os.getenv("TTS_MAX_QUEUE", "4"))
+_DISCONNECT_POLL_SECONDS = 0.5
 SAMPLE_RATE = 24000
 _synth_lock = asyncio.Lock()
+_waiting = 0
 _server_proc = None
 _http = None
 
 # --- Markdown/Code aus dem Text fuer die Sprachausgabe entfernen ---
 # ZENTRALE Bereinigung fuer ALLE Voice-Clients: Quellen-Trailer,
 # Markdown-Links -> Linktext, Zahlenbereiche "16-17" -> "16 bis 17".
+# Jeder Ausdruck laeuft in linearer Zeit: Wiederholungen, die zurueckgehen koennten,
+# sind auf Leerzeichen und Tabulatoren innerhalb einer Zeile oder auf eine feste
+# Hoechstlaenge begrenzt. Frueher konnte "\n\s*" bzw. "^[\s]*" ueber beliebig viele
+# Zeilenumbrueche laufen: 40.000 Umbrueche blockierten den Dienst 34 s.
 _CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`]+`")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]{1,500}`")
 _URL_RE = re.compile(r"https?://\S+")
-_MD_HEAD_RE = re.compile(r"^#+\s*", re.MULTILINE)
-_MD_BULLET_RE = re.compile(r"^[\s]*[-*]\s+", re.MULTILINE)
+_MD_HEAD_RE = re.compile(r"^#+[ \t]*", re.MULTILINE)
+_MD_BULLET_RE = re.compile(r"^[ \t]*[-*][ \t]+", re.MULTILINE)
 _MD_BOLD_ITALIC_RE = re.compile(r"\*+|_+")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 # Quellen-/URL-Trailer am Antwortende ("Verwendete Quellen: ...") nicht vorlesen.
 _SOURCES_TRAILER_RE = re.compile(
-    r"(?is)\n\s*(?:verwendete\s+quellen|verwendete\s+urls|quellenangaben|quellen|sources)\s*:.*"
+    r"(?is)\n[ \t]{0,40}(?:verwendete[ \t]{1,5}quellen|verwendete[ \t]{1,5}urls|quellenangaben|quellen|sources)[ \t]{0,5}:.*"
 )
 # Markdown-Link [Text](url) -> nur den Linktext behalten.
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://)?[^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\[\]\n]{1,300})\]\((?:https?://)?[^()\s]{0,2000}\)")
 # Zahlenbereiche ausschreiben; uebrige Striche -> Leerzeichen.
-_NUM_RANGE_RE = re.compile(r"(\d)\s*[-\u2013\u2014]\s*(\d)")
+_NUM_RANGE_RE = re.compile(r"(\d)[ \t]{0,3}[-\u2013\u2014][ \t]{0,3}(\d)")
 _DASH_RE = re.compile(r"[-\u2013\u2014]")
 
 def _strip_for_tts(text: str) -> str:
@@ -95,8 +109,8 @@ def _strip_for_tts(text: str) -> str:
 
 
 class SpeechRequest(BaseModel):
-    input: str
-    voice: str | None = None
+    input: str = Field(max_length=REQUEST_MAX_CHARS)
+    voice: str | None = Field(default=None, max_length=64)
     # Default mp3 fuer Browser-Clients; ogg nur auf ausdrueckliche Anfrage.
     response_format: str = "mp3"
     # Optionaler Client-Kurz-Cut, NACH _strip_for_tts satzweise angewendet.
@@ -256,16 +270,24 @@ def _audio_to_mp3(audio: bytes) -> bytes:
     return proc.stdout
 
 
+def _effective_voice(voice: str | None) -> str:
+    """Der Sprecher, mit dem wirklich synthetisiert wird. Im Clone-Modus gibt es nur
+    die geklonte Stimme. Sonst VERLANGT CustomVoice einen gueltigen Sprecher, sonst
+    liefert der Server stumme 0 Bytes; unbekannte Namen (Open WebUI schickt
+    OpenAI-Stimmen) fallen auf den eingestellten zurueck."""
+    if CLONE_MODE:
+        return "clone"
+    req_voice = (voice or "").strip().lower()
+    if req_voice not in QWEN_KNOWN_VOICES:
+        env_voice = QWEN_VOICE.strip().lower()
+        req_voice = env_voice if env_voice in QWEN_KNOWN_VOICES else QWEN_DEFAULT_VOICE
+    return req_voice
+
+
 async def _synth_server(text: str, voice: str | None) -> bytes:
     payload = {"input": text}
     if not CLONE_MODE:
-        # CustomVoice VERLANGT einen gueltigen Sprecher, sonst liefert der
-        # Server stumme 0 Bytes. Im Clone-Modus wird voice ignoriert.
-        req_voice = (voice or "").strip().lower()
-        if req_voice not in QWEN_KNOWN_VOICES:
-            env_voice = QWEN_VOICE.strip().lower()
-            req_voice = env_voice if env_voice in QWEN_KNOWN_VOICES else QWEN_DEFAULT_VOICE
-        payload["voice"] = req_voice
+        payload["voice"] = _effective_voice(voice)
     resp = await _http.post(f"http://127.0.0.1:{QWEN_SERVER_PORT}/v1/audio/speech", json=payload)
     resp.raise_for_status()
     return resp.content
@@ -304,11 +326,14 @@ _tts_cache_bytes = 0
 _tts_cache_hits = 0
 
 
-def _cache_key(text: str, voice: str | None, fmt: str) -> str:
+def _cache_key(text: str, voice: str | None, fmt: str, scope: str = "") -> str:
     # Feldweise gehasht statt zu einem String verkettet: so kann kein
-    # Textinhalt die Feldgrenzen verschieben.
+    # Textinhalt die Feldgrenzen verschieben. voice ist der wirklich genutzte
+    # Sprecher: Verschiedene Namen fuer dieselbe Stimme umgehen den Cache nicht.
+    # scope trennt die Konten (Header X-Argus-Cache-Scope vom Backend): Sonst verriete
+    # ein Treffer in Millisekunden, dass ein anderes Konto diesen Text vorlesen liess.
     h = hashlib.sha256()
-    for teil in (text, (voice or "").strip().lower(), fmt, QWEN_CLONE_REF_WAV,
+    for teil in (len(text), text, _effective_voice(voice), fmt, scope, QWEN_CLONE_REF_WAV,
                  QWEN_CLONE_REF_SPK, QWEN_SEED, QWEN_TEMP):
         h.update(str(teil).encode("utf-8"))
         h.update(b"|")
@@ -341,10 +366,35 @@ def _cache_put(key: str, content: bytes, media_type: str) -> None:
         _tts_cache_bytes -= len(alt)
 
 
+class _ClientGone(Exception):
+    pass
+
+
+async def _unless_client_gone(request: Request, coro):
+    """Fuehrt coro aus; schliesst der Client vorher die Verbindung (Stopp im Browser,
+    Backend hat aufgegeben), wird coro abgebrochen statt zu Ende gerechnet."""
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_DISCONNECT_POLL_SECONDS)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                raise _ClientGone()
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+
 @app.post("/v1/audio/speech")
-async def speech(req: SpeechRequest):
-    global _tts_requests_total
-    text = _strip_for_tts(req.input or "")
+async def speech(req: SpeechRequest, request: Request):
+    global _tts_requests_total, _waiting
+    raw = (req.input or "")[:RAW_MAX_CHARS]
+    text = await asyncio.to_thread(_strip_for_tts, raw)
     if not text:
         raise HTTPException(status_code=400, detail="Leerer Input nach Bereinigung.")
     if req.max_chars and req.max_chars > 0 and len(text) > req.max_chars:
@@ -359,22 +409,33 @@ async def speech(req: SpeechRequest):
         text = text[:MAX_INPUT_CHARS]
     # Unbekannte Formate fallen auf mp3 zurueck statt 400.
     fmt = (req.response_format or "mp3").lower()
-    key = _cache_key(text, req.voice, fmt)
+    scope = (request.headers.get("x-argus-cache-scope") or "")[:64]
+    key = _cache_key(text, req.voice, fmt, scope)
     cached = _cache_get(key)
     if cached is not None:
         # Bewusst VOR dem Lock: ein Treffer wartet nicht auf eine laufende
         # Synthese. Und bewusst ohne Metrik-Eintrag -- eine Auslieferung in
         # Millisekunden wuerde den RTF-Schnitt verfaelschen.
         return Response(content=cached[0], media_type=cached[1])
-    t0 = time.perf_counter()
-    async with _synth_lock:
-        # Zweite Pruefung im Lock: warteten zwei Anfragen auf denselben
-        # Text, hat die erste ihn inzwischen erzeugt.
-        cached = _cache_get(key)
-        if cached is not None:
-            return Response(content=cached[0], media_type=cached[1])
-        try:
-            audio = await _synth_server(text, req.voice)
+    if _waiting >= MAX_QUEUE:
+        raise HTTPException(status_code=503,
+                            detail="Vorlesen ist ausgelastet, bitte gleich noch einmal versuchen.")
+    _waiting += 1
+    queued = True
+    try:
+        async with _synth_lock:
+            _waiting -= 1
+            queued = False
+            # Wer waehrend des Wartens aufgegeben hat, bekommt keine Synthese mehr.
+            if await request.is_disconnected():
+                raise _ClientGone()
+            # Zweite Pruefung im Lock: warteten zwei Anfragen auf denselben
+            # Text, hat die erste ihn inzwischen erzeugt.
+            cached = _cache_get(key)
+            if cached is not None:
+                return Response(content=cached[0], media_type=cached[1])
+            t0 = time.perf_counter()
+            audio = await _unless_client_gone(request, _synth_server(text, req.voice))
             if fmt == "wav":
                 res_content = _to_wav(audio)
                 media_type = "audio/wav"
@@ -401,8 +462,16 @@ async def speech(req: SpeechRequest):
             })
             _cache_put(key, res_content, media_type)
             return Response(content=res_content, media_type=media_type)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"TTS-Fehler: {e}")
+    except _ClientGone:
+        print("[tts] Client vor dem Ende getrennt -- Synthese verworfen.", flush=True)
+        return Response(status_code=499)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS-Fehler: {type(e).__name__}")
+    finally:
+        if queued:
+            _waiting -= 1
 
 
 @app.get("/v1/tts/metrics")

@@ -393,7 +393,11 @@ if _HAS_MAIN_FIXTURES:
         assert seen_calls[0][0].endswith("/v1/audio/transcriptions")
         assert seen_calls[0][1].get("headers") == {"Authorization": "Bearer shared-llm-key-dashboard"}
         assert seen_calls[1][0].endswith("/v1/audio/speech")
-        assert seen_calls[1][1].get("headers") == {"Authorization": "Bearer shared-llm-key-dashboard"}
+        tts_headers = seen_calls[1][1].get("headers")
+        assert tts_headers["Authorization"] == "Bearer shared-llm-key-dashboard"
+        #--- Audio-Cache je Konto: eine Kennung, aus der die Konto-ID nicht hervorgeht.
+        scope = tts_headers["X-Argus-Cache-Scope"]
+        assert len(scope) == 32 and scope.isalnum()
 
 
 if __name__ == "__main__":

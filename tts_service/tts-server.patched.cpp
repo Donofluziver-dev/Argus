@@ -271,8 +271,10 @@ int main(int argc, char ** argv) {
             }
         }
         p.seed = resolved_seed;
-        fprintf(stderr, "[Server] Synthesizing request with seed: %lld (text: \"%s\")\n",
-                (long long) resolved_seed, req.input.c_str());
+        // Argus-Patch: nur die Laenge ins Log, nie den Text (vorgelesene Antworten
+        // enthalten Firmendaten und landeten sonst im Container-Log).
+        fprintf(stderr, "[Server] Synthesizing request with seed: %lld (%zu bytes)\n",
+                (long long) resolved_seed, req.input.size());
 
         if (cli_temp >= 0.0f) {
             p.temperature           = cli_temp;

@@ -844,6 +844,16 @@ und kompiliert einige Minuten. Fertige Images aus einer Registry gibt es nur fü
 Offline-Paket enthält die GPU-Varianten, wenn es auf einem Rechner mit dieser Einstellung
 gebaut wurde.
 
+**Grenzen beim Vorlesen.** Der Sprachdienst rechnet eine Synthese nach der anderen. Damit
+ein Konto ihn nicht für alle belegt, liest die Oberfläche eine Antwort in Abschnitten von
+rund 450 Zeichen vor; der nächste wird geholt, während der aktuelle läuft, und Stopp bricht
+die offenen Anfragen ab, auch im Sprachdienst. Je Anfrage nimmt das Backend höchstens
+`DASHBOARD_TTS_MAX_CHARS` Zeichen (1500), je Konto höchstens `DASHBOARD_TTS_PARALLEL` (2)
+gleichzeitig und `DASHBOARD_TTS_CHARS_PER_MINUTE` (8000) je Minute. Hinter der laufenden
+Synthese warten höchstens `TTS_MAX_QUEUE` (4) Anfragen, weitere bekommen sofort „ausgelastet“.
+Der Audio-Cache des Sprachdienstes ist je Konto getrennt, und der vorgelesene Text steht in
+keinem Container-Log. Auf der CPU begrenzt `ARGUS_TTS_CPUS` (6) die Kerne des Dienstes.
+
 ### Von Hand
 
 1. `python -m pip install cryptography`, dann `python setup/init_stack.py` (mit
